@@ -18,11 +18,7 @@
  */
 import './_shared/env.js'
 
-import {
-  CloudBaseDbDriver,
-  CloudBaseSessionStore,
-  createAgent,
-} from '@cloudbase/open-agent-kernel'
+import { CloudBaseDbDriver, CloudBaseSessionStore, createAgent } from '@cloudbase/open-agent-kernel'
 
 async function main(): Promise<void> {
   const envId = process.env.TCB_ENV_ID
@@ -44,24 +40,18 @@ async function main(): Promise<void> {
   const agent = createAgent({
     envId,
     model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
-    systemPrompt:
-      'You are a helpful assistant. Reply concisely in Chinese. ' +
-      'Remember details across turns.',
+    systemPrompt: 'You are a helpful assistant. Reply concisely in Chinese. ' + 'Remember details across turns.',
     session: { store },
   })
 
   const resumeId = process.env.OAK_RESUME_CONVERSATION_ID
-  const session = resumeId
-    ? await agent.resumeSession(resumeId)
-    : await agent.startSession({ userId: 'demo-user' })
+  const session = resumeId ? await agent.resumeSession(resumeId) : await agent.startSession({ userId: 'demo-user' })
 
   if (resumeId) {
     console.log(`[resume] continuing conversation=${resumeId}`)
   } else {
     console.log(`[start] new conversation=${session.id}`)
-    console.log(
-      `  → 下次跑可以在 .env.local 加 OAK_RESUME_CONVERSATION_ID=${session.id} 来 resume`,
-    )
+    console.log(`  → 下次跑可以在 .env.local 加 OAK_RESUME_CONVERSATION_ID=${session.id} 来 resume`)
   }
 
   // ── 第一轮 ─────────────────────────────────────────────────
@@ -93,9 +83,7 @@ async function main(): Promise<void> {
   // ── 验证：用 envId 直接查 DB 确认数据真的落库 ─────────────────
   console.log('\n--- Diagnostic ---')
   const sessionsInDb = await driver.listSessions(envId)
-  console.log(
-    `sessions in DB (projectKey=${envId}): ${sessionsInDb.length}`,
-  )
+  console.log(`sessions in DB (projectKey=${envId}): ${sessionsInDb.length}`)
   const entries = await driver.loadEntries({ projectKey: envId, sessionId: session.id })
   console.log(`entries for current conversation: ${entries?.length ?? 0}`)
   console.log(`conversation=${session.id}`)

@@ -34,10 +34,7 @@
  *     起 SDK resume → hook 从 DB 读到 decision → 放行 → agent 继续
  */
 
-import type {
-  PendingApproval,
-  PermissionStore,
-} from '../public/types.js'
+import type { PendingApproval, PermissionStore } from '../public/types.js'
 import { InMemoryPermissionDriver } from './drivers/in-memory-driver.js'
 import type { PermissionStoreDriver } from './drivers/types.js'
 
@@ -89,17 +86,11 @@ export class CloudBasePermissionStore implements PermissionStore {
     await this.driver.put({ projectKey: this.projectKey, entry: call })
   }
 
-  async get(key: {
-    conversationId: string
-    toolUseId: string
-  }): Promise<PendingApproval | null> {
+  async get(key: { conversationId: string; toolUseId: string }): Promise<PendingApproval | null> {
     return this.driver.get({ projectKey: this.projectKey, ...key })
   }
 
-  async delete(key: {
-    conversationId: string
-    toolUseId: string
-  }): Promise<void> {
+  async delete(key: { conversationId: string; toolUseId: string }): Promise<void> {
     await this.driver.delete({ projectKey: this.projectKey, ...key })
   }
 
@@ -112,10 +103,7 @@ export class CloudBasePermissionStore implements PermissionStore {
    *
    * driver 在 (projectKey, conversationId, toolName, createdAt desc) 上建索引会更快。
    */
-  async scanRecent(key: {
-    conversationId: string
-    toolName: string
-  }): Promise<PendingApproval | null> {
+  async scanRecent(key: { conversationId: string; toolName: string }): Promise<PendingApproval | null> {
     return this.driver.scanRecent({ projectKey: this.projectKey, ...key })
   }
 }

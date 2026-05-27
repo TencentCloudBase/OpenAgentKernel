@@ -286,9 +286,7 @@ async function injectCredentials(args: {
     })
     if (!res.ok) {
       const text = await res.text().catch(() => '')
-      throw new SandboxError(
-        `inject credentials HTTP ${res.status}: ${text.slice(0, 300)}`,
-      )
+      throw new SandboxError(`inject credentials HTTP ${res.status}: ${text.slice(0, 300)}`)
     }
     const data = (await res.json().catch(() => ({}))) as ToolApiResponse
     if (!data.success) {
@@ -335,11 +333,7 @@ async function discoverCloudBaseTools(
   // 每块 22500 字节明文 → ~30000 字节 base64（< bash stdout 截断 ~45KB 限制）
   const CHUNK_BYTES = 22500
   const chunks: string[] = []
-  for (
-    let offset = 0;
-    offset < totalBytes;
-    offset += CHUNK_BYTES
-  ) {
+  for (let offset = 0; offset < totalBytes; offset += CHUNK_BYTES) {
     // dd skip/count 单位由 bs 决定。这里 bs=1 字节级精度，count=CHUNK_BYTES。
     // status=none 抑制 dd 自身写到 stderr 的统计信息，避免污染 stdout。
     // 把 base64 用 -w0 输出成单行，方便我们直接拼接。
@@ -359,9 +353,7 @@ async function discoverCloudBaseTools(
   }
   const jsonStart = decoded.indexOf('{')
   if (jsonStart < 0) {
-    throw new SandboxError(
-      `mcporter schema is not JSON: ${decoded.slice(0, 200)}`,
-    )
+    throw new SandboxError(`mcporter schema is not JSON: ${decoded.slice(0, 200)}`)
   }
   let parsed: unknown
   try {
@@ -419,9 +411,7 @@ async function callCloudBaseTool(args: CallCloudBaseToolArgs): Promise<string> {
       await reInjectCredentials()
       output = await exec()
     } catch (err) {
-      throw new SandboxError(
-        `cloudbase tool ${toolName} re-inject failed: ${(err as Error).message}`,
-      )
+      throw new SandboxError(`cloudbase tool ${toolName} re-inject failed: ${(err as Error).message}`)
     }
   }
   return output
@@ -437,9 +427,7 @@ async function callCloudBaseTool(args: CallCloudBaseToolArgs): Promise<string> {
  *     不抛异常，让 kernel 上层决定是否要用（默认是放弃 cloudbase tools 但保留 sandbox tools）。
  *   - 工具运行时错误 → 在 tool callback 里返回 `isError: true`，模型继续。
  */
-export async function createCloudBaseMcpServer(
-  options: CreateCloudBaseMcpOptions,
-): Promise<CloudBaseMcpBundle> {
+export async function createCloudBaseMcpServer(options: CreateCloudBaseMcpOptions): Promise<CloudBaseMcpBundle> {
   const {
     sandbox,
     getCredentials,
@@ -490,9 +478,7 @@ export async function createCloudBaseMcpServer(
       break
     } catch (err) {
       lastErr = err
-      log(
-        `schema discovery attempt ${attempt}/${SCHEMA_DISCOVERY_MAX_ATTEMPTS} failed: ${(err as Error).message}`,
-      )
+      log(`schema discovery attempt ${attempt}/${SCHEMA_DISCOVERY_MAX_ATTEMPTS} failed: ${(err as Error).message}`)
       if (attempt < SCHEMA_DISCOVERY_MAX_ATTEMPTS) {
         await new Promise((r) => setTimeout(r, SCHEMA_DISCOVERY_RETRY_DELAY_MS))
       }

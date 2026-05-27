@@ -29,10 +29,7 @@ async function main(): Promise<void> {
   console.log('persistSession:', options.persistSession)
   console.log('tools:', options.tools)
   console.log('env.ANTHROPIC_BASE_URL:', options.env?.ANTHROPIC_BASE_URL)
-  console.log(
-    'env.ANTHROPIC_AUTH_TOKEN:',
-    options.env?.ANTHROPIC_AUTH_TOKEN ? '<set>' : '<unset>',
-  )
+  console.log('env.ANTHROPIC_AUTH_TOKEN:', options.env?.ANTHROPIC_AUTH_TOKEN ? '<set>' : '<unset>')
   console.log('')
 
   const q = claudeQuery({

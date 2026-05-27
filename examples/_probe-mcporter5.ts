@@ -38,10 +38,12 @@ async function main(): Promise<void> {
     console.log(`page ${p}: offset=${offset} got ${pageLines.length} lines`)
     console.log(`  first line raw: ${JSON.stringify(pageLines[0]?.slice(0, 100))}`)
     console.log(`  last  line raw: ${JSON.stringify(pageLines[pageLines.length - 1]?.slice(0, 100))}`)
-    lines.push(...pageLines.map((l) => {
-      const m = /^\d+:\s?(.*)$/.exec(l)
-      return m ? m[1] : l
-    }))
+    lines.push(
+      ...pageLines.map((l) => {
+        const m = /^\d+:\s?(.*)$/.exec(l)
+        return m ? m[1] : l
+      }),
+    )
     if (typeof r.totalLines === 'number') totalLines = r.totalLines
     if (!r.truncated) break
     offset += pageLines.length

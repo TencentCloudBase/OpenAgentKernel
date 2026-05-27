@@ -12,7 +12,4 @@ export {
   DEFAULT_SANDBOX_FUNCTION_NAME,
 } from './name-resolver.js'
 
-export {
-  resolveApiKey,
-  type ResolvedApiKey,
-} from './credential-provider.js'
+export { resolveApiKey, type ResolvedApiKey } from './credential-provider.js'

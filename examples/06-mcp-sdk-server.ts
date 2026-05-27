@@ -26,22 +26,12 @@ async function main(): Promise<void> {
     name: 'calculator',
     version: '1.0.0',
     tools: [
-      tool(
-        'add',
-        'Add two numbers and return the sum.',
-        { a: z.number(), b: z.number() },
-        async (args) => ({
-          content: [{ type: 'text', text: String(args.a + args.b) }],
-        }),
-      ),
-      tool(
-        'multiply',
-        'Multiply two numbers.',
-        { a: z.number(), b: z.number() },
-        async (args) => ({
-          content: [{ type: 'text', text: String(args.a * args.b) }],
-        }),
-      ),
+      tool('add', 'Add two numbers and return the sum.', { a: z.number(), b: z.number() }, async (args) => ({
+        content: [{ type: 'text', text: String(args.a + args.b) }],
+      })),
+      tool('multiply', 'Multiply two numbers.', { a: z.number(), b: z.number() }, async (args) => ({
+        content: [{ type: 'text', text: String(args.a * args.b) }],
+      })),
     ],
   })
 

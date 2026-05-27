@@ -1,29 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk'
 import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
-import {
-  InvalidConfigError,
-  ResourceError,
-} from '../internal/errors.js'
-import {
-  createHookLocalState,
-  InMemoryPermissionStore,
-  type PreToolUseHookLocalState,
-} from '../permissions/index.js'
+import { InvalidConfigError, ResourceError } from '../internal/errors.js'
+import { createHookLocalState, InMemoryPermissionStore, type PreToolUseHookLocalState } from '../permissions/index.js'
 import { buildClaudeQueryOptions } from '../runtime/agent-builder.js'
-import {
-  createTranslatorState,
-  translateSdkMessage,
-} from '../runtime/event-translator.js'
+import { createTranslatorState, translateSdkMessage } from '../runtime/event-translator.js'
 import { buildPromptAsync } from '../runtime/prompt-builder.js'
-import {
-  createCloudBaseMcpServer,
-  type CloudBaseUserCredentials,
-} from '../sandbox/cloudbase-mcp.js'
-import type {
-  SandboxInstance,
-  SandboxRuntime,
-} from '../sandbox/types.js'
+import { createCloudBaseMcpServer, type CloudBaseUserCredentials } from '../sandbox/cloudbase-mcp.js'
+import type { SandboxInstance, SandboxRuntime } from '../sandbox/types.js'
 import type { StorageProvider } from '../storage/types.js'
 import type {
   Agent,
@@ -55,9 +39,7 @@ import type {
  */
 export function createAgent(config: AgentConfig): Agent {
   if (!config.envId || typeof config.envId !== 'string') {
-    throw new InvalidConfigError(
-      'AgentConfig.envId is required and must be a non-empty string',
-    )
+    throw new InvalidConfigError('AgentConfig.envId is required and must be a non-empty string')
   }
   if (!config.model) {
     throw new InvalidConfigError('AgentConfig.model is required')
@@ -167,9 +149,7 @@ function createSession(deps: SessionDeps): Session {
     return sandboxInstance
   }
 
-  async function ensureCloudbaseMcp(
-    sandbox: SandboxInstance,
-  ): Promise<SdkMcpServerConfig | undefined> {
+  async function ensureCloudbaseMcp(sandbox: SandboxInstance): Promise<SdkMcpServerConfig | undefined> {
     if (!cloudbaseToolsEnabled) return undefined
     if (cloudbaseMcpServer) return cloudbaseMcpServer
     if (!cloudbaseMcpPromise) {
@@ -232,10 +212,7 @@ function createSession(deps: SessionDeps): Session {
      *
      * 调用方不需要持有"那次 send 的 generator"——业务可在任意进程 / 节点（store 共享前提下）调本方法。
      */
-    respondApproval(opts: {
-      toolUseId: string
-      decision: ApprovalDecision
-    }): AsyncIterable<SessionEvent> {
+    respondApproval(opts: { toolUseId: string; decision: ApprovalDecision }): AsyncIterable<SessionEvent> {
       abortController = new AbortController()
       return runApprovalResume({
         config,
@@ -302,15 +279,11 @@ interface RunClaudeQueryArgs {
   conversationId: string
   isContinuation: boolean
   ensureSandbox: () => Promise<SandboxInstance | undefined>
-  ensureCloudbaseMcp: (
-    sandbox: SandboxInstance,
-  ) => Promise<SdkMcpServerConfig | undefined>
+  ensureCloudbaseMcp: (sandbox: SandboxInstance) => Promise<SdkMcpServerConfig | undefined>
   permissionStore?: PermissionStore
 }
 
-async function* runClaudeQuery(
-  args: RunClaudeQueryArgs,
-): AsyncGenerator<SessionEvent, void, unknown> {
+async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<SessionEvent, void, unknown> {
   const {
     config,
     input,
@@ -332,12 +305,8 @@ async function* runClaudeQuery(
     const hookLocalState: PreToolUseHookLocalState = createHookLocalState()
     // PR #7.0：合并真正生效的 permissions（注入实际的 store——可能是 default in-memory，
     // 也可能是用户传入的；hook factory 需要它来读决策）。
-    const effectivePermissions = config.permissions
-      ? { ...config.permissions, store: permissionStore }
-      : undefined
-    const effectiveConfig = effectivePermissions
-      ? { ...config, permissions: effectivePermissions }
-      : config
+    const effectivePermissions = config.permissions ? { ...config.permissions, store: permissionStore } : undefined
+    const effectiveConfig = effectivePermissions ? { ...config, permissions: effectivePermissions } : config
 
     const { options } = buildClaudeQueryOptions(effectiveConfig, {
       sandboxInstance: sandbox,
@@ -386,15 +355,11 @@ interface RunApprovalResumeArgs {
   decision: ApprovalDecision
   abortController: AbortController
   ensureSandbox: () => Promise<SandboxInstance | undefined>
-  ensureCloudbaseMcp: (
-    sandbox: SandboxInstance,
-  ) => Promise<SdkMcpServerConfig | undefined>
+  ensureCloudbaseMcp: (sandbox: SandboxInstance) => Promise<SdkMcpServerConfig | undefined>
   permissionStore?: PermissionStore
 }
 
-async function* runApprovalResume(
-  args: RunApprovalResumeArgs,
-): AsyncGenerator<SessionEvent, void, unknown> {
+async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<SessionEvent, void, unknown> {
   const {
     config,
     conversationId,
@@ -423,8 +388,7 @@ async function* runApprovalResume(
     yield {
       type: 'error',
       error: new ResourceError(
-        `No pending approval found for toolUseId=${toolUseId}. ` +
-          'It may have expired or already been resolved.',
+        `No pending approval found for toolUseId=${toolUseId}. ` + 'It may have expired or already been resolved.',
       ),
     }
     yield { type: 'session_idle', reason: 'error' }
@@ -433,9 +397,7 @@ async function* runApprovalResume(
   if (existing.decision) {
     yield {
       type: 'error',
-      error: new ResourceError(
-        `Approval for toolUseId=${toolUseId} has already been resolved.`,
-      ),
+      error: new ResourceError(`Approval for toolUseId=${toolUseId} has already been resolved.`),
     }
     yield { type: 'session_idle', reason: 'error' }
     return
@@ -493,9 +455,7 @@ function extractStorageProvider(config: AgentConfig): StorageProvider | undefine
   const raw = config.storage
   if (raw === undefined || raw === null) return undefined
   if (typeof raw !== 'object') {
-    throw new InvalidConfigError(
-      'AgentConfig.storage must be an object implementing StorageProvider',
-    )
+    throw new InvalidConfigError('AgentConfig.storage must be an object implementing StorageProvider')
   }
   const candidate = raw as Record<string, unknown>
   if (typeof candidate.resolveAttachment !== 'function') {
@@ -511,9 +471,7 @@ function extractSandboxRuntime(config: AgentConfig): SandboxRuntime | undefined 
   const raw = config.sandbox?.runtime
   if (raw === undefined || raw === null) return undefined
   if (typeof raw !== 'object') {
-    throw new InvalidConfigError(
-      'AgentConfig.sandbox.runtime must be an object implementing SandboxRuntime',
-    )
+    throw new InvalidConfigError('AgentConfig.sandbox.runtime must be an object implementing SandboxRuntime')
   }
   const candidate = raw as Record<string, unknown>
   if (typeof candidate.acquire !== 'function') {
@@ -530,9 +488,7 @@ function isCloudbaseToolsEnabled(config: AgentConfig): boolean {
   return config.sandbox.cloudbaseTools !== false
 }
 
-async function resolveUserCredentials(
-  config: AgentConfig,
-): Promise<CloudBaseUserCredentials> {
+async function resolveUserCredentials(config: AgentConfig): Promise<CloudBaseUserCredentials> {
   const raw = config.sandbox?.userCredentials
   let creds: SandboxUserCredentials | undefined
 
@@ -576,9 +532,7 @@ async function resolveUserCredentials(
 function createSessionsManagement(config: AgentConfig): Agent['sessions'] {
   return {
     async list(opts): Promise<SessionSummary[]> {
-      const store = config.session?.store as
-        | { listSessionSummaries?: (k: string) => Promise<unknown[]> }
-        | undefined
+      const store = config.session?.store as { listSessionSummaries?: (k: string) => Promise<unknown[]> } | undefined
       if (!store?.listSessionSummaries) return []
       const projectKey = config.session?.projectKey ?? config.envId
       const summaries = await store.listSessionSummaries(projectKey)

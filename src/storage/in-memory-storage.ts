@@ -18,11 +18,7 @@
 import * as fs from 'node:fs/promises'
 import { StorageError } from '../internal/errors.js'
 import type { AttachmentInput } from '../public/types.js'
-import {
-  assertSupportedImageMime,
-  guessMimeFromBytes,
-  guessMimeFromPath,
-} from './mime.js'
+import { assertSupportedImageMime, guessMimeFromBytes, guessMimeFromPath } from './mime.js'
 import type { ResolveContext, ResolvedAttachment, StorageProvider } from './types.js'
 
 export class InMemoryStorage implements StorageProvider {
@@ -53,10 +49,7 @@ export class InMemoryStorage implements StorageProvider {
       try {
         buf = await fs.readFile(att.source)
       } catch (err) {
-        throw new StorageError(
-          `Failed to read file: ${att.source}`,
-          err instanceof Error ? err : undefined,
-        )
+        throw new StorageError(`Failed to read file: ${att.source}`, err instanceof Error ? err : undefined)
       }
       if (!mimeType) mimeType = guessMimeFromPath(att.source)
     } else {
@@ -80,8 +73,6 @@ export class InMemoryStorage implements StorageProvider {
   async resolveRefToUrl(ref: ResolvedAttachment['messageRef']): Promise<string> {
     if (ref.kind === 'url') return ref.url
     if (ref.kind === 'base64') return ref.dataUrl
-    throw new StorageError(
-      'InMemoryStorage cannot resolve cos:// refs (no CloudBase credentials).',
-    )
+    throw new StorageError('InMemoryStorage cannot resolve cos:// refs (no CloudBase credentials).')
   }
 }

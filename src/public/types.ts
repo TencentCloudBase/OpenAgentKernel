@@ -149,10 +149,7 @@ export interface CompactionConfig {
 // 工具定义
 // ============================================================
 
-export interface ToolDefinition<
-  TInput extends Record<string, unknown> = Record<string, unknown>,
-  TOutput = unknown,
-> {
+export interface ToolDefinition<TInput extends Record<string, unknown> = Record<string, unknown>, TOutput = unknown> {
   name: string
   description: string
   /** Zod schema，必须是 zod ^4.0.0 */
@@ -284,10 +281,7 @@ export interface PermissionStore {
   /** 写入 / 覆盖（写决策、写 pending 都走这里） */
   put(call: PendingApproval): Promise<void>
   /** 按 conversationId + toolUseId 取回 */
-  get(key: {
-    conversationId: string
-    toolUseId: string
-  }): Promise<PendingApproval | null>
+  get(key: { conversationId: string; toolUseId: string }): Promise<PendingApproval | null>
   /** 删除 */
   delete(key: { conversationId: string; toolUseId: string }): Promise<void>
 }
@@ -341,16 +335,12 @@ export interface PermissionConfig {
 // ============================================================
 
 export interface AgentHooks {
-  onUserMessage?: (ctx: UserMessageContext) =>
-    | Promise<void | { modifiedPrompt?: string }>
-    | void
-    | { modifiedPrompt?: string }
+  onUserMessage?: (
+    ctx: UserMessageContext,
+  ) => Promise<void | { modifiedPrompt?: string }> | void | { modifiedPrompt?: string }
 
   onToolStart?: (ctx: ToolStartContext) => Promise<void> | void
-  onToolEnd?: (ctx: ToolEndContext) =>
-    | Promise<void | { updatedOutput?: unknown }>
-    | void
-    | { updatedOutput?: unknown }
+  onToolEnd?: (ctx: ToolEndContext) => Promise<void | { updatedOutput?: unknown }> | void | { updatedOutput?: unknown }
 
   onAgentMessage?: (ctx: AgentMessageContext) => Promise<void> | void
   onSessionStart?: (ctx: SessionContext) => Promise<void> | void
@@ -513,10 +503,7 @@ export interface Session {
    *
    * 注意：调用方应确保同一 toolUseId 不被并发响应；重复响应会用最后一次为准。
    */
-  respondApproval(opts: {
-    toolUseId: string
-    decision: ApprovalDecision
-  }): AsyncIterable<SessionEvent>
+  respondApproval(opts: { toolUseId: string; decision: ApprovalDecision }): AsyncIterable<SessionEvent>
 
   /** 拉取历史消息 */
   getHistory(opts?: { limit?: number; before?: number }): Promise<MessageRecord[]>
@@ -529,11 +516,7 @@ export interface Session {
 }
 
 export interface SessionManagement {
-  list(opts?: {
-    userId?: string
-    limit?: number
-    cursor?: string
-  }): Promise<SessionSummary[]>
+  list(opts?: { userId?: string; limit?: number; cursor?: string }): Promise<SessionSummary[]>
   get(conversationId: string): Promise<SessionSummary | null>
   delete(conversationId: string): Promise<void>
 }
@@ -655,12 +638,7 @@ export type MessageStatus = 'pending' | 'streaming' | 'done' | 'error' | 'cancel
  * - `denied`：被 HITL 拒绝
  * - `awaiting_approval`：等待用户审批（HITL）
  */
-export type ToolStatus =
-  | 'pending'
-  | 'executing'
-  | 'done'
-  | 'denied'
-  | 'awaiting_approval'
+export type ToolStatus = 'pending' | 'executing' | 'done' | 'denied' | 'awaiting_approval'
 
 /**
  * 聚合消息记录：给前端渲染用的"人类可读"格式。
@@ -694,10 +672,7 @@ export type MessagePart =
        * - 内联 base64：`{ kind: 'base64', dataUrl: 'data:image/png;base64,...' }`
        * - 外部 URL：`{ kind: 'url', url: 'https://...' }`（kernel 不保证有效期）
        */
-      ref:
-        | { kind: 'cos'; fileId: string }
-        | { kind: 'base64'; dataUrl: string }
-        | { kind: 'url'; url: string }
+      ref: { kind: 'cos'; fileId: string } | { kind: 'base64'; dataUrl: string } | { kind: 'url'; url: string }
     }
   | {
       type: 'tool_call'

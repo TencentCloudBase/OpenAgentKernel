@@ -114,9 +114,7 @@ function toErrorResult(err: unknown): {
  *
  * @param sandbox SandboxInstance（来自 SandboxRuntime.acquire）
  */
-export function createSandboxMcpServer(
-  sandbox: SandboxInstance,
-): ReturnType<typeof createSdkMcpServer> {
+export function createSandboxMcpServer(sandbox: SandboxInstance): ReturnType<typeof createSdkMcpServer> {
   return createSdkMcpServer({
     name: 'sandbox',
     version: '1.0.0',
@@ -128,10 +126,7 @@ export function createSandboxMcpServer(
           'Returns { stdout, stderr, exitCode }. The working directory is the sandbox workspace root.',
         {
           command: z.string().describe('The shell command to execute'),
-          timeoutMs: z
-            .number()
-            .optional()
-            .describe(`Timeout in milliseconds (default ${DEFAULT_BASH_TIMEOUT_MS})`),
+          timeoutMs: z.number().optional().describe(`Timeout in milliseconds (default ${DEFAULT_BASH_TIMEOUT_MS})`),
         },
         async (args) => {
           try {
@@ -144,8 +139,7 @@ export function createSandboxMcpServer(
             )
             const stdout = String(result.stdout ?? result.output ?? '')
             const stderr = String(result.stderr ?? '')
-            const exitCode =
-              typeof result.exitCode === 'number' ? result.exitCode : Number(result.exit_code ?? 0)
+            const exitCode = typeof result.exitCode === 'number' ? result.exitCode : Number(result.exit_code ?? 0)
             return {
               content: [
                 {
@@ -177,12 +171,7 @@ export function createSandboxMcpServer(
             .positive()
             .optional()
             .describe('Line number to start reading from (1-based, must be >= 1)'),
-          limit: z
-            .number()
-            .int()
-            .positive()
-            .optional()
-            .describe('Maximum number of lines to read'),
+          limit: z.number().int().positive().optional().describe('Maximum number of lines to read'),
         },
         async (args) => {
           try {
@@ -213,8 +202,7 @@ export function createSandboxMcpServer(
               content: args.content,
             })
             const text =
-              resultToText(result) ||
-              `Wrote ${Buffer.byteLength(args.content, 'utf-8')} bytes to ${args.path}`
+              resultToText(result) || `Wrote ${Buffer.byteLength(args.content, 'utf-8')} bytes to ${args.path}`
             return { content: [{ type: 'text', text }] }
           } catch (err) {
             return toErrorResult(err)
@@ -232,10 +220,7 @@ export function createSandboxMcpServer(
           path: z.string().describe('Absolute or workspace-relative file path'),
           oldString: z.string().describe('Exact text to replace'),
           newString: z.string().describe('Replacement text'),
-          replaceAll: z
-            .boolean()
-            .optional()
-            .describe('Replace all occurrences (default false)'),
+          replaceAll: z.boolean().optional().describe('Replace all occurrences (default false)'),
         },
         async (args) => {
           try {
@@ -260,9 +245,7 @@ export function createSandboxMcpServer(
         'List files matching a glob pattern (supports "**/*.ts", "src/**/*.tsx", etc). ' +
           'Returns matching file paths, one per line.',
         {
-          pattern: z
-            .string()
-            .describe('Glob pattern (e.g. "*.ts" or "**/package.json")'),
+          pattern: z.string().describe('Glob pattern (e.g. "*.ts" or "**/package.json")'),
           path: z
             .string()
             .optional()
@@ -282,10 +265,7 @@ export function createSandboxMcpServer(
               content: [
                 {
                   type: 'text',
-                  text:
-                    text.trim().length === 0
-                      ? `No files matching "${args.pattern}"`
-                      : text,
+                  text: text.trim().length === 0 ? `No files matching "${args.pattern}"` : text,
                 },
               ],
             }
@@ -302,14 +282,8 @@ export function createSandboxMcpServer(
           'Returns matches as `file:line:content`. Use `glob` to restrict to certain file names (e.g. "*.ts").',
         {
           pattern: z.string().describe('Regex pattern to search for'),
-          path: z
-            .string()
-            .optional()
-            .describe('Directory or file to search in. Defaults to the working directory.'),
-          glob: z
-            .string()
-            .optional()
-            .describe('File-name glob filter (e.g. "*.ts", "*.{ts,tsx}")'),
+          path: z.string().optional().describe('Directory or file to search in. Defaults to the working directory.'),
+          glob: z.string().optional().describe('File-name glob filter (e.g. "*.ts", "*.{ts,tsx}")'),
         },
         async (args) => {
           try {
@@ -323,10 +297,7 @@ export function createSandboxMcpServer(
               content: [
                 {
                   type: 'text',
-                  text:
-                    text.trim().length === 0
-                      ? `No matches for pattern "${args.pattern}"`
-                      : text,
+                  text: text.trim().length === 0 ? `No matches for pattern "${args.pattern}"` : text,
                 },
               ],
             }

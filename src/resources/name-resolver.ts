@@ -54,20 +54,15 @@ export interface ResolvedResources {
  * @param envId CloudBase 环境 ID（必填）
  * @param overrides 用户在 AgentConfig.resources 里的覆盖
  */
-export function resolveResources(
-  envId: string,
-  overrides?: ResourceConfig,
-): ResolvedResources {
+export function resolveResources(envId: string, overrides?: ResourceConfig): ResolvedResources {
   if (!envId) {
     throw new Error('envId is required for resource resolution')
   }
 
   return {
     modelGatewayBaseUrl: overrides?.modelGatewayBaseUrl ?? DEFAULT_TOKENHUB_BASE_URL,
-    conversationCollection:
-      overrides?.conversationCollection ?? `${DEFAULT_COLLECTION_PREFIX}_conversations`,
-    messageCollection:
-      overrides?.messageCollection ?? `${DEFAULT_COLLECTION_PREFIX}_messages`,
+    conversationCollection: overrides?.conversationCollection ?? `${DEFAULT_COLLECTION_PREFIX}_conversations`,
+    messageCollection: overrides?.messageCollection ?? `${DEFAULT_COLLECTION_PREFIX}_messages`,
     sandboxFunctionName: overrides?.sandboxFunctionName ?? DEFAULT_SANDBOX_FUNCTION_NAME,
   }
 }

@@ -36,18 +36,10 @@ export interface PermissionStoreDriver {
    * 按 (projectKey, conversationId, toolUseId) 取回 entry。
    * 不存在返回 null。
    */
-  get(args: {
-    projectKey: string
-    conversationId: string
-    toolUseId: string
-  }): Promise<PendingApproval | null>
+  get(args: { projectKey: string; conversationId: string; toolUseId: string }): Promise<PendingApproval | null>
 
   /** 删除 entry（不存在不抛错） */
-  delete(args: {
-    projectKey: string
-    conversationId: string
-    toolUseId: string
-  }): Promise<void>
+  delete(args: { projectKey: string; conversationId: string; toolUseId: string }): Promise<void>
 
   /**
    * 扫描某 (projectKey, conversationId) 下"已决策"且最新的同 toolName entry。
@@ -62,9 +54,5 @@ export interface PermissionStoreDriver {
    *
    * 性能建议：分布式 driver 应在 (projectKey, conversationId, toolName, createdAt desc) 上建索引。
    */
-  scanRecent(args: {
-    projectKey: string
-    conversationId: string
-    toolName: string
-  }): Promise<PendingApproval | null>
+  scanRecent(args: { projectKey: string; conversationId: string; toolName: string }): Promise<PendingApproval | null>
 }

@@ -18,8 +18,7 @@ async function main(): Promise<void> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      command:
-        'mcporter list cloudbase --schema --output json > .oak-cb-schema.json 2>&1; wc -c .oak-cb-schema.json',
+      command: 'mcporter list cloudbase --schema --output json > .oak-cb-schema.json 2>&1; wc -c .oak-cb-schema.json',
       timeout: 30_000,
     }),
   })

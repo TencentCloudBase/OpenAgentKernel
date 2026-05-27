@@ -12,11 +12,7 @@
  *   - isStaleApproval：超时判定
  */
 
-import type {
-  PendingApproval,
-  PermissionStore,
-  RequireApprovalRule,
-} from '../public/types.js'
+import type { PendingApproval, PermissionStore, RequireApprovalRule } from '../public/types.js'
 
 /**
  * 默认审批超时：30 分钟（与 tcb-headless-service.copilot 对齐）。
@@ -36,17 +32,11 @@ export class InMemoryPermissionStore implements PermissionStore {
     this.entries.set(buildKey(call.conversationId, call.toolUseId), call)
   }
 
-  async get(key: {
-    conversationId: string
-    toolUseId: string
-  }): Promise<PendingApproval | null> {
+  async get(key: { conversationId: string; toolUseId: string }): Promise<PendingApproval | null> {
     return this.entries.get(buildKey(key.conversationId, key.toolUseId)) ?? null
   }
 
-  async delete(key: {
-    conversationId: string
-    toolUseId: string
-  }): Promise<void> {
+  async delete(key: { conversationId: string; toolUseId: string }): Promise<void> {
     this.entries.delete(buildKey(key.conversationId, key.toolUseId))
   }
 
@@ -59,10 +49,7 @@ export class InMemoryPermissionStore implements PermissionStore {
    * 这是 InMemoryPermissionStore 特有的快速路径；分布式 store（PR #7.1）应在
    * 持久化层加 (conversationId, toolName, decision != null) 索引以提供等价能力。
    */
-  async scanRecent(key: {
-    conversationId: string
-    toolName: string
-  }): Promise<PendingApproval | null> {
+  async scanRecent(key: { conversationId: string; toolName: string }): Promise<PendingApproval | null> {
     let best: PendingApproval | null = null
     for (const entry of this.entries.values()) {
       if (
@@ -102,11 +89,7 @@ function buildKey(conversationId: string, toolUseId: string): string {
  */
 export function compileRequireApprovalPredicate(
   rule: RequireApprovalRule | undefined,
-): (ctx: {
-  toolName: string
-  input: unknown
-  conversationId: string
-}) => boolean | Promise<boolean> {
+): (ctx: { toolName: string; input: unknown; conversationId: string }) => boolean | Promise<boolean> {
   if (rule == null) {
     return () => false
   }
@@ -129,9 +112,7 @@ export function compileRequireApprovalPredicate(
 function globToRegex(pattern: string): RegExp {
   if (pattern === '*') return /^.*$/
   // 转义 RegExp 元字符（除 `*` 外），把 `*` 替换为 `.*`
-  const escaped = pattern
-    .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*/g, '.*')
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')
   return new RegExp(`^${escaped}$`)
 }
 
@@ -142,10 +123,6 @@ function globToRegex(pattern: string): RegExp {
  * @param timeoutMs 配置的超时（毫秒）
  * @param now 当前时间（注入便于测试，默认 Date.now()）
  */
-export function isStaleApproval(
-  call: PendingApproval,
-  timeoutMs: number,
-  now: number = Date.now(),
-): boolean {
+export function isStaleApproval(call: PendingApproval, timeoutMs: number, now: number = Date.now()): boolean {
   return now - call.createdAt > timeoutMs
 }

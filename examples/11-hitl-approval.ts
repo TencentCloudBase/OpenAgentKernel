@@ -18,11 +18,7 @@
  */
 import './_shared/env.js'
 
-import {
-  CloudBaseSessionStore,
-  createAgent,
-  InMemoryDriver,
-} from '@cloudbase/open-agent-kernel'
+import { CloudBaseSessionStore, createAgent, InMemoryDriver } from '@cloudbase/open-agent-kernel'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import readline from 'node:readline/promises'
 import { z } from 'zod'
@@ -40,9 +36,7 @@ const dangerousTools = createSdkMcpServer({
       'Delete a file from the filesystem (DANGEROUS — should always require approval).',
       { path: z.string().describe('Absolute path to the file to delete') },
       async (args) => ({
-        content: [
-          { type: 'text', text: `Deleted ${args.path} (simulated, nothing actually deleted).` },
-        ],
+        content: [{ type: 'text', text: `Deleted ${args.path} (simulated, nothing actually deleted).` }],
       }),
     ),
     tool(
@@ -50,9 +44,7 @@ const dangerousTools = createSdkMcpServer({
       'List files in a directory (safe, does not require approval).',
       { dir: z.string().describe('Directory to list') },
       async (args) => ({
-        content: [
-          { type: 'text', text: `Files in ${args.dir}: a.txt, b.txt, c.log` },
-        ],
+        content: [{ type: 'text', text: `Files in ${args.dir}: a.txt, b.txt, c.log` }],
       }),
     ),
   ],
@@ -103,9 +95,7 @@ async function main(): Promise<void> {
   console.log(`User: ${prompt}\n`)
   process.stdout.write('Assistant: ')
 
-  let pendingApproval:
-    | { toolUseId: string; toolName: string; input: unknown }
-    | undefined
+  let pendingApproval: { toolUseId: string; toolName: string; input: unknown } | undefined
 
   for await (const e of session.send(prompt)) {
     if (e.type === 'message_delta') {
@@ -163,8 +153,7 @@ async function main(): Promise<void> {
         if (e2.type === 'message_delta') process.stdout.write(e2.text)
         else if (e2.type === 'tool_call')
           process.stdout.write(`\n  → ${e2.toolName}(${JSON.stringify(e2.input).slice(0, 200)})\n  `)
-        else if (e2.type === 'tool_result')
-          process.stdout.write(`\n  ← ${JSON.stringify(e2.output).slice(0, 200)}\n  `)
+        else if (e2.type === 'tool_result') process.stdout.write(`\n  ← ${JSON.stringify(e2.output).slice(0, 200)}\n  `)
         else if (e2.type === 'session_idle') console.log(`\n[session_idle: ${e2.reason}]`)
         else if (e2.type === 'error') console.error('\n[error]', e2.error.message)
       }

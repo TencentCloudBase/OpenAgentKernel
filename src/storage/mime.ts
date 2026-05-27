@@ -7,12 +7,7 @@
 
 import { StorageError } from '../internal/errors.js'
 
-const ALLOWED_IMAGE_MIME_TYPES = new Set<string>([
-  'image/jpeg',
-  'image/png',
-  'image/gif',
-  'image/webp',
-])
+const ALLOWED_IMAGE_MIME_TYPES = new Set<string>(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
 
 const EXT_TO_MIME: Record<string, string> = {
   '.jpg': 'image/jpeg',
@@ -70,11 +65,9 @@ export function guessMimeFromBytes(buf: Uint8Array): string | undefined {
  * 断言 mimeType 是 Anthropic 支持的图片格式。
  * @throws StorageError
  */
-export function assertSupportedImageMime(mimeType: string | undefined): asserts mimeType is
-  | 'image/jpeg'
-  | 'image/png'
-  | 'image/gif'
-  | 'image/webp' {
+export function assertSupportedImageMime(
+  mimeType: string | undefined,
+): asserts mimeType is 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp' {
   if (!mimeType) {
     throw new StorageError(
       'Cannot determine attachment mimeType. Please specify it explicitly via AttachmentInput.mimeType.',

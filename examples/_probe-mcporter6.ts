@@ -24,7 +24,8 @@ async function main(): Promise<void> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      command: 'grep -c "truncated to 2000 chars" .oak-cb-schema.json 2>&1; grep -n "truncated to 2000 chars" .oak-cb-schema.json | head -3 2>&1',
+      command:
+        'grep -c "truncated to 2000 chars" .oak-cb-schema.json 2>&1; grep -n "truncated to 2000 chars" .oak-cb-schema.json | head -3 2>&1',
       timeout: 10_000,
     }),
   })

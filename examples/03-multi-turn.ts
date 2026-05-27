@@ -13,11 +13,7 @@
  */
 import './_shared/env.js'
 
-import {
-  CloudBaseSessionStore,
-  InMemoryDriver,
-  createAgent,
-} from '@cloudbase/open-agent-kernel'
+import { CloudBaseSessionStore, InMemoryDriver, createAgent } from '@cloudbase/open-agent-kernel'
 
 async function main(): Promise<void> {
   const driver = new InMemoryDriver()
@@ -26,9 +22,7 @@ async function main(): Promise<void> {
   const agent = createAgent({
     envId: process.env.TCB_ENV_ID ?? 'demo-env',
     model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
-    systemPrompt:
-      'You are a helpful assistant. Reply concisely in Chinese. ' +
-      'Remember details across turns.',
+    systemPrompt: 'You are a helpful assistant. Reply concisely in Chinese. ' + 'Remember details across turns.',
     session: { store },
   })
 

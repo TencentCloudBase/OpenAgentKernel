@@ -21,11 +21,7 @@
  */
 
 import { SandboxError } from '../internal/errors.js'
-import type {
-  SandboxAcquireContext,
-  SandboxInstance,
-  SandboxRuntime,
-} from './types.js'
+import type { SandboxAcquireContext, SandboxInstance, SandboxRuntime } from './types.js'
 
 // ─── Constants ──────────────────────────────────────────────────────────
 
@@ -47,8 +43,7 @@ const DEFAULT_SANDBOX_IMAGE =
   process.env.OAK_SANDBOX_IMAGE ??
   'ccr.ccs.tencentyun.com/tcb-sandbox-public-cbe88d/tcb-sandbox-public-cbe88d:260521-1705-vibecoding'
 
-const DEFAULT_TOOL_ROLE_ARN =
-  process.env.OAK_SANDBOX_TOOL_ROLE_ARN ?? 'qcs::cam::uin/691612481:roleName/agent-sandbox'
+const DEFAULT_TOOL_ROLE_ARN = process.env.OAK_SANDBOX_TOOL_ROLE_ARN ?? 'qcs::cam::uin/691612481:roleName/agent-sandbox'
 
 // ─── Configuration / Credentials ────────────────────────────────────────
 
@@ -105,8 +100,7 @@ function resolveCredentials(opts: AgsStatefulSandboxOptions): ResolvedCredential
     process.env.TENCENTCLOUD_SECRET_KEY ??
     process.env.TENCENT_SECRET_KEY ??
     ''
-  const sessionToken =
-    opts.sessionToken ?? process.env.TCB_TOKEN ?? process.env.TENCENTCLOUD_SESSIONTOKEN ?? undefined
+  const sessionToken = opts.sessionToken ?? process.env.TCB_TOKEN ?? process.env.TENCENTCLOUD_SESSIONTOKEN ?? undefined
 
   if (!apiKey) {
     throw new SandboxError(
@@ -186,8 +180,7 @@ async function callAgsApi(
     )
   } catch (err) {
     throw new SandboxError(
-      'AgsStatefulSandbox requires @cloudbase/manager-node. ' +
-        'Install it: pnpm add @cloudbase/manager-node',
+      'AgsStatefulSandbox requires @cloudbase/manager-node. ' + 'Install it: pnpm add @cloudbase/manager-node',
       err,
     )
   }
@@ -231,11 +224,7 @@ function extractToolSet(resp: Record<string, unknown>): Array<Record<string, unk
   return Array.isArray(nested) ? nested : []
 }
 
-async function findToolByName(
-  toolName: string,
-  cred: ResolvedCredentials,
-  envId: string,
-): Promise<AgsToolInfo | null> {
+async function findToolByName(toolName: string, cred: ResolvedCredentials, envId: string): Promise<AgsToolInfo | null> {
   // 优先用 Filter 一次查询命中
   try {
     const resp = await callAgsApi(
@@ -254,12 +243,7 @@ async function findToolByName(
   let offset = 0
   const limit = 100
   for (let page = 0; page < 10; page++) {
-    const resp = await callAgsApi(
-      'DescribeSandboxToolList',
-      { Offset: offset, Limit: limit },
-      cred,
-      envId,
-    )
+    const resp = await callAgsApi('DescribeSandboxToolList', { Offset: offset, Limit: limit }, cred, envId)
     const set = extractToolSet(resp)
     const hit = pickToolByName(set, toolName)
     if (hit) return hit
@@ -270,13 +254,8 @@ async function findToolByName(
   return null
 }
 
-function pickToolByName(
-  tools: Array<Record<string, unknown>>,
-  toolName: string,
-): AgsToolInfo | null {
-  const matches = tools.filter(
-    (t) => t.ToolName === toolName && typeof t.ToolId === 'string',
-  )
+function pickToolByName(tools: Array<Record<string, unknown>>, toolName: string): AgsToolInfo | null {
+  const matches = tools.filter((t) => t.ToolName === toolName && typeof t.ToolId === 'string')
   if (!matches.length) return null
   const active = matches.find((t) => t.Status === 'ACTIVE') ?? matches[0]
   return {
@@ -286,10 +265,7 @@ function pickToolByName(
   }
 }
 
-async function createTool(
-  envId: string,
-  cred: ResolvedCredentials,
-): Promise<string> {
+async function createTool(envId: string, cred: ResolvedCredentials): Promise<string> {
   const resp = await callAgsApi(
     'CreateSandboxTool',
     {
@@ -325,9 +301,7 @@ async function createTool(
   )
 
   const toolId =
-    (resp?.ToolId as string) ||
-    ((resp?.data as Record<string, unknown> | undefined)?.ToolId as string) ||
-    ''
+    (resp?.ToolId as string) || ((resp?.data as Record<string, unknown> | undefined)?.ToolId as string) || ''
   if (!toolId) {
     throw new SandboxError(`CreateSandboxTool returned no ToolId: ${JSON.stringify(resp).slice(0, 300)}`)
   }
@@ -352,37 +326,22 @@ async function startInstance(
   )
   const data = resp?.data as Record<string, unknown> | undefined
   const inst = resp?.Instance as Record<string, unknown> | undefined
-  const instanceId =
-    String(resp?.InstanceId || inst?.InstanceId || data?.InstanceId || '') || ''
+  const instanceId = String(resp?.InstanceId || inst?.InstanceId || data?.InstanceId || '') || ''
   if (!instanceId) {
-    throw new SandboxError(
-      `StartSandboxInstance returned no InstanceId: ${JSON.stringify(resp).slice(0, 300)}`,
-    )
+    throw new SandboxError(`StartSandboxInstance returned no InstanceId: ${JSON.stringify(resp).slice(0, 300)}`)
   }
   return instanceId
 }
 
-async function pauseInstance(
-  instanceId: string,
-  cred: ResolvedCredentials,
-  envId: string,
-): Promise<void> {
+async function pauseInstance(instanceId: string, cred: ResolvedCredentials, envId: string): Promise<void> {
   await callAgsApi('PauseSandboxInstance', { InstanceId: instanceId }, cred, envId)
 }
 
-async function resumeInstance(
-  instanceId: string,
-  cred: ResolvedCredentials,
-  envId: string,
-): Promise<void> {
+async function resumeInstance(instanceId: string, cred: ResolvedCredentials, envId: string): Promise<void> {
   await callAgsApi('ResumeSandboxInstance', { InstanceId: instanceId }, cred, envId)
 }
 
-async function stopInstance(
-  instanceId: string,
-  cred: ResolvedCredentials,
-  envId: string,
-): Promise<void> {
+async function stopInstance(instanceId: string, cred: ResolvedCredentials, envId: string): Promise<void> {
   await callAgsApi('StopSandboxInstance', { InstanceId: instanceId }, cred, envId)
 }
 
@@ -444,9 +403,7 @@ async function ensureSharedInstance(
   onProgress?: (msg: { phase: string; message: string }) => void,
 ): Promise<{ instanceId: string; reused: boolean }> {
   const all = await describeInstances(cred, envId, { toolId })
-  const active = all.filter((it) =>
-    ['RUNNING', 'PAUSED', 'RESUME_FAILED'].includes(it.status),
-  )
+  const active = all.filter((it) => ['RUNNING', 'PAUSED', 'RESUME_FAILED'].includes(it.status))
   const primary = pickPrimaryInstance(active)
 
   if (!primary) {
@@ -471,11 +428,7 @@ async function ensureSharedInstance(
       await stopInstance(item.instanceId, cred, envId)
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.warn(
-        '[ags] failed to stop redundant instance',
-        item.instanceId,
-        (err as Error).message,
-      )
+      console.warn('[ags] failed to stop redundant instance', item.instanceId, (err as Error).message)
     }
   }
 
@@ -497,11 +450,7 @@ async function ensureSharedInstance(
 
 // ─── Data plane ────────────────────────────────────────────────────────
 
-function buildDataPlaneHeaders(args: {
-  apiKey: string
-  instanceId: string
-  port: number
-}): Record<string, string> {
+function buildDataPlaneHeaders(args: { apiKey: string; instanceId: string; port: number }): Record<string, string> {
   return {
     'X-Cloudbase-Authorization': `Bearer ${args.apiKey}`,
     'E2b-Sandbox-Id': args.instanceId,
@@ -582,9 +531,7 @@ async function ensureTool(
  *
  * 平台拉镜像需要时间，立即 StartSandboxInstance 会失败（CREATING / InternalError）。
  */
-async function waitToolWarmup(
-  onProgress?: (msg: { phase: string; message: string }) => void,
-): Promise<void> {
+async function waitToolWarmup(onProgress?: (msg: { phase: string; message: string }) => void): Promise<void> {
   for (let round = 1; round <= TOOL_WARMUP_POLL_MAX; round++) {
     onProgress?.({
       phase: 'template_warmup',

@@ -16,16 +16,8 @@
  * 接口能传递信号的唯一通道。具体实现是一个 JSON 字符串，业务侧不会看到（被 translator 吃掉）。
  */
 
-import type {
-  ApprovalDecision,
-  PendingApproval,
-  PermissionConfig,
-} from '../public/types.js'
-import {
-  compileRequireApprovalPredicate,
-  DEFAULT_APPROVAL_TIMEOUT_MS,
-  isStaleApproval,
-} from './store.js'
+import type { ApprovalDecision, PendingApproval, PermissionConfig } from '../public/types.js'
+import { compileRequireApprovalPredicate, DEFAULT_APPROVAL_TIMEOUT_MS, isStaleApproval } from './store.js'
 
 /**
  * Sentinel：识别 deny reason 是 kernel 自己塞的"中断信号"还是模型/真实 deny。
@@ -157,7 +149,9 @@ interface PreToolUseHookOutput {
  * 该回调直接传给 Claude SDK options.hooks.PreToolUse；我们用宽入参（AnyHookInput）+ 运行时收窄
  * 来匹配 SDK 的 HookCallback 联合签名。
  */
-export function createPreToolUsePermissionHook(args: PreToolUsePermissionHookArgs): (
+export function createPreToolUsePermissionHook(
+  args: PreToolUsePermissionHookArgs,
+): (
   input: AnyHookInput,
   toolUseID: string | undefined,
   options: { signal: AbortSignal },
@@ -230,12 +224,11 @@ export function createPreToolUsePermissionHook(args: PreToolUsePermissionHookArg
     if ('scanRecent' in store && typeof (store as { scanRecent?: unknown }).scanRecent === 'function') {
       // 仅为 InMemory 这类支持 scan 的 store 启用快速路径；其他 store 不强制（PR #7.1
       // 时若引入 CloudBaseDb 可考虑加索引）。
-      const scanned = await (store as unknown as {
-        scanRecent: (key: {
-          conversationId: string
-          toolName: string
-        }) => Promise<PendingApproval | null>
-      }).scanRecent({ conversationId, toolName })
+      const scanned = await (
+        store as unknown as {
+          scanRecent: (key: { conversationId: string; toolName: string }) => Promise<PendingApproval | null>
+        }
+      ).scanRecent({ conversationId, toolName })
       if (scanned && scanned.decision) {
         if (isStaleApproval(scanned, timeoutMs)) {
           await store.delete({ conversationId, toolUseId: scanned.toolUseId })
@@ -274,9 +267,7 @@ export function createPreToolUsePermissionHook(args: PreToolUsePermissionHookArg
     }
 
     // ── Phase 2: 不在 store → 检查规则是否需要审批 ──
-    const needs = await Promise.resolve(
-      requirePredicate({ toolName, input: toolInput, conversationId }),
-    )
+    const needs = await Promise.resolve(requirePredicate({ toolName, input: toolInput, conversationId }))
     if (!needs) {
       return {} // 不需要审批，放行
     }
@@ -362,11 +353,7 @@ interface ApplyDecisionResult {
   shouldClearTurnFlag: boolean
 }
 
-function applyDecision(
-  existing: PendingApproval,
-  toolName: string,
-  timeoutMs: number,
-): ApplyDecisionResult {
+function applyDecision(existing: PendingApproval, toolName: string, timeoutMs: number): ApplyDecisionResult {
   // 工具名校验
   if (existing.toolName !== toolName) {
     return {

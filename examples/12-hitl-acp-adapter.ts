@@ -16,12 +16,7 @@
  */
 import './_shared/env.js'
 
-import {
-  CloudBaseSessionStore,
-  createAgent,
-  InMemoryDriver,
-  type SessionEvent,
-} from '@cloudbase/open-agent-kernel'
+import { CloudBaseSessionStore, createAgent, InMemoryDriver, type SessionEvent } from '@cloudbase/open-agent-kernel'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod'
 
@@ -50,18 +45,14 @@ interface AcpPermissionRequest {
  * ACP 客户端的批准响应。
  */
 interface AcpPermissionResponse {
-  outcome:
-    | { kind: 'selected'; optionId: string }
-    | { kind: 'cancelled' }
+  outcome: { kind: 'selected'; optionId: string } | { kind: 'cancelled' }
 }
 
 /**
  * 模拟的 ACP 客户端（实际是 WebSocket / JSON-RPC 双向连接）。
  * 这里直接 hardcode "总是 allow_once"。
  */
-async function fakeAcpRequestPermission(
-  req: AcpPermissionRequest,
-): Promise<AcpPermissionResponse> {
+async function fakeAcpRequestPermission(req: AcpPermissionRequest): Promise<AcpPermissionResponse> {
   console.log(`\n[ACP server → client] session/request_permission`)
   console.log(`  toolCall.toolName: ${req.toolCall.toolName}`)
   console.log(`  toolCall.args:     ${JSON.stringify(req.toolCall.args)}`)
@@ -101,25 +92,24 @@ async function pumpThroughAcp(
           toolName: e.toolName,
           args: e.input,
         },
-        options:
-          (e.hints?.suggestedScopes ?? ['once', 'session']).flatMap((scope) => {
-            if (scope === 'once') {
-              return [
-                { optionId: 'allow_once', label: '本次允许', kind: 'allow_once' as const },
-                { optionId: 'reject_once', label: '本次拒绝', kind: 'reject_once' as const },
-              ]
-            }
-            if (scope === 'session') {
-              return [
-                {
-                  optionId: 'allow_always',
-                  label: '本会话内总是允许',
-                  kind: 'allow_always' as const,
-                },
-              ]
-            }
-            return []
-          }),
+        options: (e.hints?.suggestedScopes ?? ['once', 'session']).flatMap((scope) => {
+          if (scope === 'once') {
+            return [
+              { optionId: 'allow_once', label: '本次允许', kind: 'allow_once' as const },
+              { optionId: 'reject_once', label: '本次拒绝', kind: 'reject_once' as const },
+            ]
+          }
+          if (scope === 'session') {
+            return [
+              {
+                optionId: 'allow_always',
+                label: '本会话内总是允许',
+                kind: 'allow_always' as const,
+              },
+            ]
+          }
+          return []
+        }),
       }
       const acpResp = await fakeAcpRequestPermission(acpReq)
 
@@ -150,10 +140,7 @@ async function pumpThroughAcp(
                 } as const)
 
       // ── 注入决策并继续消费事件流（递归式抽干）──
-      await pumpThroughAcp(
-        session.respondApproval({ toolUseId: e.toolUseId, decision }),
-        session,
-      )
+      await pumpThroughAcp(session.respondApproval({ toolUseId: e.toolUseId, decision }), session)
       return
     } else if (e.type === 'session_idle') {
       console.log(`\n[kernel → ACP] session_update.idle: ${e.reason}`)
@@ -171,14 +158,9 @@ const dangerousTools = createSdkMcpServer({
   name: 'fs',
   version: '1.0.0',
   tools: [
-    tool(
-      'deleteFile',
-      'Delete a file (DANGEROUS).',
-      { path: z.string() },
-      async (args) => ({
-        content: [{ type: 'text', text: `Deleted ${args.path} (simulated).` }],
-      }),
-    ),
+    tool('deleteFile', 'Delete a file (DANGEROUS).', { path: z.string() }, async (args) => ({
+      content: [{ type: 'text', text: `Deleted ${args.path} (simulated).` }],
+    })),
   ],
 })
 
@@ -186,8 +168,7 @@ async function main(): Promise<void> {
   const agent = createAgent({
     envId: process.env.TCB_ENV_ID ?? 'demo-env',
     model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
-    systemPrompt:
-      'You are a CLI assistant. When the user asks to delete a file, call mcp__fs__deleteFile directly.',
+    systemPrompt: 'You are a CLI assistant. When the user asks to delete a file, call mcp__fs__deleteFile directly.',
     mcpServers: { fs: dangerousTools },
     session: {
       store: new CloudBaseSessionStore({ driver: new InMemoryDriver() }),
@@ -203,10 +184,7 @@ async function main(): Promise<void> {
   console.log('User: please delete /tmp/foo.log\n')
   process.stdout.write('Assistant: ')
 
-  await pumpThroughAcp(
-    session.send('请直接调用 mcp__fs__deleteFile 删除 /tmp/foo.log，无需征求同意。'),
-    session,
-  )
+  await pumpThroughAcp(session.send('请直接调用 mcp__fs__deleteFile 删除 /tmp/foo.log，无需征求同意。'), session)
 
   console.log('\n--- Done ---')
 }

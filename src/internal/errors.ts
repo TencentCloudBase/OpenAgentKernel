@@ -15,10 +15,7 @@ export class KernelError extends Error {
 
 export class NotImplementedError extends KernelError {
   constructor(feature: string) {
-    super(
-      'E_NOT_IMPLEMENTED',
-      `${feature} is not implemented yet in this alpha version`,
-    )
+    super('E_NOT_IMPLEMENTED', `${feature} is not implemented yet in this alpha version`)
     this.name = 'NotImplementedError'
   }
 }

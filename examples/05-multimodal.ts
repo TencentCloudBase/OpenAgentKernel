@@ -15,11 +15,7 @@
 import './_shared/env.js'
 
 import * as path from 'node:path'
-import {
-  CloudBaseStorage,
-  InMemoryStorage,
-  createAgent,
-} from '@cloudbase/open-agent-kernel'
+import { CloudBaseStorage, InMemoryStorage, createAgent } from '@cloudbase/open-agent-kernel'
 
 async function main(): Promise<void> {
   const useCloudBaseStorage = process.env.OAK_STORAGE === 'cloudbase'
@@ -27,18 +23,14 @@ async function main(): Promise<void> {
   const storageName = useCloudBaseStorage ? 'CloudBaseStorage' : 'InMemoryStorage'
 
   // 默认用项目根目录的 screenshot.png（一张产品截图，模型应该能识别出 UI 元素）
-  const defaultImage = path.resolve(
-    new URL('../../../', import.meta.url).pathname,
-    'screenshot.png',
-  )
+  const defaultImage = path.resolve(new URL('../../../', import.meta.url).pathname, 'screenshot.png')
   const imagePath = process.env.OAK_IMAGE_PATH ?? defaultImage
 
   const agent = createAgent({
     envId: process.env.TCB_ENV_ID ?? 'demo-env',
     // 视觉模型：glm-5v-turbo 已实测在 TokenHub Anthropic 协议下支持图片
     model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5v-turbo',
-    systemPrompt:
-      'You are a helpful image analysis assistant. Reply concisely in Chinese.',
+    systemPrompt: 'You are a helpful image analysis assistant. Reply concisely in Chinese.',
     storage,
   })
 

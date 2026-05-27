@@ -28,7 +28,10 @@ async function main(): Promise<void> {
   try {
     const parsed = JSON.parse(stdout.slice(jsonStart)) as { tools?: unknown[] }
     console.log('parsed OK, tools.length =', parsed.tools?.length)
-    console.log('first 3 tool names:', parsed.tools?.slice(0, 3).map((t) => (t as { name?: string }).name))
+    console.log(
+      'first 3 tool names:',
+      parsed.tools?.slice(0, 3).map((t) => (t as { name?: string }).name),
+    )
   } catch (e) {
     console.log('parse error:', (e as Error).message)
     // 找出第一个 parse 失败的位置

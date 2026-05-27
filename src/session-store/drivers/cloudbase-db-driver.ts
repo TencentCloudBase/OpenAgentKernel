@@ -14,11 +14,7 @@
  * 用户被强制装 cloudbase 依赖）。
  */
 
-import type {
-  SessionKey,
-  SessionStoreEntry,
-  SessionSummaryEntry,
-} from '@anthropic-ai/claude-agent-sdk'
+import type { SessionKey, SessionStoreEntry, SessionSummaryEntry } from '@anthropic-ai/claude-agent-sdk'
 
 import { ResourceError } from '../../internal/errors.js'
 import { encodeSessionKey, type SessionStoreDriver } from './types.js'
@@ -124,8 +120,7 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
     const init = (mod.default ?? mod) as { init(opts: Record<string, unknown>): CloudBaseApp }
     if (typeof init.init !== 'function') {
       throw new ResourceError(
-        '@cloudbase/node-sdk loaded but `.init()` not available. ' +
-          'Check the version (>= 3.0.0 required).',
+        '@cloudbase/node-sdk loaded but `.init()` not available. ' + 'Check the version (>= 3.0.0 required).',
       )
     }
     this.app = init.init({
@@ -266,9 +261,7 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
 
     if (all.length === 0) return null
 
-    return all
-      .map((row) => row['entry'])
-      .filter((e): e is SessionStoreEntry => e !== null && typeof e === 'object')
+    return all.map((row) => row['entry']).filter((e): e is SessionStoreEntry => e !== null && typeof e === 'object')
   }
 
   async listSessions(projectKey: string): Promise<Array<{ sessionId: string; mtime: number }>> {
@@ -308,10 +301,7 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
     data: Record<string, unknown>
   }): Promise<void> {
     const summariesCol = await this.getCollection('session_summaries')
-    const existing = await summariesCol
-      .where({ projectKey: args.projectKey, sessionId: args.sessionId })
-      .limit(1)
-      .get()
+    const existing = await summariesCol.where({ projectKey: args.projectKey, sessionId: args.sessionId }).limit(1).get()
     if (existing.data && existing.data.length > 0) {
       await summariesCol
         .where({ projectKey: args.projectKey, sessionId: args.sessionId })
@@ -333,17 +323,11 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
     const summariesCol = await this.getCollection('session_summaries')
 
     // 删 entries（含所有 subpath）
-    await entriesCol
-      .where({ projectKey: key.projectKey, sessionId: key.sessionId })
-      .remove()
+    await entriesCol.where({ projectKey: key.projectKey, sessionId: key.sessionId }).remove()
     // 删 sessions 索引（仅主 transcript 时写过）
-    await sessionsCol
-      .where({ projectKey: key.projectKey, sessionId: key.sessionId })
-      .remove()
+    await sessionsCol.where({ projectKey: key.projectKey, sessionId: key.sessionId }).remove()
     // 删 summary
-    await summariesCol
-      .where({ projectKey: key.projectKey, sessionId: key.sessionId })
-      .remove()
+    await summariesCol.where({ projectKey: key.projectKey, sessionId: key.sessionId }).remove()
 
     // 防止 sessionKey 未使用 lint 警告
     void sessionKey
@@ -353,9 +337,7 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
     const entriesCol = await this.getCollection('session_entries')
     // 拉所有 subpath 不为 null 的 entries 的 distinct subpath
     // CloudBase DB 不直接支持 distinct，分页拉所有再去重。
-    const { data } = await entriesCol
-      .where({ projectKey: key.projectKey, sessionId: key.sessionId })
-      .get()
+    const { data } = await entriesCol.where({ projectKey: key.projectKey, sessionId: key.sessionId }).get()
     const subpaths = new Set<string>()
     for (const row of data) {
       const sp = row['subpath']
@@ -375,14 +357,9 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
     mtime: number
   }): Promise<void> {
     const sessionsCol = await this.getCollection('sessions')
-    const existing = await sessionsCol
-      .where({ projectKey: args.projectKey, sessionId: args.sessionId })
-      .limit(1)
-      .get()
+    const existing = await sessionsCol.where({ projectKey: args.projectKey, sessionId: args.sessionId }).limit(1).get()
     if (existing.data && existing.data.length > 0) {
-      await sessionsCol
-        .where({ projectKey: args.projectKey, sessionId: args.sessionId })
-        .update({ mtime: args.mtime })
+      await sessionsCol.where({ projectKey: args.projectKey, sessionId: args.sessionId }).update({ mtime: args.mtime })
     } else {
       await sessionsCol.add({
         sessionKey: args.sessionKey,
@@ -402,11 +379,7 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
     if (uuids.length === 0) return new Set()
     // 简化：单次 where + limit 拉所有同 sessionKey 已存在 uuid。
     // 大批量场景未来改为 IN 查询（需引入 db.command.in）。
-    const { data } = await col
-      .where({ sessionKey })
-      .orderBy('seq', 'desc')
-      .limit(1000)
-      .get()
+    const { data } = await col.where({ sessionKey }).orderBy('seq', 'desc').limit(1000).get()
     const existing = new Set<string>()
     for (const row of data) {
       const u = row['uuid']

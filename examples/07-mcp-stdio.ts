@@ -44,9 +44,7 @@ async function main(): Promise<void> {
   console.log('User: 帮我把 17 和 25 相加，再让 echo 工具回显 "hello mcp"')
   process.stdout.write('Assistant: ')
 
-  for await (const e of session.send(
-    '帮我把 17 和 25 相加，再让 echo 工具回显 "hello mcp"',
-  )) {
+  for await (const e of session.send('帮我把 17 和 25 相加，再让 echo 工具回显 "hello mcp"')) {
     if (e.type === 'message_delta') {
       process.stdout.write(e.text)
     } else if (e.type === 'tool_call') {

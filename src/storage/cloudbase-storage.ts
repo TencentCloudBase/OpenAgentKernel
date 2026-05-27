@@ -15,11 +15,7 @@
 import * as fs from 'node:fs/promises'
 import { ResourceError, StorageError } from '../internal/errors.js'
 import type { AttachmentInput } from '../public/types.js'
-import {
-  assertSupportedImageMime,
-  guessMimeFromBytes,
-  guessMimeFromPath,
-} from './mime.js'
+import { assertSupportedImageMime, guessMimeFromBytes, guessMimeFromPath } from './mime.js'
 import type { ResolveContext, ResolvedAttachment, StorageProvider } from './types.js'
 
 export interface CloudBaseStorageCredentials {
@@ -46,13 +42,8 @@ interface ResolvedCredentials extends CloudBaseStorageCredentials {
 }
 
 interface CloudBaseApp {
-  uploadFile(args: {
-    cloudPath: string
-    fileContent: Uint8Array | Buffer
-  }): Promise<{ fileID: string }>
-  getTempFileURL(args: {
-    fileList: Array<string | { fileID: string; maxAge?: number }>
-  }): Promise<{
+  uploadFile(args: { cloudPath: string; fileContent: Uint8Array | Buffer }): Promise<{ fileID: string }>
+  getTempFileURL(args: { fileList: Array<string | { fileID: string; maxAge?: number }> }): Promise<{
     fileList: Array<{ fileID: string; tempFileURL: string; code?: string }>
   }>
 }
@@ -95,8 +86,7 @@ export class CloudBaseStorage implements StorageProvider {
     const init = (mod.default ?? mod) as { init(opts: Record<string, unknown>): CloudBaseApp }
     if (typeof init.init !== 'function') {
       throw new ResourceError(
-        '@cloudbase/node-sdk loaded but `.init()` not available. ' +
-          'Check the version (>= 3.0.0 required).',
+        '@cloudbase/node-sdk loaded but `.init()` not available. ' + 'Check the version (>= 3.0.0 required).',
       )
     }
     this.app = init.init({
@@ -117,18 +107,14 @@ export class CloudBaseStorage implements StorageProvider {
       return await dynamicImport('@cloudbase/node-sdk')
     } catch {
       throw new ResourceError(
-        '@cloudbase/node-sdk is not installed. Add it as a dependency:\n' +
-          '  pnpm add @cloudbase/node-sdk',
+        '@cloudbase/node-sdk is not installed. Add it as a dependency:\n' + '  pnpm add @cloudbase/node-sdk',
       )
     }
   }
 
   // ─── StorageProvider 接口实现 ──────────────────────────────────
 
-  async resolveAttachment(
-    att: AttachmentInput,
-    ctx: ResolveContext,
-  ): Promise<ResolvedAttachment> {
+  async resolveAttachment(att: AttachmentInput, ctx: ResolveContext): Promise<ResolvedAttachment> {
     if (att.type === 'url') {
       const mimeType = att.mimeType ?? 'image/jpeg'
       assertSupportedImageMime(mimeType)
@@ -159,10 +145,7 @@ export class CloudBaseStorage implements StorageProvider {
       try {
         buf = await fs.readFile(att.source)
       } catch (err) {
-        throw new StorageError(
-          `Failed to read file: ${att.source}`,
-          err instanceof Error ? err : undefined,
-        )
+        throw new StorageError(`Failed to read file: ${att.source}`, err instanceof Error ? err : undefined)
       }
       if (!mimeType) mimeType = guessMimeFromPath(att.source)
       const dotIdx = att.source.lastIndexOf('.')
@@ -185,10 +168,7 @@ export class CloudBaseStorage implements StorageProvider {
       const r = await app.uploadFile({ cloudPath, fileContent: Buffer.from(buf) })
       fileID = r.fileID
     } catch (err) {
-      throw new StorageError(
-        'CloudBase uploadFile failed',
-        err instanceof Error ? err : undefined,
-      )
+      throw new StorageError('CloudBase uploadFile failed', err instanceof Error ? err : undefined)
     }
 
     const url = await this.signCosFileId(fileID)
@@ -215,16 +195,11 @@ export class CloudBaseStorage implements StorageProvider {
         fileList: [{ fileID: fileId, maxAge: this.urlExpiresIn }],
       })
     } catch (err) {
-      throw new StorageError(
-        'CloudBase getTempFileURL failed',
-        err instanceof Error ? err : undefined,
-      )
+      throw new StorageError('CloudBase getTempFileURL failed', err instanceof Error ? err : undefined)
     }
     const item = result.fileList?.[0]
     if (!item || !item.tempFileURL) {
-      throw new StorageError(
-        `CloudBase getTempFileURL returned empty result for fileId=${fileId}`,
-      )
+      throw new StorageError(`CloudBase getTempFileURL returned empty result for fileId=${fileId}`)
     }
     return item.tempFileURL
   }

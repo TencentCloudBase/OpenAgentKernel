@@ -42,9 +42,7 @@ const dangerousTools = createSdkMcpServer({
       'Delete a file from the filesystem (DANGEROUS — should always require approval).',
       { path: z.string().describe('Absolute path to the file to delete') },
       async (args) => ({
-        content: [
-          { type: 'text', text: `Deleted ${args.path} (simulated, nothing actually deleted).` },
-        ],
+        content: [{ type: 'text', text: `Deleted ${args.path} (simulated, nothing actually deleted).` }],
       }),
     ),
   ],
@@ -89,14 +87,11 @@ async function main(): Promise<void> {
   console.log(`[node-A] conversation=${conversationId}\n`)
 
   const prompt =
-    '请直接调用 mcp__fs__deleteFile 工具删除 /tmp/old.log 这个文件。' +
-    '不要提前征求我的同意，直接调用工具就好。'
+    '请直接调用 mcp__fs__deleteFile 工具删除 /tmp/old.log 这个文件。' + '不要提前征求我的同意，直接调用工具就好。'
   console.log(`User: ${prompt}\n`)
   process.stdout.write('Assistant: ')
 
-  let pendingApproval:
-    | { toolUseId: string; toolName: string; input: unknown }
-    | undefined
+  let pendingApproval: { toolUseId: string; toolName: string; input: unknown } | undefined
 
   for await (const e of sessionA.send(prompt)) {
     if (e.type === 'message_delta') {
@@ -174,8 +169,7 @@ async function main(): Promise<void> {
         if (e2.type === 'message_delta') process.stdout.write(e2.text)
         else if (e2.type === 'tool_call')
           process.stdout.write(`\n  → ${e2.toolName}(${JSON.stringify(e2.input).slice(0, 200)})\n  `)
-        else if (e2.type === 'tool_result')
-          process.stdout.write(`\n  ← ${JSON.stringify(e2.output).slice(0, 200)}\n  `)
+        else if (e2.type === 'tool_result') process.stdout.write(`\n  ← ${JSON.stringify(e2.output).slice(0, 200)}\n  `)
         else if (e2.type === 'session_idle') console.log(`\n[session_idle: ${e2.reason}]`)
         else if (e2.type === 'error') console.error('\n[error]', e2.error.message)
       }

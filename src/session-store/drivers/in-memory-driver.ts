@@ -12,11 +12,7 @@
  *   - 故障兜底（CloudBase DB 不可用时降级使用，未来 v0.2+ 接入）
  */
 
-import type {
-  SessionKey,
-  SessionStoreEntry,
-  SessionSummaryEntry,
-} from '@anthropic-ai/claude-agent-sdk'
+import type { SessionKey, SessionStoreEntry, SessionSummaryEntry } from '@anthropic-ai/claude-agent-sdk'
 import { encodeSessionKey, type SessionStoreDriver } from './types.js'
 
 interface SessionRecord {

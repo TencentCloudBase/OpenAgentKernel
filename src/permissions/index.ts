@@ -20,10 +20,7 @@ export {
 } from './hooks.js'
 
 // PR #7.1：分布式 PermissionStore（CloudBase DB driver）
-export {
-  CloudBasePermissionStore,
-  type CloudBasePermissionStoreOptions,
-} from './cloudbase-permission-store.js'
+export { CloudBasePermissionStore, type CloudBasePermissionStoreOptions } from './cloudbase-permission-store.js'
 
 export type { PermissionStoreDriver } from './drivers/types.js'
 

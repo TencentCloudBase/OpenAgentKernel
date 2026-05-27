@@ -13,11 +13,7 @@
  *   - PostgresDriver、RedisDriver、S3Driver、混合 driver 等
  */
 
-import type {
-  SessionKey,
-  SessionStoreEntry,
-  SessionSummaryEntry,
-} from '@anthropic-ai/claude-agent-sdk'
+import type { SessionKey, SessionStoreEntry, SessionSummaryEntry } from '@anthropic-ai/claude-agent-sdk'
 
 export interface SessionStoreDriver {
   /**

@@ -24,10 +24,7 @@ import type {
   SessionStore,
 } from '@anthropic-ai/claude-agent-sdk'
 import { InvalidConfigError } from '../internal/errors.js'
-import {
-  createPreToolUsePermissionHook,
-  type PreToolUseHookLocalState,
-} from '../permissions/hooks.js'
+import { createPreToolUsePermissionHook, type PreToolUseHookLocalState } from '../permissions/hooks.js'
 import type { AgentConfig } from '../public/types.js'
 import { createSandboxMcpServer } from '../sandbox/sandbox-tools.js'
 import type { SandboxInstance } from '../sandbox/types.js'
@@ -46,11 +43,7 @@ const DEFAULT_API_TIMEOUT_MS = 600_000
  * 启用 sessionStore 时设置 OAK_SESSION_LOCAL_DIR 可覆盖。
  */
 function getSessionLocalDir(): string {
-  return (
-    process.env.OAK_SESSION_LOCAL_DIR ??
-    process.env.TMPDIR ??
-    '/tmp'
-  )
+  return process.env.OAK_SESSION_LOCAL_DIR ?? process.env.TMPDIR ?? '/tmp'
 }
 
 export interface BuiltClaudeQueryParams {
@@ -111,9 +104,7 @@ export function buildClaudeQueryOptions(
   // 诊断日志（OAK_DEBUG=1 时打开）
   if (process.env.OAK_DEBUG === '1') {
     const keyPreview =
-      credential.apiKey.length > 12
-        ? `${credential.apiKey.slice(0, 8)}...${credential.apiKey.slice(-4)}`
-        : '***'
+      credential.apiKey.length > 12 ? `${credential.apiKey.slice(0, 8)}...${credential.apiKey.slice(-4)}` : '***'
     // eslint-disable-next-line no-console
     console.error('[oak] credential resolved:', {
       modelId: credential.modelId,
@@ -211,23 +202,17 @@ export function buildClaudeQueryOptions(
  *
  * 校验通过后原样透传给 SDK，**不做任何改写或封装**。
  */
-function validateMcpServers(
-  servers: Record<string, SdkMcpServerConfig>,
-): Record<string, SdkMcpServerConfig> {
+function validateMcpServers(servers: Record<string, SdkMcpServerConfig>): Record<string, SdkMcpServerConfig> {
   for (const [name, config] of Object.entries(servers)) {
     if (config === null || typeof config !== 'object') {
-      throw new InvalidConfigError(
-        `mcpServers["${name}"] must be an object (got ${typeof config})`,
-      )
+      throw new InvalidConfigError(`mcpServers["${name}"] must be an object (got ${typeof config})`)
     }
     const type = (config as { type?: string }).type ?? 'stdio'
     switch (type) {
       case 'stdio': {
         const c = config as { command?: unknown }
         if (typeof c.command !== 'string' || c.command.length === 0) {
-          throw new InvalidConfigError(
-            `mcpServers["${name}"]: stdio server requires a non-empty "command"`,
-          )
+          throw new InvalidConfigError(`mcpServers["${name}"]: stdio server requires a non-empty "command"`)
         }
         break
       }
@@ -235,18 +220,14 @@ function validateMcpServers(
       case 'sse': {
         const c = config as { url?: unknown }
         if (typeof c.url !== 'string' || c.url.length === 0) {
-          throw new InvalidConfigError(
-            `mcpServers["${name}"]: ${type} server requires a non-empty "url"`,
-          )
+          throw new InvalidConfigError(`mcpServers["${name}"]: ${type} server requires a non-empty "url"`)
         }
         break
       }
       case 'sdk': {
         const c = config as { name?: unknown; instance?: unknown }
         if (typeof c.name !== 'string' || c.name.length === 0) {
-          throw new InvalidConfigError(
-            `mcpServers["${name}"]: sdk server requires a non-empty "name"`,
-          )
+          throw new InvalidConfigError(`mcpServers["${name}"]: sdk server requires a non-empty "name"`)
         }
         if (c.instance === null || typeof c.instance !== 'object') {
           throw new InvalidConfigError(
@@ -256,9 +237,7 @@ function validateMcpServers(
         break
       }
       default:
-        throw new InvalidConfigError(
-          `mcpServers["${name}"]: unknown type "${type}" (expected stdio/http/sse/sdk)`,
-        )
+        throw new InvalidConfigError(`mcpServers["${name}"]: unknown type "${type}" (expected stdio/http/sse/sdk)`)
     }
   }
   return servers
@@ -275,9 +254,7 @@ function extractSessionStore(config: AgentConfig): SessionStore | null {
   if (raw === undefined || raw === null) return null
 
   if (typeof raw !== 'object') {
-    throw new Error(
-      'AgentConfig.session.store must be an object implementing the SessionStore interface',
-    )
+    throw new Error('AgentConfig.session.store must be an object implementing the SessionStore interface')
   }
 
   const candidate = raw as Record<string, unknown>

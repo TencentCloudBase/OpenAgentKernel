@@ -7,12 +7,7 @@
  *   - CloudBaseStorage    生产用（落 CloudBase 云存储）
  */
 
-export type {
-  StorageProvider,
-  ResolvedAttachment,
-  ResolveContext,
-  ImageSource,
-} from './types.js'
+export type { StorageProvider, ResolvedAttachment, ResolveContext, ImageSource } from './types.js'
 
 export { InMemoryStorage } from './in-memory-storage.js'
 export {

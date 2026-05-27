@@ -16,27 +16,14 @@ export class InMemoryPermissionDriver implements PermissionStoreDriver {
   private readonly entries = new Map<string, PendingApproval>()
 
   async put(args: { projectKey: string; entry: PendingApproval }): Promise<void> {
-    this.entries.set(
-      buildKey(args.projectKey, args.entry.conversationId, args.entry.toolUseId),
-      args.entry,
-    )
+    this.entries.set(buildKey(args.projectKey, args.entry.conversationId, args.entry.toolUseId), args.entry)
   }
 
-  async get(args: {
-    projectKey: string
-    conversationId: string
-    toolUseId: string
-  }): Promise<PendingApproval | null> {
-    return (
-      this.entries.get(buildKey(args.projectKey, args.conversationId, args.toolUseId)) ?? null
-    )
+  async get(args: { projectKey: string; conversationId: string; toolUseId: string }): Promise<PendingApproval | null> {
+    return this.entries.get(buildKey(args.projectKey, args.conversationId, args.toolUseId)) ?? null
   }
 
-  async delete(args: {
-    projectKey: string
-    conversationId: string
-    toolUseId: string
-  }): Promise<void> {
+  async delete(args: { projectKey: string; conversationId: string; toolUseId: string }): Promise<void> {
     this.entries.delete(buildKey(args.projectKey, args.conversationId, args.toolUseId))
   }
 

@@ -48,9 +48,7 @@ interface ResolvedCredentials extends CloudBasePermissionCredentials {
   region: string
 }
 
-function resolveCredentials(
-  opts?: CloudBaseDbPermissionDriverOptions,
-): ResolvedCredentials {
+function resolveCredentials(opts?: CloudBaseDbPermissionDriverOptions): ResolvedCredentials {
   const fromOpts = opts?.credentials
   const envId = fromOpts?.envId ?? process.env.TCB_ENV_ID
   const secretId = fromOpts?.secretId ?? process.env.TCB_SECRET_ID
@@ -123,8 +121,7 @@ export class CloudBaseDbPermissionDriver implements PermissionStoreDriver {
     const init = (mod.default ?? mod) as { init(opts: Record<string, unknown>): CloudBaseApp }
     if (typeof init.init !== 'function') {
       throw new ResourceError(
-        '@cloudbase/node-sdk loaded but `.init()` not available. ' +
-          'Check the version (>= 3.0.0 required).',
+        '@cloudbase/node-sdk loaded but `.init()` not available. ' + 'Check the version (>= 3.0.0 required).',
       )
     }
     this.app = init.init({
@@ -206,11 +203,7 @@ export class CloudBaseDbPermissionDriver implements PermissionStoreDriver {
     })
   }
 
-  async get(args: {
-    projectKey: string
-    conversationId: string
-    toolUseId: string
-  }): Promise<PendingApproval | null> {
+  async get(args: { projectKey: string; conversationId: string; toolUseId: string }): Promise<PendingApproval | null> {
     const col = await this.getCollection()
     const { data } = await col
       .where({
@@ -224,11 +217,7 @@ export class CloudBaseDbPermissionDriver implements PermissionStoreDriver {
     return rowToEntry(data[0])
   }
 
-  async delete(args: {
-    projectKey: string
-    conversationId: string
-    toolUseId: string
-  }): Promise<void> {
+  async delete(args: { projectKey: string; conversationId: string; toolUseId: string }): Promise<void> {
     const col = await this.getCollection()
     await col
       .where({
@@ -295,8 +284,6 @@ function rowToEntry(row: Record<string, unknown>): PendingApproval {
     toolName: row['toolName'] as string,
     toolInput: row['toolInput'],
     createdAt: row['createdAt'] as number,
-    decision: decision === null || decision === undefined
-      ? undefined
-      : (decision as PendingApproval['decision']),
+    decision: decision === null || decision === undefined ? undefined : (decision as PendingApproval['decision']),
   }
 }

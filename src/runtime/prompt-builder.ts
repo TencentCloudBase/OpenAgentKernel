@@ -15,16 +15,9 @@
  *      为统一性付出的代价可忽略。
  */
 
-import type {
-  AttachmentInput,
-  SessionInput,
-} from '../public/types.js'
+import type { AttachmentInput, SessionInput } from '../public/types.js'
 import { InvalidConfigError } from '../internal/errors.js'
-import type {
-  ImageSource,
-  ResolvedAttachment,
-  StorageProvider,
-} from '../storage/types.js'
+import type { ImageSource, ResolvedAttachment, StorageProvider } from '../storage/types.js'
 
 /**
  * SDKUserMessage 的最小子集（只用 message 字段，其他可选字段不填）。
@@ -62,9 +55,7 @@ export interface BuildPromptArgs {
  * 注意：本函数本身不是 async，但返回值是 AsyncIterable。
  * 内部 generator 在迭代时才执行 attachment 解析（保证流式语义）。
  */
-export async function* buildPromptAsync(
-  args: BuildPromptArgs,
-): AsyncGenerator<SDKUserMessageLike, void, unknown> {
+export async function* buildPromptAsync(args: BuildPromptArgs): AsyncGenerator<SDKUserMessageLike, void, unknown> {
   const { input, storage, envId, sessionId } = args
 
   // 1. 归一化为 { text, attachments }
@@ -106,9 +97,7 @@ export async function* buildPromptAsync(
       type: 'image',
       source: r.source,
     })),
-    ...(normalized.text.length > 0
-      ? [{ type: 'text' as const, text: normalized.text }]
-      : []),
+    ...(normalized.text.length > 0 ? [{ type: 'text' as const, text: normalized.text }] : []),
   ]
 
   yield {
@@ -133,7 +122,5 @@ function normalizeInput(input: string | SessionInput): NormalizedInput {
     return { text: input.content, attachments: input.attachments }
   }
   // tool_result 类型 v0.1 不支持
-  throw new InvalidConfigError(
-    `SessionInput.type='${input.type}' is not supported in this version`,
-  )
+  throw new InvalidConfigError(`SessionInput.type='${input.type}' is not supported in this version`)
 }
