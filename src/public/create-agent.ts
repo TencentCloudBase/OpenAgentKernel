@@ -1,0 +1,612 @@
+import { randomUUID } from 'node:crypto'
+import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk'
+import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
+import {
+  InvalidConfigError,
+  ResourceError,
+} from '../internal/errors.js'
+import {
+  createHookLocalState,
+  InMemoryPermissionStore,
+  type PreToolUseHookLocalState,
+} from '../permissions/index.js'
+import { buildClaudeQueryOptions } from '../runtime/agent-builder.js'
+import {
+  createTranslatorState,
+  translateSdkMessage,
+} from '../runtime/event-translator.js'
+import { buildPromptAsync } from '../runtime/prompt-builder.js'
+import {
+  createCloudBaseMcpServer,
+  type CloudBaseUserCredentials,
+} from '../sandbox/cloudbase-mcp.js'
+import type {
+  SandboxInstance,
+  SandboxRuntime,
+} from '../sandbox/types.js'
+import type { StorageProvider } from '../storage/types.js'
+import type {
+  Agent,
+  AgentConfig,
+  ApprovalDecision,
+  MessageRecord,
+  PermissionStore,
+  SandboxUserCredentials,
+  Session,
+  SessionEvent,
+  SessionInput,
+  SessionStartOptions,
+  SessionSummary,
+} from './types.js'
+
+/**
+ * 创建 CloudBase Open Agent 实例。
+ *
+ * MVP 形态：服务端 kernel SDK，跟用户业务代码同进程。
+ * 内部底层引擎为 Claude Agent SDK（@anthropic-ai/claude-agent-sdk），完全屏蔽。
+ *
+ * 当前版本：v0.1.0-alpha.0
+ * 已支持：
+ *   - startSession / resumeSession / session.send（PR #4）
+ *   - 多模态输入（PR #4.5）
+ *   - MCP 接入（PR #5）
+ *   - Sandbox + CloudBase MCP（PR #6 / #6.5）
+ *   - HITL 工具审批（PR #7.0）：requireApproval / respondApproval / 流终止+resume 范式
+ */
+export function createAgent(config: AgentConfig): Agent {
+  if (!config.envId || typeof config.envId !== 'string') {
+    throw new InvalidConfigError(
+      'AgentConfig.envId is required and must be a non-empty string',
+    )
+  }
+  if (!config.model) {
+    throw new InvalidConfigError('AgentConfig.model is required')
+  }
+
+  if (config.tools) {
+    for (const tool of config.tools) {
+      if (typeof tool.execute !== 'function') {
+        throw new InvalidConfigError(
+          `Custom tool "${tool.name}" is missing 'execute'. ` +
+            `Client-side custom tools (events-based) will be supported in a later version.`,
+        )
+      }
+    }
+  }
+
+  const agentId = randomUUID()
+  const sessionsManagement = createSessionsManagement(config)
+
+  const agent: Agent = {
+    id: agentId,
+    name: config.name,
+
+    async startSession(opts: SessionStartOptions): Promise<Session> {
+      if (!opts.userId) {
+        throw new InvalidConfigError('SessionStartOptions.userId is required')
+      }
+      const conversationId = opts.conversationId ?? randomUUID()
+      return createSession({
+        config,
+        conversationId,
+        userId: opts.userId,
+        resumeFromExisting: false,
+      })
+    },
+
+    async resumeSession(stateJsonOrConversationId: string): Promise<Session> {
+      if (!config.session?.store) {
+        throw new ResourceError(
+          'agent.resumeSession requires AgentConfig.session.store. ' +
+            'Provide a CloudBaseSessionStore (or compatible) when creating the agent.',
+        )
+      }
+      const conversationId = stateJsonOrConversationId
+      return createSession({
+        config,
+        conversationId,
+        userId: 'resumed',
+        resumeFromExisting: true,
+      })
+    },
+
+    sessions: sessionsManagement,
+  }
+
+  return agent
+}
+
+// ============================================================
+// 内部：Session 实现
+// ============================================================
+
+interface SessionDeps {
+  config: AgentConfig
+  conversationId: string
+  userId: string
+  resumeFromExisting: boolean
+}
+
+function createSession(deps: SessionDeps): Session {
+  const { config, conversationId, userId, resumeFromExisting } = deps
+  let abortController: AbortController | undefined
+  let hasStarted = resumeFromExisting
+
+  const sandboxRuntime = extractSandboxRuntime(config)
+  let sandboxInstance: SandboxInstance | undefined
+  let sandboxAcquirePromise: Promise<SandboxInstance> | undefined
+
+  const cloudbaseToolsEnabled = isCloudbaseToolsEnabled(config)
+  let cloudbaseMcpServer: SdkMcpServerConfig | undefined
+  let cloudbaseMcpPromise: Promise<SdkMcpServerConfig | undefined> | undefined
+
+  // PR #7.0：审批 store（默认 InMemoryPermissionStore，进程内单例）。
+  // 仅在用户配了 requireApproval 时启用；不配则 hook 整体不注入。
+  const permissionStore: PermissionStore | undefined =
+    config.permissions?.requireApproval !== undefined
+      ? (config.permissions.store ?? createDefaultPermissionStore())
+      : undefined
+
+  async function ensureSandbox(): Promise<SandboxInstance | undefined> {
+    if (!sandboxRuntime) return undefined
+    if (sandboxInstance) return sandboxInstance
+    if (!sandboxAcquirePromise) {
+      sandboxAcquirePromise = sandboxRuntime.acquire({
+        envId: config.envId,
+        conversationId,
+        scope: config.sandbox?.scope ?? 'session',
+        onProgress: (msg) => {
+          if (process.env.OAK_DEBUG === '1') {
+            // eslint-disable-next-line no-console
+            console.error(`[oak][sandbox] ${msg.phase}: ${msg.message}`)
+          }
+        },
+      })
+    }
+    sandboxInstance = await sandboxAcquirePromise
+    return sandboxInstance
+  }
+
+  async function ensureCloudbaseMcp(
+    sandbox: SandboxInstance,
+  ): Promise<SdkMcpServerConfig | undefined> {
+    if (!cloudbaseToolsEnabled) return undefined
+    if (cloudbaseMcpServer) return cloudbaseMcpServer
+    if (!cloudbaseMcpPromise) {
+      cloudbaseMcpPromise = (async (): Promise<SdkMcpServerConfig | undefined> => {
+        try {
+          const bundle = await createCloudBaseMcpServer({
+            sandbox,
+            getCredentials: () => resolveUserCredentials(config),
+          })
+          if (process.env.OAK_DEBUG === '1') {
+            // eslint-disable-next-line no-console
+            console.error(
+              `[oak][cloudbase-mcp] toolCount=${bundle.toolCount}` +
+                (bundle.degradedReason ? ` reason=${bundle.degradedReason}` : ''),
+            )
+          }
+          return bundle.server as SdkMcpServerConfig
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            '[oak] cloudbase MCP setup failed, agent will continue without cloudbase tools:',
+            (err as Error).message,
+          )
+          return undefined
+        }
+      })()
+    }
+    cloudbaseMcpServer = await cloudbaseMcpPromise
+    return cloudbaseMcpServer
+  }
+
+  const session: Session = {
+    id: conversationId,
+    userId,
+
+    send(input: string | SessionInput): AsyncIterable<SessionEvent> {
+      abortController = new AbortController()
+      const isContinuation = hasStarted
+      hasStarted = true
+      return runClaudeQuery({
+        config,
+        input,
+        abortController,
+        sessionId: conversationId,
+        conversationId,
+        isContinuation,
+        ensureSandbox,
+        ensureCloudbaseMcp,
+        permissionStore,
+      })
+    },
+
+    /**
+     * PR #7.0：注入审批决策并 resume agent 运行。
+     *
+     * "流终止 + 重新进入"范式（不阻塞 send 的 generator，跨进程友好）：
+     *   1. 把 decision 写回 PermissionStore
+     *   2. 起一轮"空 prompt"的 SDK query（resume=conversationId） → 模型从 transcript 重新发起
+     *      之前那个工具调用 → PreToolUse hook 这次从 store 读到决策 → 放行/拒绝
+     *
+     * 调用方不需要持有"那次 send 的 generator"——业务可在任意进程 / 节点（store 共享前提下）调本方法。
+     */
+    respondApproval(opts: {
+      toolUseId: string
+      decision: ApprovalDecision
+    }): AsyncIterable<SessionEvent> {
+      abortController = new AbortController()
+      return runApprovalResume({
+        config,
+        conversationId,
+        toolUseId: opts.toolUseId,
+        decision: opts.decision,
+        abortController,
+        ensureSandbox,
+        ensureCloudbaseMcp,
+        permissionStore,
+      })
+    },
+
+    async getHistory(_opts): Promise<MessageRecord[]> {
+      return []
+    },
+
+    async getState(): Promise<string> {
+      return JSON.stringify({ conversationId, schema: 'oak/v1/sessionRef' })
+    },
+
+    async abort(): Promise<void> {
+      abortController?.abort()
+      if (sandboxInstance) {
+        try {
+          await sandboxInstance.release()
+        } catch {
+          // release 失败不影响业务
+        }
+        sandboxInstance = undefined
+        sandboxAcquirePromise = undefined
+      }
+    },
+  }
+
+  return session
+}
+
+/**
+ * 进程内单例的默认 PermissionStore（懒创建）。
+ *
+ * 同进程多个 createAgent 实例共享一个 InMemoryStore（按 conversationId+toolUseId 隔离），
+ * 这样 send / respondApproval 跨调用能找到 pending entry。
+ *
+ * 多实例 / 跨进程部署场景下，业务应显式传 PermissionStore（PR #7.1 提供 CloudBaseDb 实现）。
+ */
+let _defaultPermissionStore: InMemoryPermissionStore | undefined
+function createDefaultPermissionStore(): InMemoryPermissionStore {
+  if (!_defaultPermissionStore) {
+    _defaultPermissionStore = new InMemoryPermissionStore()
+  }
+  return _defaultPermissionStore
+}
+
+// ============================================================
+// 内部：跑一次 Claude SDK query 并翻译事件流
+// ============================================================
+
+interface RunClaudeQueryArgs {
+  config: AgentConfig
+  input: string | SessionInput
+  abortController: AbortController
+  sessionId: string
+  conversationId: string
+  isContinuation: boolean
+  ensureSandbox: () => Promise<SandboxInstance | undefined>
+  ensureCloudbaseMcp: (
+    sandbox: SandboxInstance,
+  ) => Promise<SdkMcpServerConfig | undefined>
+  permissionStore?: PermissionStore
+}
+
+async function* runClaudeQuery(
+  args: RunClaudeQueryArgs,
+): AsyncGenerator<SessionEvent, void, unknown> {
+  const {
+    config,
+    input,
+    abortController,
+    sessionId,
+    conversationId,
+    isContinuation,
+    ensureSandbox,
+    ensureCloudbaseMcp,
+    permissionStore,
+  } = args
+
+  let q: ReturnType<typeof claudeQuery> | undefined
+  try {
+    const sandbox = await ensureSandbox()
+    const cloudbaseMcp = sandbox ? await ensureCloudbaseMcp(sandbox) : undefined
+
+    // PR #7.0：构造一轮的 hook 本地状态（同 query 内闭包共享）
+    const hookLocalState: PreToolUseHookLocalState = createHookLocalState()
+    // PR #7.0：合并真正生效的 permissions（注入实际的 store——可能是 default in-memory，
+    // 也可能是用户传入的；hook factory 需要它来读决策）。
+    const effectivePermissions = config.permissions
+      ? { ...config.permissions, store: permissionStore }
+      : undefined
+    const effectiveConfig = effectivePermissions
+      ? { ...config, permissions: effectivePermissions }
+      : config
+
+    const { options } = buildClaudeQueryOptions(effectiveConfig, {
+      sandboxInstance: sandbox,
+      extraMcpServers: cloudbaseMcp ? { cloudbase: cloudbaseMcp } : undefined,
+      conversationId,
+      hookLocalState,
+    })
+    const storage = extractStorageProvider(config)
+    const promptStream = buildPromptAsync({
+      input,
+      storage,
+      envId: config.envId,
+      sessionId,
+    })
+
+    const sdkOptions = {
+      ...options,
+      abortController,
+      ...(isContinuation ? { resume: sessionId } : { sessionId }),
+    }
+
+    q = claudeQuery({ prompt: promptStream as never, options: sdkOptions })
+    const translatorState = createTranslatorState()
+    for await (const sdkMsg of q) {
+      for (const event of translateSdkMessage(sdkMsg, translatorState)) {
+        yield event
+      }
+    }
+  } catch (err) {
+    yield {
+      type: 'error',
+      error: err instanceof Error ? err : new Error(String(err)),
+    }
+    yield { type: 'session_idle', reason: 'error' }
+  }
+}
+
+// ============================================================
+// 内部：注入审批决策并 resume agent 运行（PR #7.0）
+// ============================================================
+
+interface RunApprovalResumeArgs {
+  config: AgentConfig
+  conversationId: string
+  toolUseId: string
+  decision: ApprovalDecision
+  abortController: AbortController
+  ensureSandbox: () => Promise<SandboxInstance | undefined>
+  ensureCloudbaseMcp: (
+    sandbox: SandboxInstance,
+  ) => Promise<SdkMcpServerConfig | undefined>
+  permissionStore?: PermissionStore
+}
+
+async function* runApprovalResume(
+  args: RunApprovalResumeArgs,
+): AsyncGenerator<SessionEvent, void, unknown> {
+  const {
+    config,
+    conversationId,
+    toolUseId,
+    decision,
+    abortController,
+    ensureSandbox,
+    ensureCloudbaseMcp,
+    permissionStore,
+  } = args
+
+  if (!permissionStore) {
+    yield {
+      type: 'error',
+      error: new InvalidConfigError(
+        'session.respondApproval requires AgentConfig.permissions.requireApproval to be configured. ' +
+          'Without permissions config, no approval flow exists to resume.',
+      ),
+    }
+    yield { type: 'session_idle', reason: 'error' }
+    return
+  }
+
+  const existing = await permissionStore.get({ conversationId, toolUseId })
+  if (!existing) {
+    yield {
+      type: 'error',
+      error: new ResourceError(
+        `No pending approval found for toolUseId=${toolUseId}. ` +
+          'It may have expired or already been resolved.',
+      ),
+    }
+    yield { type: 'session_idle', reason: 'error' }
+    return
+  }
+  if (existing.decision) {
+    yield {
+      type: 'error',
+      error: new ResourceError(
+        `Approval for toolUseId=${toolUseId} has already been resolved.`,
+      ),
+    }
+    yield { type: 'session_idle', reason: 'error' }
+    return
+  }
+
+  await permissionStore.put({ ...existing, decision })
+
+  // 用具体的 prompt 触发一轮 resume：让模型明确知道"刚才那个工具被批准/拒绝了，请重新调用"。
+  // 为什么不能用空 prompt：SDK 的 resume 默认会让模型自由继续，模型可能"理解错"上下文，
+  // 这里用确定指令引导模型重发同样的工具调用，PreToolUse hook 这次从 store 读到 decision → 放行/拒绝。
+  const resumePrompt = buildResumePrompt(existing.toolName, decision)
+
+  yield* runClaudeQuery({
+    config,
+    input: resumePrompt,
+    abortController,
+    sessionId: conversationId,
+    conversationId,
+    isContinuation: true,
+    ensureSandbox,
+    ensureCloudbaseMcp,
+    permissionStore,
+  })
+}
+
+/**
+ * 构造 resume 阶段给模型的引导 prompt。
+ *
+ * - allow：让模型重新发起被审批的工具调用（hook 这次会放行）
+ * - deny：告诉模型用户拒绝了，不要再重试
+ */
+function buildResumePrompt(toolName: string, decision: ApprovalDecision): string {
+  if (decision.kind === 'allow') {
+    const updated = decision.updatedInput
+      ? `（用户修改了参数为 ${JSON.stringify(decision.updatedInput)}，请按这些参数调用）`
+      : ''
+    return (
+      `[系统通知] 用户已批准刚才的工具调用 \`${toolName}\`${updated}。` +
+      '请立即重新调用该工具完成原任务，不要再询问用户。'
+    )
+  }
+  // deny
+  const reason = decision.reason ?? '未给出原因'
+  return (
+    `[系统通知] 用户已拒绝刚才的工具调用 \`${toolName}\`，原因：${reason}。` +
+    '请不要重试该工具，向用户说明并询问替代方案。'
+  )
+}
+
+// ============================================================
+// 内部：辅助函数
+// ============================================================
+
+function extractStorageProvider(config: AgentConfig): StorageProvider | undefined {
+  const raw = config.storage
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== 'object') {
+    throw new InvalidConfigError(
+      'AgentConfig.storage must be an object implementing StorageProvider',
+    )
+  }
+  const candidate = raw as Record<string, unknown>
+  if (typeof candidate.resolveAttachment !== 'function') {
+    throw new InvalidConfigError(
+      'AgentConfig.storage does not implement StorageProvider (resolveAttachment missing). ' +
+        'Use InMemoryStorage or CloudBaseStorage from @cloudbase/open-agent-kernel.',
+    )
+  }
+  return raw as StorageProvider
+}
+
+function extractSandboxRuntime(config: AgentConfig): SandboxRuntime | undefined {
+  const raw = config.sandbox?.runtime
+  if (raw === undefined || raw === null) return undefined
+  if (typeof raw !== 'object') {
+    throw new InvalidConfigError(
+      'AgentConfig.sandbox.runtime must be an object implementing SandboxRuntime',
+    )
+  }
+  const candidate = raw as Record<string, unknown>
+  if (typeof candidate.acquire !== 'function') {
+    throw new InvalidConfigError(
+      'AgentConfig.sandbox.runtime does not implement SandboxRuntime (acquire missing). ' +
+        'Use AgsStatefulSandbox from @cloudbase/open-agent-kernel.',
+    )
+  }
+  return raw as SandboxRuntime
+}
+
+function isCloudbaseToolsEnabled(config: AgentConfig): boolean {
+  if (!config.sandbox?.runtime) return false
+  return config.sandbox.cloudbaseTools !== false
+}
+
+async function resolveUserCredentials(
+  config: AgentConfig,
+): Promise<CloudBaseUserCredentials> {
+  const raw = config.sandbox?.userCredentials
+  let creds: SandboxUserCredentials | undefined
+
+  if (typeof raw === 'function') {
+    creds = await (raw as () => Promise<SandboxUserCredentials>)()
+  } else if (raw && typeof raw === 'object') {
+    creds = raw as SandboxUserCredentials
+  }
+
+  if (creds) {
+    return {
+      envId: creds.envId ?? config.envId,
+      secretId: creds.secretId,
+      secretKey: creds.secretKey,
+      sessionToken: creds.sessionToken,
+    }
+  }
+
+  const envSecretId = process.env.TCB_SECRET_ID ?? process.env.TENCENTCLOUD_SECRET_ID ?? ''
+  const envSecretKey = process.env.TCB_SECRET_KEY ?? process.env.TENCENTCLOUD_SECRET_KEY ?? ''
+  const envSessionToken = process.env.TCB_TOKEN ?? process.env.TENCENTCLOUD_SESSIONTOKEN
+  const envEnvId = process.env.TCB_ENV_ID ?? config.envId
+
+  if (!envSecretId || !envSecretKey) {
+    throw new InvalidConfigError(
+      'CloudBase MCP tools require user credentials. ' +
+        'Either set AgentConfig.sandbox.userCredentials, ' +
+        'or set process.env TCB_SECRET_ID + TCB_SECRET_KEY. ' +
+        'To disable cloudbase tools entirely, pass `sandbox: { cloudbaseTools: false }`.',
+    )
+  }
+
+  return {
+    envId: envEnvId,
+    secretId: envSecretId,
+    secretKey: envSecretKey,
+    sessionToken: envSessionToken,
+  }
+}
+
+function createSessionsManagement(config: AgentConfig): Agent['sessions'] {
+  return {
+    async list(opts): Promise<SessionSummary[]> {
+      const store = config.session?.store as
+        | { listSessionSummaries?: (k: string) => Promise<unknown[]> }
+        | undefined
+      if (!store?.listSessionSummaries) return []
+      const projectKey = config.session?.projectKey ?? config.envId
+      const summaries = await store.listSessionSummaries(projectKey)
+      void opts
+      return summaries.map((s) => mapSummary(s))
+    },
+    async get(_conversationId): Promise<SessionSummary | null> {
+      return null
+    },
+    async delete(conversationId): Promise<void> {
+      const store = config.session?.store as
+        | { delete?: (key: { projectKey: string; sessionId: string }) => Promise<void> }
+        | undefined
+      if (!store?.delete) return
+      const projectKey = config.session?.projectKey ?? config.envId
+      await store.delete({ projectKey, sessionId: conversationId })
+    },
+  }
+}
+
+function mapSummary(raw: unknown): SessionSummary {
+  const r = (raw ?? {}) as Record<string, unknown>
+  return {
+    conversationId: typeof r.sessionId === 'string' ? r.sessionId : '',
+    userId: '',
+    status: 'idle',
+    createdAt: typeof r.mtime === 'number' ? r.mtime : 0,
+    updatedAt: typeof r.mtime === 'number' ? r.mtime : 0,
+    metadata: typeof r.data === 'object' && r.data !== null ? (r.data as Record<string, unknown>) : {},
+  }
+}
