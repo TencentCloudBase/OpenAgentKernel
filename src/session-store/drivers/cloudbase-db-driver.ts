@@ -266,6 +266,35 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
     return all.map((row) => row['entry']).filter((e): e is SessionStoreEntry => e !== null && typeof e === 'object')
   }
 
+  async loadEntriesByMessageIds(key: SessionKey, messageIds: string[]): Promise<SessionStoreEntry[]> {
+    if (messageIds.length === 0) return []
+    const sessionKey = encodeSessionKey(key)
+    const entriesCol = await this.getCollection('session_entries')
+
+    // CloudBase DB 的 in 查询：需要 db.command.in
+    const app = await this.getApp()
+    const db = app.database() as unknown as { command: { in(arr: string[]): unknown } }
+
+    // CloudBase in 查询单次上限 20，分批查询
+    const BATCH_SIZE = 20
+    const allEntries: SessionStoreEntry[] = []
+    for (let i = 0; i < messageIds.length; i += BATCH_SIZE) {
+      const batch = messageIds.slice(i, i + BATCH_SIZE)
+      const { data } = await entriesCol
+        .where({ sessionKey, uuid: db.command.in(batch) })
+        .orderBy('seq', 'asc')
+        .limit(batch.length)
+        .get()
+      for (const row of data) {
+        const entry = row['entry']
+        if (entry && typeof entry === 'object') {
+          allEntries.push(entry as SessionStoreEntry)
+        }
+      }
+    }
+    return allEntries
+  }
+
   async listSessions(projectKey: string): Promise<Array<{ sessionId: string; mtime: number }>> {
     const sessionsCol = await this.getCollection('sessions')
     // 仅 main transcript（subpath = null）才写入 sessions 索引

@@ -77,6 +77,16 @@ export class InMemoryDriver implements SessionStoreDriver {
     return record.entries.map((e) => ({ ...e }))
   }
 
+  async loadEntriesByMessageIds(key: SessionKey, messageIds: string[]): Promise<SessionStoreEntry[]> {
+    const record = this.sessions.get(encodeSessionKey(key))
+    if (!record) return []
+    const idSet = new Set(messageIds)
+    return record.entries.filter((entry) => {
+      const msgId = (entry as Record<string, unknown> & { message?: { id?: string } }).message?.id || entry.uuid
+      return typeof msgId === 'string' && idSet.has(msgId)
+    })
+  }
+
   async listSessions(projectKey: string): Promise<Array<{ sessionId: string; mtime: number }>> {
     const result: Array<{ sessionId: string; mtime: number }> = []
     for (const record of this.sessions.values()) {

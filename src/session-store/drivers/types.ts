@@ -68,6 +68,19 @@ export interface SessionStoreDriver {
   loadEntries(key: SessionKey): Promise<SessionStoreEntry[] | null>
 
   /**
+   * 加载指定 messageId 列表对应的 entries（用于 getHistory 分页优化）。
+   *
+   * 比 loadEntries 高效：只拉匹配的 entries，不扫描整个 session。
+   * messageId 对应 entry.message.id 或 entry.uuid。
+   *
+   * @returns 按写入顺序排列的 entries（seq 升序）；未找到的 messageId 静默跳过。
+   */
+  loadEntriesByMessageIds(
+    key: SessionKey,
+    messageIds: string[],
+  ): Promise<SessionStoreEntry[]>
+
+  /**
    * 列出某个 projectKey 下的所有 session（仅 main transcript，不含 subpath）。
    * 返回的 mtime 是 Unix epoch 毫秒。
    */

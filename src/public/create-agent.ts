@@ -228,65 +228,52 @@ function createSession(deps: SessionDeps): Session {
     },
 
     async getHistory(opts): Promise<MessageRecord[]> {
-      // 需要 session store 才能查询历史
       const store = config.session?.store
       if (!store) return []
 
-      // 获取底层 driver（CloudBaseSessionStore 暴露 getDriver()）
       const driver = (
-        store as { getDriver?: () => { querySessionMessages: Function; loadEntries: Function } }
+        store as { getDriver?: () => { querySessionMessages: Function; loadEntriesByMessageIds: Function } }
       ).getDriver?.()
       if (!driver) return []
 
       const projectKey = config.session?.projectKey ?? config.envId
 
-      // 1. 查询 session_messages 元数据（分页）
+      // 1. 查询 session_messages 元数据（已分页）
       const metas = await driver.querySessionMessages(projectKey, conversationId, {
         limit: opts?.limit,
         before: opts?.before,
       })
       if (metas.length === 0) return []
 
-      // 2. 加载该会话的所有 entries
-      const entries = await driver.loadEntries({ projectKey, sessionId: conversationId })
+      // 2. 只加载匹配的 entries（分页优化：不再全量扫描）
+      const messageIds = metas.map((m: { messageId: string }) => m.messageId)
+      const entries = await driver.loadEntriesByMessageIds(
+        { projectKey, sessionId: conversationId },
+        messageIds,
+      )
       if (!entries || entries.length === 0) return []
 
-      // 3. 解析 entries 并构建 messageId → SDKMessage 映射
-      const messageMap = new Map<
-        string,
-        { sdkMsg: Record<string, unknown>; entry: { uuid?: string; createdAt?: number } }
-      >()
+      // 3. 构建 messageId → entry 映射
+      const entryMap = new Map<string, Record<string, unknown>>()
       for (const entry of entries) {
-        try {
-          // entry 本身就是 SessionStoreEntry 对象（包含 type, message, uuid, timestamp 等）
-          const sdkMsg = entry as Record<string, unknown>
-          if (!sdkMsg || typeof sdkMsg !== 'object') continue
-          if (sdkMsg.type !== 'assistant' && sdkMsg.type !== 'user') continue
-          const messageId = (sdkMsg.message as { id?: string })?.id || entry.uuid
-          if (messageId) {
-            messageMap.set(messageId, { sdkMsg, entry })
-          }
-        } catch {
-          // 解析失败跳过
+        const sdkMsg = entry as Record<string, unknown>
+        if (!sdkMsg || typeof sdkMsg !== 'object') continue
+        const messageId = (sdkMsg.message as { id?: string })?.id || (entry as { uuid?: string }).uuid
+        if (messageId) {
+          entryMap.set(messageId, sdkMsg)
         }
       }
 
-      // 调试日志
       if (process.env.OAK_DEBUG === '1') {
-        console.error('[oak][getHistory] messageMap size:', messageMap.size)
-        console.error(
-          '[oak][getHistory] metas:',
-          metas.map((m: { messageId: string; role: string }) => ({ messageId: m.messageId, role: m.role })),
-        )
+        console.error('[oak][getHistory] entryMap size:', entryMap.size, ', metas:', metas.length)
       }
 
       // 4. 用元数据顺序组装 MessageRecord
       const result: MessageRecord[] = []
       for (const meta of metas) {
-        const mapped = messageMap.get(meta.messageId)
-        if (!mapped) continue
+        const sdkMsg = entryMap.get(meta.messageId)
+        if (!sdkMsg) continue
 
-        const { sdkMsg } = mapped
         const parts = extractMessageParts(sdkMsg)
         if (parts.length === 0) continue
 
