@@ -286,7 +286,7 @@ function createSession(deps: SessionDeps): Session {
 
       // metas 是 desc 排序，返回给用户改为 asc（时间正序）
       result.reverse()
-      return result
+      return aggregateHistory(result)
     },
 
     async clearHistory(): Promise<void> {
@@ -433,6 +433,93 @@ function extractMessageParts(sdkMsg: Record<string, unknown>): MessagePart[] {
   }
 
   return parts
+}
+
+/**
+ * 聚合 getHistory 结果：把 tool_result 合并到对应的 assistant tool_call 中，
+ * 过滤掉 SDK 内部协议产物（sentinel、resume prompt）。
+ *
+ * 规则：
+ *   1. User 消息中只含 tool_result → 按 toolUseId 合并到 assistant 的 tool_call 后面 → 排除该 user 消息
+ *   2. User 消息含 __OAK_INTERRUPT__ sentinel → 排除（标记对应 tool_call 为 awaiting_approval）
+ *   3. User 消息文本以 [系统通知] 开头 → 排除（HITL resume prompt）
+ *   4. 正常 user 文本消息 → 保留
+ *   5. Assistant 消息 → 保留，附带聚合后的 tool_result
+ */
+function aggregateHistory(records: MessageRecord[]): MessageRecord[] {
+  // Pass 1: 收集 tool_results + 识别内部产物
+  const toolResultMap = new Map<string, MessagePart>()
+  const interruptedToolUseIds = new Set<string>()
+  const excludeIds = new Set<string>()
+
+  for (const msg of records) {
+    if (msg.role !== 'user') continue
+
+    // 检测 HITL sentinel
+    const isSentinel = msg.parts.some(
+      (p) =>
+        p.type === 'tool_result' &&
+        typeof p.output === 'string' &&
+        (p.output as string).includes('__OAK_INTERRUPT__'),
+    )
+    if (isSentinel) {
+      for (const p of msg.parts) {
+        if (p.type === 'tool_result') interruptedToolUseIds.add(p.toolUseId)
+      }
+      excludeIds.add(msg.id)
+      continue
+    }
+
+    // 检测 resume prompt
+    const isResumePrompt = msg.parts.some((p) => p.type === 'text' && p.text.startsWith('[系统通知]'))
+    if (isResumePrompt) {
+      excludeIds.add(msg.id)
+      continue
+    }
+
+    // 纯 tool_result 消息 → 收集等待合并
+    const isAllToolResults = msg.parts.length > 0 && msg.parts.every((p) => p.type === 'tool_result')
+    if (isAllToolResults) {
+      for (const part of msg.parts) {
+        if (part.type === 'tool_result') {
+          toolResultMap.set(part.toolUseId, part)
+        }
+      }
+      excludeIds.add(msg.id)
+    }
+  }
+
+  // Pass 2: 重建记录，附加 tool_result 到 assistant，标记 interrupted tool_call
+  const result: MessageRecord[] = []
+  for (const msg of records) {
+    if (excludeIds.has(msg.id)) continue
+
+    if (msg.role === 'assistant') {
+      const augmentedParts: MessagePart[] = []
+      for (const part of msg.parts) {
+        if (part.type === 'tool_call') {
+          if (interruptedToolUseIds.has(part.toolUseId)) {
+            augmentedParts.push({ ...part, status: 'awaiting_approval' })
+          } else {
+            augmentedParts.push(part)
+          }
+          // 把配对的 tool_result 附在 tool_call 后面
+          const matched = toolResultMap.get(part.toolUseId)
+          if (matched) {
+            augmentedParts.push(matched)
+            toolResultMap.delete(part.toolUseId)
+          }
+        } else {
+          augmentedParts.push(part)
+        }
+      }
+      result.push({ ...msg, parts: augmentedParts })
+    } else {
+      result.push(msg)
+    }
+  }
+
+  return result
 }
 
 // ============================================================

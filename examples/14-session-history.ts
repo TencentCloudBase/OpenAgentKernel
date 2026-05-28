@@ -1,16 +1,18 @@
 /**
- * Example 14: Session History 综合演示（getHistory + MCP 工具 + HITL 审批）
+ * Example 14: Session History 综合演示（真实沙箱 + HITL 审批 + getHistory 聚合）
  *
  * 演示：
- *   1. 基本对话 + getHistory() 查询前端可读消息记录
- *   2. MCP 工具调用（验证 tool_call / tool_result 被正确记录）
- *   3. HITL 审批流程（验证 tool_approval_required 相关消息被记录）
- *   4. 打印 history 原始数据结构（方便调试 / 理解 MessageRecord 格式）
- *   5. clearHistory() 清除消息索引
+ *   1. 真实 AGS 沙箱环境（mcp__sandbox__* 工具）
+ *   2. 安全工具调用（glob/read，不触发审批）
+ *   3. 危险工具 + HITL 审批（bash 命令，触发审批 → 自动 allow）
+ *   4. getHistory() 聚合结果：tool_call + tool_result 配对，内部协议产物过滤
+ *   5. 打印原始 JSON 数据结构
+ *   6. clearHistory() 清除消息索引
  *
  * 前置条件：
- *   - 仅需模型凭证（TENCENTCLOUD_TOKENHUB_API_KEY）
- *   - 不需要 CloudBase DB / 沙箱凭证（使用 InMemoryDriver）
+ *   - TENCENTCLOUD_TOKENHUB_API_KEY（模型凭证）
+ *   - TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY（CloudBase 控制面）
+ *   - TCB_API_KEY（沙箱数据面 JWT）
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/14-session-history.ts
@@ -18,46 +20,7 @@
 import './_shared/env.js'
 
 import { randomUUID } from 'node:crypto'
-import { CloudBaseSessionStore, createAgent, InMemoryDriver } from '@cloudbase/open-agent-kernel'
-import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
-import { z } from 'zod'
-
-// ─── 工具定义：一个安全工具 + 一个危险工具 ────────────────────────────
-
-const mockTools = createSdkMcpServer({
-  name: 'demo',
-  version: '1.0.0',
-  tools: [
-    tool(
-      'queryDatabase',
-      'Query a database collection and return records.',
-      { collection: z.string().describe('Collection name'), limit: z.number().optional().describe('Max records') },
-      async (args) => ({
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify({
-              collection: args.collection,
-              records: [
-                { _id: '001', name: 'Alice', age: 28 },
-                { _id: '002', name: 'Bob', age: 32 },
-              ],
-              total: 2,
-            }),
-          },
-        ],
-      }),
-    ),
-    tool(
-      'deleteRecord',
-      'Delete a record from a collection (DANGEROUS — requires approval).',
-      { collection: z.string().describe('Collection name'), recordId: z.string().describe('Record ID to delete') },
-      async (args) => ({
-        content: [{ type: 'text', text: `Deleted record ${args.recordId} from ${args.collection} (simulated).` }],
-      }),
-    ),
-  ],
-})
+import { AgsStatefulSandbox, CloudBaseSessionStore, createAgent, InMemoryDriver } from '@cloudbase/open-agent-kernel'
 
 // ─── 辅助函数 ──────────────────────────────────────────────────────
 
@@ -84,7 +47,10 @@ function printHistory(history: Awaited<ReturnType<typeof session.getHistory>>): 
           console.log(`   💭 thinking: ${part.text.slice(0, 80)}...`)
           break
         case 'tool_call':
-          console.log(`   🔧 tool_call: ${part.toolName}(${JSON.stringify(part.input).slice(0, 100)})`)
+          console.log(
+            `   🔧 tool_call: ${part.toolName}(${JSON.stringify(part.input).slice(0, 100)})` +
+              (part.status ? ` [status=${part.status}]` : ''),
+          )
           break
         case 'tool_result':
           console.log(`   📦 tool_result: isError=${part.isError}, output=${JSON.stringify(part.output).slice(0, 100)}`)
@@ -100,7 +66,11 @@ function printHistory(history: Awaited<ReturnType<typeof session.getHistory>>): 
 
 // ─── 主流程 ────────────────────────────────────────────────────────
 
-const envId = process.env.TCB_ENV_ID ?? 'demo-env'
+const envId = process.env.TCB_ENV_ID
+if (!envId) {
+  throw new Error('TCB_ENV_ID is required (set it in examples/.env.local)')
+}
+
 const driver = new InMemoryDriver()
 const sessionStore = new CloudBaseSessionStore({ driver, projectKey: envId })
 
@@ -108,16 +78,22 @@ const agent = createAgent({
   envId,
   model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
   systemPrompt:
-    'You are a helpful database assistant. You have two tools:\n' +
-    '  - mcp__demo__queryDatabase: query records (safe)\n' +
-    '  - mcp__demo__deleteRecord: delete a record (DANGEROUS)\n' +
-    'When asked to query, use queryDatabase. When asked to delete, use deleteRecord.\n' +
+    'You are a helpful coding assistant working inside a sandbox.\n' +
+    'You have access to sandbox tools:\n' +
+    '  - mcp__sandbox__glob: list files by pattern (safe)\n' +
+    '  - mcp__sandbox__read: read file content (safe)\n' +
+    '  - mcp__sandbox__bash: execute shell commands (DANGEROUS, requires approval)\n' +
+    'When asked to run commands, use mcp__sandbox__bash directly.\n' +
+    'When asked to list/read files, use glob or read.\n' +
     'Reply concisely in Chinese.',
-  mcpServers: { demo: mockTools },
+  sandbox: {
+    runtime: new AgsStatefulSandbox(),
+    cloudbaseTools: false, // 只用 sandbox 工具，不启用 cloudbase MCP（简化依赖）
+  },
   session: { store: sessionStore, projectKey: envId },
   permissions: {
-    // 只有 deleteRecord 需要审批
-    requireApproval: 'mcp__demo__deleteRecord',
+    // bash 命令需要审批（危险操作）
+    requireApproval: 'mcp__sandbox__bash',
   },
 })
 
@@ -126,12 +102,12 @@ const session = await agent.startSession({ userId: 'demo-user', conversationId }
 console.log(`conversationId: ${conversationId}`)
 
 // ═══════════════════════════════════════════════════════════════════
-// Phase 1: 基本对话 + 工具调用（安全工具，无需审批）
+// Phase 1: 安全工具调用（glob/read，不触发审批）
 // ═══════════════════════════════════════════════════════════════════
 
-printSeparator('Phase 1: 对话 + 安全工具调用')
+printSeparator('Phase 1: 安全工具调用（无需审批）')
 
-const prompt1 = '请查询 users 集合的前 5 条记录。'
+const prompt1 = '请用 glob 工具列出沙箱根目录下的文件（pattern 用 /*）'
 console.log(`User: ${prompt1}\n`)
 process.stdout.write('Assistant: ')
 
@@ -144,12 +120,12 @@ for await (const e of session.send(prompt1)) {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Phase 2: HITL 审批流程（危险工具）
+// Phase 2: 危险工具 + HITL 审批（bash 命令）
 // ═══════════════════════════════════════════════════════════════════
 
-printSeparator('Phase 2: HITL 审批（危险工具触发审批 → 自动 allow）')
+printSeparator('Phase 2: HITL 审批（bash 命令触发审批 → 自动 allow）')
 
-const prompt2 = '请删除 users 集合中 recordId 为 001 的记录。直接调用工具，不要征求我同意。'
+const prompt2 = '请用 bash 工具执行 echo "hello from sandbox" && date 命令。直接调用工具，不要征求我同意。'
 console.log(`User: ${prompt2}\n`)
 process.stdout.write('Assistant: ')
 
@@ -169,7 +145,7 @@ for await (const e of session.send(prompt2)) {
   else if (e.type === 'error') console.error('\n[error]', e.error.message)
 }
 
-// 自动批准（生产环境中应由用户在 UI 操作）
+// 自动批准
 if (pendingApproval) {
   console.log('\n  ✅ 自动批准 (demo mode)...\n')
   process.stdout.write('Assistant (after approval): ')
@@ -185,47 +161,70 @@ if (pendingApproval) {
     else if (e.type === 'error') console.error('\n[error]', e.error.message)
   }
 } else {
-  console.log('\n  ⚠️  未触发审批流程（模型可能没有调用 deleteRecord 工具）')
+  console.log('\n  ⚠️  未触发审批流程（模型可能没有调用 bash 工具）')
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Phase 3: 查询完整 history + 打印原始数据结构
+// Phase 3: getHistory() — 聚合后的语义化格式
 // ═══════════════════════════════════════════════════════════════════
 
-printSeparator('Phase 3: getHistory() — 语义化格式')
+printSeparator('Phase 3: getHistory() — 聚合后的语义化格式')
 
 const history = await session.getHistory({ limit: 50 })
 printHistory(history)
 
-// ─── 打印原始 JSON 数据结构（方便调试 / 理解 MessageRecord 格式） ────
+// ─── 打印原始 JSON 数据结构 ──────────────────────────────────────
 
 printSeparator('Phase 3b: getHistory() — 原始 JSON 数据结构')
 
 console.log(JSON.stringify(history, null, 2))
 
 // ═══════════════════════════════════════════════════════════════════
-// Phase 4: 验证结果统计
+// Phase 4: 验证聚合结果
 // ═══════════════════════════════════════════════════════════════════
 
-printSeparator('Phase 4: 验证结果')
+printSeparator('Phase 4: 验证聚合结果')
 
 let toolCallCount = 0
 let toolResultCount = 0
-let approvalCount = 0
+let pairedCount = 0
+let interruptedCount = 0
 
 for (const msg of history) {
-  for (const part of msg.parts) {
-    if (part.type === 'tool_call') toolCallCount++
+  for (let i = 0; i < msg.parts.length; i++) {
+    const part = msg.parts[i]
+    if (part.type === 'tool_call') {
+      toolCallCount++
+      if (part.status === 'awaiting_approval') interruptedCount++
+      // 检查下一个 part 是否是配对的 tool_result
+      const next = msg.parts[i + 1]
+      if (next && next.type === 'tool_result') pairedCount++
+    }
     if (part.type === 'tool_result') toolResultCount++
-    if (part.type === 'tool_approval_required') approvalCount++
   }
 }
+
+// 验证：不应该有 role=user 且只含 tool_result 的消息（应该被聚合掉了）
+const orphanedToolResultMsgs = history.filter(
+  (m) => m.role === 'user' && m.parts.length > 0 && m.parts.every((p) => p.type === 'tool_result'),
+)
+// 验证：不应该有包含 __OAK_INTERRUPT__ 的消息
+const sentinelMsgs = history.filter((m) =>
+  m.parts.some((p) => p.type === 'tool_result' && JSON.stringify(p.output).includes('__OAK_INTERRUPT__')),
+)
+// 验证：不应该有 [系统通知] 消息
+const resumePromptMsgs = history.filter((m) =>
+  m.parts.some((p) => p.type === 'text' && p.text.startsWith('[系统通知]')),
+)
 
 const checks = [
   { label: '包含 user 消息', pass: history.some((m) => m.role === 'user') },
   { label: '包含 assistant 消息', pass: history.some((m) => m.role === 'assistant') },
-  { label: `包含 tool_call (${toolCallCount} 个)`, pass: toolCallCount > 0 },
-  { label: `包含 tool_result (${toolResultCount} 个)`, pass: toolResultCount > 0 },
+  { label: `tool_call 和 tool_result 在同一 assistant 消息中配对 (${pairedCount} 对)`, pass: pairedCount > 0 },
+  { label: `被中断的 tool_call 标记了 status=awaiting_approval (${interruptedCount} 个)`, pass: interruptedCount > 0 },
+  { label: '无孤立 tool_result user 消息（已聚合）', pass: orphanedToolResultMsgs.length === 0 },
+  { label: '无 __OAK_INTERRUPT__ sentinel 泄露', pass: sentinelMsgs.length === 0 },
+  { label: '无 [系统通知] resume prompt 泄露', pass: resumePromptMsgs.length === 0 },
 ]
 
 for (const c of checks) {
@@ -233,10 +232,10 @@ for (const c of checks) {
 }
 
 const allPassed = checks.every((c) => c.pass)
-console.log(allPassed ? '\n🎉 所有验证通过！' : '\n⚠️  部分验证失败，请检查。')
+console.log(allPassed ? '\n🎉 所有验证通过！聚合机制正常工作。' : '\n⚠️  部分验证失败，请检查。')
 
 // ═══════════════════════════════════════════════════════════════════
-// Phase 5: clearHistory() 演示
+// Phase 5: clearHistory()
 // ═══════════════════════════════════════════════════════════════════
 
 printSeparator('Phase 5: clearHistory() — 清除消息索引')
@@ -248,4 +247,7 @@ const historyAfterClear = await session.getHistory({ limit: 50 })
 console.log(`清除后 getHistory() 返回: ${historyAfterClear.length} 条消息`)
 console.log(historyAfterClear.length === 0 ? '✅ clearHistory 生效' : '⚠️  仍有消息残留')
 
-console.log('\n--- Done ---')
+// ── 清理沙箱 ──
+console.log('\n--- Cleaning up sandbox ---')
+await session.abort()
+console.log('--- Done ---')
