@@ -493,7 +493,7 @@ function aggregateHistory(records: MessageRecord[]): MessageRecord[] {
     }
   }
 
-  // Pass 2: 重建记录，附加 tool_result 到 assistant，标记 interrupted tool_call
+  // Pass 2: 重建记录，附加 tool_result 到 assistant，过滤被放弃的 awaiting_approval
   const result: MessageRecord[] = []
   for (const msg of records) {
     if (excludeIds.has(msg.id)) continue
@@ -503,10 +503,11 @@ function aggregateHistory(records: MessageRecord[]): MessageRecord[] {
       for (const part of msg.parts) {
         if (part.type === 'tool_call') {
           if (interruptedToolUseIds.has(part.toolUseId)) {
-            augmentedParts.push({ ...part, status: 'awaiting_approval' })
-          } else {
-            augmentedParts.push(part)
+            // 被中断且无后续 result → 直接跳过（不展示给用户）
+            // 这类 tool_call 是模型自发调用被 HITL 拦截后从未被 respond 的，属于噪音
+            continue
           }
+          augmentedParts.push(part)
           // 把配对的 tool_result 附在 tool_call 后面
           const matched = toolResultMap.get(part.toolUseId)
           if (matched) {
@@ -517,7 +518,10 @@ function aggregateHistory(records: MessageRecord[]): MessageRecord[] {
           augmentedParts.push(part)
         }
       }
-      result.push({ ...msg, parts: augmentedParts })
+      // 如果过滤后 parts 为空，排除整条消息
+      if (augmentedParts.length > 0) {
+        result.push({ ...msg, parts: augmentedParts })
+      }
     } else {
       result.push(msg)
     }

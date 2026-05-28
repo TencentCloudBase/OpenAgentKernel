@@ -188,14 +188,12 @@ printSeparator('Phase 4: 验证聚合结果')
 let toolCallCount = 0
 let toolResultCount = 0
 let pairedCount = 0
-let interruptedCount = 0
 
 for (const msg of history) {
   for (let i = 0; i < msg.parts.length; i++) {
     const part = msg.parts[i]
     if (part.type === 'tool_call') {
       toolCallCount++
-      if (part.status === 'awaiting_approval') interruptedCount++
       // 检查下一个 part 是否是配对的 tool_result
       const next = msg.parts[i + 1]
       if (next && next.type === 'tool_result') pairedCount++
@@ -221,10 +219,15 @@ const checks = [
   { label: '包含 user 消息', pass: history.some((m) => m.role === 'user') },
   { label: '包含 assistant 消息', pass: history.some((m) => m.role === 'assistant') },
   { label: `tool_call 和 tool_result 在同一 assistant 消息中配对 (${pairedCount} 对)`, pass: pairedCount > 0 },
-  { label: `被中断的 tool_call 标记了 status=awaiting_approval (${interruptedCount} 个)`, pass: interruptedCount > 0 },
   { label: '无孤立 tool_result user 消息（已聚合）', pass: orphanedToolResultMsgs.length === 0 },
   { label: '无 __OAK_INTERRUPT__ sentinel 泄露', pass: sentinelMsgs.length === 0 },
   { label: '无 [系统通知] resume prompt 泄露', pass: resumePromptMsgs.length === 0 },
+  {
+    label: '无被放弃的 awaiting_approval 工具调用（已过滤）',
+    pass: !history.some((m) =>
+      m.parts.some((p) => p.type === 'tool_call' && 'status' in p && p.status === 'awaiting_approval'),
+    ),
+  },
 ]
 
 for (const c of checks) {
