@@ -247,10 +247,7 @@ function createSession(deps: SessionDeps): Session {
 
       // 2. 只加载匹配的 entries（分页优化：不再全量扫描）
       const messageIds = metas.map((m: { messageId: string }) => m.messageId)
-      const entries = await driver.loadEntriesByMessageIds(
-        { projectKey, sessionId: conversationId },
-        messageIds,
-      )
+      const entries = await driver.loadEntriesByMessageIds({ projectKey, sessionId: conversationId }, messageIds)
       if (!entries || entries.length === 0) return []
 
       // 3. 构建 messageId → entry 映射
@@ -290,6 +287,19 @@ function createSession(deps: SessionDeps): Session {
       // metas 是 desc 排序，返回给用户改为 asc（时间正序）
       result.reverse()
       return result
+    },
+
+    async clearHistory(): Promise<void> {
+      const store = config.session?.store
+      if (!store) return
+
+      const driver = (
+        store as { getDriver?: () => { deleteSessionMessages: Function } }
+      ).getDriver?.()
+      if (!driver) return
+
+      const projectKey = config.session?.projectKey ?? config.envId
+      await driver.deleteSessionMessages({ projectKey, sessionId: conversationId })
     },
 
     async getState(): Promise<string> {

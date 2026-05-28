@@ -508,6 +508,14 @@ export interface Session {
   /** 拉取历史消息 */
   getHistory(opts?: { limit?: number; before?: number }): Promise<MessageRecord[]>
 
+  /**
+   * 清除会话消息元数据索引（oak_session_messages）。
+   *
+   * 仅清除前端分页索引数据，不影响 SDK transcript（session 仍可继续对话）。
+   * 用途：用户在 UI 上"清除聊天记录"但保留对话上下文。
+   */
+  clearHistory(): Promise<void>
+
   /** 序列化当前 RunState 为 JSON 字符串（用于跨进程 resume）*/
   getState(): Promise<string>
 
