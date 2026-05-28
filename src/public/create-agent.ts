@@ -527,7 +527,23 @@ function aggregateHistory(records: MessageRecord[]): MessageRecord[] {
     }
   }
 
-  return result
+  // Pass 3: 合并连续 assistant 消息为一个 "turn"
+  // 行业标准：两个 user 消息之间的所有 assistant 内容属于同一个响应轮次
+  const merged: MessageRecord[] = []
+  for (const msg of result) {
+    if (msg.role === 'assistant' && merged.length > 0 && merged[merged.length - 1].role === 'assistant') {
+      // 合并到前一个 assistant 消息
+      const prev = merged[merged.length - 1]
+      merged[merged.length - 1] = {
+        ...prev,
+        parts: [...prev.parts, ...msg.parts],
+      }
+    } else {
+      merged.push(msg)
+    }
+  }
+
+  return merged
 }
 
 // ============================================================
