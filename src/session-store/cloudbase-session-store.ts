@@ -97,7 +97,14 @@ export class CloudBaseSessionStore implements SessionStore {
     // 1. 落盘
     await this.driver.appendEntries(mapped, entries)
 
-    // 2. 增量维护 summary（仅主 transcript 需要 summary）
+    // 2. 提取消息元数据写入 session_messages（PR #4.6：双写机制）
+    if (process.env.OAK_DEBUG === '1') {
+      // eslint-disable-next-line no-console
+      console.error('[oak][session-store] appendSessionMessage called, entryCount=' + entries.length)
+    }
+    await this.driver.appendSessionMessage(mapped, entries)
+
+    // 3. 增量维护 summary（仅主 transcript 需要 summary）
     if (mapped.subpath !== undefined) return
 
     const cacheKey = `${mapped.projectKey}|${mapped.sessionId}`

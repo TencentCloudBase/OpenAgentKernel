@@ -61,6 +61,7 @@ export {
   type CloudBaseDbDriverOptions,
   type CloudBaseCredentials,
   type SessionStoreDriver,
+  type SessionMessageMeta,
   encodeSessionKey,
 } from './session-store/index.js'
 

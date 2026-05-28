@@ -13,7 +13,7 @@
  */
 
 import type { SessionKey, SessionStoreEntry, SessionSummaryEntry } from '@anthropic-ai/claude-agent-sdk'
-import { encodeSessionKey, type SessionStoreDriver } from './types.js'
+import { encodeSessionKey, type SessionStoreDriver, type SessionMessageMeta } from './types.js'
 
 interface SessionRecord {
   projectKey: string
@@ -39,6 +39,8 @@ export class InMemoryDriver implements SessionStoreDriver {
   private readonly sessions = new Map<string, SessionRecord>()
   /** projectKey + sessionId → SummaryRecord（仅主 transcript 需要 summary） */
   private readonly summaries = new Map<string, SummaryRecord>()
+  /** sessionKeyString → SessionMessageMeta[]（PR #4.6：会话消息元数据） */
+  private readonly sessionMessages = new Map<string, SessionMessageMeta[]>()
 
   async appendEntries(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
     const sk = encodeSessionKey(key)
@@ -119,6 +121,112 @@ export class InMemoryDriver implements SessionStoreDriver {
       }
     }
     this.summaries.delete(prefix)
+    // 删除会话消息元数据
+    this.sessionMessages.delete(prefix)
+  }
+
+  async appendSessionMessage(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
+    const sk = encodeSessionKey(key)
+    const now = Date.now()
+
+    // 从 entries 中提取 assistant/user 类型的 SDKMessage
+    for (const entry of entries) {
+      try {
+        // entry 本身就是 SessionStoreEntry 对象（包含 type, message, uuid, timestamp 等）
+        const sdkMsg = entry
+        if (!sdkMsg || typeof sdkMsg !== 'object') {
+          continue
+        }
+        // 只处理 assistant 和 user 类型的消息
+        if (sdkMsg.type !== 'assistant' && sdkMsg.type !== 'user') {
+          continue
+        }
+
+        // 提取关键标识
+        const messageId = (sdkMsg as any).message?.id || entry.uuid
+        if (!messageId) {
+          continue
+        }
+
+        // 幂等检查：已存在则跳过
+        const existingMessages = this.sessionMessages.get(sk) || []
+        if (existingMessages.some((m) => m.messageId === messageId)) {
+          continue
+        }
+
+        // 提取 role
+        const role = sdkMsg.type as 'user' | 'assistant'
+
+        // 提取 createdAt（确保是数字格式：毫秒时间戳）
+        let createdAt: number
+        if (typeof sdkMsg.timestamp === 'string') {
+          createdAt = new Date(sdkMsg.timestamp).getTime()
+        } else if (typeof sdkMsg.timestamp === 'number') {
+          createdAt = sdkMsg.timestamp
+        } else if (typeof entry.createdAt === 'number') {
+          createdAt = entry.createdAt
+        } else {
+          createdAt = now
+        }
+
+        // 提取 status（默认 done）
+        const status = 'done' as const
+
+        // 创建 SessionMessageMeta
+        const meta: SessionMessageMeta = {
+          sessionKey: sk,
+          conversationId: key.sessionId,
+          messageId,
+          role,
+          createdAt,
+          status,
+          mtime: now,
+        }
+
+        // 写入 sessionMessages
+        if (!this.sessionMessages.has(sk)) {
+          this.sessionMessages.set(sk, [])
+        }
+        this.sessionMessages.get(sk)!.push(meta)
+      } catch {
+        // 解析失败跳过（可能是非 JSON 数据）
+        continue
+      }
+    }
+  }
+
+  async querySessionMessages(
+    projectKey: string,
+    conversationId: string,
+    opts?: {
+      limit?: number
+      before?: number
+      after?: number
+    },
+  ): Promise<SessionMessageMeta[]> {
+    const sk = `${projectKey}|${conversationId}`
+    const messages = this.sessionMessages.get(sk) || []
+
+    // 过滤
+    let filtered = messages
+    if (opts?.before) {
+      filtered = filtered.filter((m) => m.createdAt < opts.before!)
+    }
+    if (opts?.after) {
+      filtered = filtered.filter((m) => m.createdAt > opts.after!)
+    }
+
+    // 按 createdAt 降序排列（最新的在前）
+    filtered.sort((a, b) => b.createdAt - a.createdAt)
+
+    // 分页
+    const limit = opts?.limit || 100
+    return filtered.slice(0, limit)
+  }
+
+  async deleteSessionMessages(key: SessionKey): Promise<void> {
+    const sk = encodeSessionKey(key)
+    this.sessionMessages.delete(sk)
   }
 
   async listSubkeys(key: { projectKey: string; sessionId: string }): Promise<string[]> {
@@ -138,6 +246,7 @@ export class InMemoryDriver implements SessionStoreDriver {
   clearAll(): void {
     this.sessions.clear()
     this.summaries.clear()
+    this.sessionMessages.clear()
   }
 
   /** 测试用：返回某 session 的 entries 数（不存在返回 0） */

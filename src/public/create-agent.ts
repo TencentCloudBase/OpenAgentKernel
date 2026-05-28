@@ -13,6 +13,7 @@ import type {
   Agent,
   AgentConfig,
   ApprovalDecision,
+  MessagePart,
   MessageRecord,
   PermissionStore,
   SandboxUserCredentials,
@@ -226,8 +227,79 @@ function createSession(deps: SessionDeps): Session {
       })
     },
 
-    async getHistory(_opts): Promise<MessageRecord[]> {
-      return []
+    async getHistory(opts): Promise<MessageRecord[]> {
+      // 需要 session store 才能查询历史
+      const store = config.session?.store
+      if (!store) return []
+
+      // 获取底层 driver（CloudBaseSessionStore 暴露 getDriver()）
+      const driver = (
+        store as { getDriver?: () => { querySessionMessages: Function; loadEntries: Function } }
+      ).getDriver?.()
+      if (!driver) return []
+
+      const projectKey = config.session?.projectKey ?? config.envId
+
+      // 1. 查询 session_messages 元数据（分页）
+      const metas = await driver.querySessionMessages(projectKey, conversationId, {
+        limit: opts?.limit,
+        before: opts?.before,
+      })
+      if (metas.length === 0) return []
+
+      // 2. 加载该会话的所有 entries
+      const entries = await driver.loadEntries({ projectKey, sessionId: conversationId })
+      if (!entries || entries.length === 0) return []
+
+      // 3. 解析 entries 并构建 messageId → SDKMessage 映射
+      const messageMap = new Map<
+        string,
+        { sdkMsg: Record<string, unknown>; entry: { uuid?: string; createdAt?: number } }
+      >()
+      for (const entry of entries) {
+        try {
+          // entry 本身就是 SessionStoreEntry 对象（包含 type, message, uuid, timestamp 等）
+          const sdkMsg = entry as Record<string, unknown>
+          if (!sdkMsg || typeof sdkMsg !== 'object') continue
+          if (sdkMsg.type !== 'assistant' && sdkMsg.type !== 'user') continue
+          const messageId = (sdkMsg.message as { id?: string })?.id || entry.uuid
+          if (messageId) {
+            messageMap.set(messageId, { sdkMsg, entry })
+          }
+        } catch {
+          // 解析失败跳过
+        }
+      }
+
+      // 调试日志
+      if (process.env.OAK_DEBUG === '1') {
+        console.error('[oak][getHistory] messageMap size:', messageMap.size)
+        console.error('[oak][getHistory] metas:', metas.map(m => ({ messageId: m.messageId, role: m.role })))
+      }
+
+      // 4. 用元数据顺序组装 MessageRecord
+      const result: MessageRecord[] = []
+      for (const meta of metas) {
+        const mapped = messageMap.get(meta.messageId)
+        if (!mapped) continue
+
+        const { sdkMsg } = mapped
+        const parts = extractMessageParts(sdkMsg)
+        if (parts.length === 0) continue
+
+        result.push({
+          id: meta.messageId,
+          conversationId,
+          role: meta.role,
+          parts,
+          status: meta.status,
+          createdAt: meta.createdAt,
+        })
+      }
+
+      // metas 是 desc 排序，返回给用户改为 asc（时间正序）
+      result.reverse()
+      return result
     },
 
     async getState(): Promise<string> {
@@ -265,6 +337,75 @@ function createDefaultPermissionStore(): InMemoryPermissionStore {
     _defaultPermissionStore = new InMemoryPermissionStore()
   }
   return _defaultPermissionStore
+}
+
+/**
+ * 从 SDKMessage 提取 MessagePart[]（PR #4.6：getHistory 内部使用）。
+ *
+ * 处理两种消息类型：
+ *   - assistant: text block → { type: 'text' }, tool_use block → { type: 'tool_call' }, thinking block → { type: 'thinking' }
+ *   - user: text block → { type: 'text' }, tool_result block → { type: 'tool_result' }
+ */
+function extractMessageParts(sdkMsg: Record<string, unknown>): MessagePart[] {
+  const parts: MessagePart[] = []
+  const content = (sdkMsg.message as { content?: unknown[] | string })?.content
+
+  // 处理 content 是字符串的情况（user 消息）
+  if (typeof content === 'string' && content.length > 0) {
+    parts.push({ type: 'text', text: content })
+    return parts
+  }
+
+  if (!Array.isArray(content)) return parts
+
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue
+    const b = block as {
+      type?: string
+      text?: string
+      id?: string
+      name?: string
+      input?: unknown
+      tool_use_id?: string
+      content?: unknown
+      is_error?: boolean
+    }
+
+    switch (b.type) {
+      case 'text':
+        if (typeof b.text === 'string' && b.text.length > 0) {
+          parts.push({ type: 'text', text: b.text })
+        }
+        break
+      case 'thinking':
+        if (typeof b.text === 'string' && b.text.length > 0) {
+          parts.push({ type: 'thinking', text: b.text })
+        }
+        break
+      case 'tool_use':
+        if (b.id && b.name) {
+          parts.push({
+            type: 'tool_call',
+            toolUseId: b.id as string,
+            toolName: b.name as string,
+            input: b.input ?? {},
+          })
+        }
+        break
+      case 'tool_result':
+        if (b.tool_use_id) {
+          parts.push({
+            type: 'tool_result',
+            toolUseId: b.tool_use_id as string,
+            output: b.content ?? null,
+            isError: Boolean(b.is_error),
+          })
+        }
+        break
+    }
+  }
+
+  return parts
 }
 
 // ============================================================

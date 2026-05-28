@@ -18,4 +18,4 @@ export {
   type CloudBaseCredentials,
 } from './drivers/cloudbase-db-driver.js'
 
-export { encodeSessionKey, type SessionStoreDriver } from './drivers/types.js'
+export { encodeSessionKey, type SessionStoreDriver, type SessionMessageMeta } from './drivers/types.js'
