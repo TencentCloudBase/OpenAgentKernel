@@ -316,21 +316,16 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
     metadata?: Record<string, unknown>
   }): Promise<void> {
     const sessionsCol = await this.getCollection('sessions')
-    const existing = await sessionsCol
-      .where({ projectKey: args.projectKey, sessionId: args.sessionId })
-      .limit(1)
-      .get()
+    const existing = await sessionsCol.where({ projectKey: args.projectKey, sessionId: args.sessionId }).limit(1).get()
 
     const now = Date.now()
     if (existing.data && existing.data.length > 0) {
-      await sessionsCol
-        .where({ projectKey: args.projectKey, sessionId: args.sessionId })
-        .update({
-          userId: args.userId,
-          ...(args.title !== undefined ? { title: args.title } : {}),
-          ...(args.metadata !== undefined ? { metadata: args.metadata } : {}),
-          mtime: now,
-        })
+      await sessionsCol.where({ projectKey: args.projectKey, sessionId: args.sessionId }).update({
+        userId: args.userId,
+        ...(args.title !== undefined ? { title: args.title } : {}),
+        ...(args.metadata !== undefined ? { metadata: args.metadata } : {}),
+        mtime: now,
+      })
     } else {
       await sessionsCol.add({
         sessionKey: `${args.projectKey}|${args.sessionId}`,

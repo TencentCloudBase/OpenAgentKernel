@@ -29,6 +29,7 @@ pnpm dlx tsx packages/open-agent-kernel/examples/10-sandbox-cloudbase-tools.ts
 pnpm dlx tsx packages/open-agent-kernel/examples/11-hitl-approval.ts
 pnpm dlx tsx packages/open-agent-kernel/examples/12-hitl-acp-adapter.ts
 pnpm dlx tsx packages/open-agent-kernel/examples/13-hitl-distributed-cloudbase.ts
+pnpm dlx tsx packages/open-agent-kernel/examples/14-session-history.ts
 ```
 
 ## 凭证依赖矩阵
@@ -49,6 +50,7 @@ pnpm dlx tsx packages/open-agent-kernel/examples/13-hitl-distributed-cloudbase.t
 | 11-hitl-approval | ✅ | | | |
 | 12-hitl-acp-adapter | ✅ | | | |
 | 13-hitl-distributed-cloudbase | ✅ | ✅ | ✅ | |
+| 14-session-history | ✅ | | | |
 
 ## 共享工具
 

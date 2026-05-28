@@ -331,17 +331,19 @@ function createSession(deps: SessionDeps): Session {
     }
     if (typeof storeWithRegister.registerSession === 'function') {
       const projectKey = config.session?.projectKey ?? config.envId
-      storeWithRegister.registerSession({
-        projectKey,
-        sessionId: conversationId,
-        userId,
-      }).catch(() => {
-        // 注册失败不阻塞 session 创建
-        if (process.env.OAK_DEBUG === '1') {
-          // eslint-disable-next-line no-console
-          console.error('[oak] registerSession failed (non-blocking)')
-        }
-      })
+      storeWithRegister
+        .registerSession({
+          projectKey,
+          sessionId: conversationId,
+          userId,
+        })
+        .catch(() => {
+          // 注册失败不阻塞 session 创建
+          if (process.env.OAK_DEBUG === '1') {
+            // eslint-disable-next-line no-console
+            console.error('[oak] registerSession failed (non-blocking)')
+          }
+        })
     }
   }
 
@@ -698,9 +700,11 @@ async function resolveUserCredentials(config: AgentConfig): Promise<CloudBaseUse
 function createSessionsManagement(config: AgentConfig): Agent['sessions'] {
   return {
     async list(opts): Promise<SessionSummary[]> {
-      const store = config.session?.store as {
-        listSessions?: (k: string) => Promise<Array<{ sessionId: string; mtime: number; userId?: string }>>
-      } | undefined
+      const store = config.session?.store as
+        | {
+            listSessions?: (k: string) => Promise<Array<{ sessionId: string; mtime: number; userId?: string }>>
+          }
+        | undefined
       if (!store?.listSessions) return []
       const projectKey = config.session?.projectKey ?? config.envId
       const sessions = await store.listSessions(projectKey)

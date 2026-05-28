@@ -42,7 +42,10 @@ export class InMemoryDriver implements SessionStoreDriver {
   /** sessionKeyString → SessionMessageMeta[]（PR #4.6：会话消息元数据） */
   private readonly sessionMessages = new Map<string, SessionMessageMeta[]>()
   /** sessionKey → session metadata (userId, title, etc.) */
-  private readonly sessionMeta = new Map<string, { userId: string; title?: string; metadata?: Record<string, unknown> }>()
+  private readonly sessionMeta = new Map<
+    string,
+    { userId: string; title?: string; metadata?: Record<string, unknown> }
+  >()
 
   async appendEntries(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
     const sk = encodeSessionKey(key)
