@@ -274,7 +274,10 @@ function createSession(deps: SessionDeps): Session {
       // 调试日志
       if (process.env.OAK_DEBUG === '1') {
         console.error('[oak][getHistory] messageMap size:', messageMap.size)
-        console.error('[oak][getHistory] metas:', metas.map(m => ({ messageId: m.messageId, role: m.role })))
+        console.error(
+          '[oak][getHistory] metas:',
+          metas.map((m: { messageId: string; role: string }) => ({ messageId: m.messageId, role: m.role })),
+        )
       }
 
       // 4. 用元数据顺序组装 MessageRecord

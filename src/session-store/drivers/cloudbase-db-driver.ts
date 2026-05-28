@@ -362,7 +362,12 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
 
     if (process.env.OAK_DEBUG === '1') {
       // eslint-disable-next-line no-console
-      console.error('[oak][session-messages] appendSessionMessage start, sessionKey=' + sessionKey + ', entryCount=' + entries.length)
+      console.error(
+        '[oak][session-messages] appendSessionMessage start, sessionKey=' +
+          sessionKey +
+          ', entryCount=' +
+          entries.length,
+      )
     }
 
     // 拉取该 sessionKey 已有的 messageId 集合（幂等检查）
@@ -464,7 +469,14 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
 
     if (process.env.OAK_DEBUG === '1') {
       // eslint-disable-next-line no-console
-      console.error('[oak][session-messages] appendSessionMessage done, processed=' + processedCount + ', skipped=' + skippedCount + ', errors=' + errorCount)
+      console.error(
+        '[oak][session-messages] appendSessionMessage done, processed=' +
+          processedCount +
+          ', skipped=' +
+          skippedCount +
+          ', errors=' +
+          errorCount,
+      )
     }
   }
 
