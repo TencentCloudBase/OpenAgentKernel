@@ -458,9 +458,7 @@ function aggregateHistory(records: MessageRecord[]): MessageRecord[] {
     // 检测 HITL sentinel
     const isSentinel = msg.parts.some(
       (p) =>
-        p.type === 'tool_result' &&
-        typeof p.output === 'string' &&
-        (p.output as string).includes('__OAK_INTERRUPT__'),
+        p.type === 'tool_result' && typeof p.output === 'string' && (p.output as string).includes('__OAK_INTERRUPT__'),
     )
     if (isSentinel) {
       for (const p of msg.parts) {
@@ -482,6 +480,12 @@ function aggregateHistory(records: MessageRecord[]): MessageRecord[] {
     if (isAllToolResults) {
       for (const part of msg.parts) {
         if (part.type === 'tool_result') {
+          // 跳过内部拦截产物（同轮多审批保护）
+          const outputStr = typeof part.output === 'string' ? part.output : JSON.stringify(part.output)
+          if (outputStr.includes('oak_pending_approval_in_turn')) {
+            interruptedToolUseIds.add(part.toolUseId)
+            continue
+          }
           toolResultMap.set(part.toolUseId, part)
         }
       }
