@@ -128,8 +128,25 @@ export class CloudBaseSessionStore implements SessionStore {
     return this.driver.loadEntries(this.mapKey(key))
   }
 
-  async listSessions(projectKey: string): Promise<Array<{ sessionId: string; mtime: number }>> {
+  async listSessions(projectKey: string): Promise<Array<{ sessionId: string; mtime: number; userId?: string }>> {
     return this.driver.listSessions(this.mapProjectKey(projectKey))
+  }
+
+  /**
+   * 注册 session 元数据（userId 等）。
+   * 在 session 创建时由 kernel 调用，不属于 SDK SessionStore 接口。
+   */
+  async registerSession(args: {
+    projectKey: string
+    sessionId: string
+    userId: string
+    title?: string
+    metadata?: Record<string, unknown>
+  }): Promise<void> {
+    await this.driver.registerSession({
+      ...args,
+      projectKey: this.fixedProjectKey ?? args.projectKey,
+    })
   }
 
   async listSessionSummaries(projectKey: string): Promise<SessionSummaryEntry[]> {

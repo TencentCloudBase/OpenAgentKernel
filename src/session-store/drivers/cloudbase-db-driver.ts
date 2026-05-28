@@ -295,7 +295,7 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
     return allEntries
   }
 
-  async listSessions(projectKey: string): Promise<Array<{ sessionId: string; mtime: number }>> {
+  async listSessions(projectKey: string): Promise<Array<{ sessionId: string; mtime: number; userId?: string }>> {
     const sessionsCol = await this.getCollection('sessions')
     // 仅 main transcript（subpath = null）才写入 sessions 索引
     const { data } = await sessionsCol.where({ projectKey }).get()
@@ -304,7 +304,45 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
       .map((row) => ({
         sessionId: row['sessionId'] as string,
         mtime: row['mtime'] as number,
+        userId: typeof row['userId'] === 'string' ? (row['userId'] as string) : undefined,
       }))
+  }
+
+  async registerSession(args: {
+    projectKey: string
+    sessionId: string
+    userId: string
+    title?: string
+    metadata?: Record<string, unknown>
+  }): Promise<void> {
+    const sessionsCol = await this.getCollection('sessions')
+    const existing = await sessionsCol
+      .where({ projectKey: args.projectKey, sessionId: args.sessionId })
+      .limit(1)
+      .get()
+
+    const now = Date.now()
+    if (existing.data && existing.data.length > 0) {
+      await sessionsCol
+        .where({ projectKey: args.projectKey, sessionId: args.sessionId })
+        .update({
+          userId: args.userId,
+          ...(args.title !== undefined ? { title: args.title } : {}),
+          ...(args.metadata !== undefined ? { metadata: args.metadata } : {}),
+          mtime: now,
+        })
+    } else {
+      await sessionsCol.add({
+        sessionKey: `${args.projectKey}|${args.sessionId}`,
+        projectKey: args.projectKey,
+        sessionId: args.sessionId,
+        userId: args.userId,
+        title: args.title ?? null,
+        metadata: args.metadata ?? null,
+        mtime: now,
+        createdAt: now,
+      })
+    }
   }
 
   async listSummaries(projectKey: string): Promise<SessionSummaryEntry[]> {

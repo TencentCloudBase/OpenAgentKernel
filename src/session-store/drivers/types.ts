@@ -75,16 +75,29 @@ export interface SessionStoreDriver {
    *
    * @returns 按写入顺序排列的 entries（seq 升序）；未找到的 messageId 静默跳过。
    */
-  loadEntriesByMessageIds(
-    key: SessionKey,
-    messageIds: string[],
-  ): Promise<SessionStoreEntry[]>
+  loadEntriesByMessageIds(key: SessionKey, messageIds: string[]): Promise<SessionStoreEntry[]>
+
+  /**
+   * 注册 session 元数据（userId 等）。
+   *
+   * 在 session 创建时调用一次。若 session 已存在则更新 userId。
+   * 与 appendEntries 内部的 upsertSessionIndex 不冲突：
+   *   - registerSession 写 userId 等业务元数据
+   *   - upsertSessionIndex 更新 mtime
+   */
+  registerSession(args: {
+    projectKey: string
+    sessionId: string
+    userId: string
+    title?: string
+    metadata?: Record<string, unknown>
+  }): Promise<void>
 
   /**
    * 列出某个 projectKey 下的所有 session（仅 main transcript，不含 subpath）。
    * 返回的 mtime 是 Unix epoch 毫秒。
    */
-  listSessions(projectKey: string): Promise<Array<{ sessionId: string; mtime: number }>>
+  listSessions(projectKey: string): Promise<Array<{ sessionId: string; mtime: number; userId?: string }>>
 
   /**
    * 列出某个 projectKey 下的所有 session summaries。

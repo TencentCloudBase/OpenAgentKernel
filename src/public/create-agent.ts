@@ -293,9 +293,7 @@ function createSession(deps: SessionDeps): Session {
       const store = config.session?.store
       if (!store) return
 
-      const driver = (
-        store as { getDriver?: () => { deleteSessionMessages: Function } }
-      ).getDriver?.()
+      const driver = (store as { getDriver?: () => { deleteSessionMessages: Function } }).getDriver?.()
       if (!driver) return
 
       const projectKey = config.session?.projectKey ?? config.envId
@@ -318,6 +316,33 @@ function createSession(deps: SessionDeps): Session {
         sandboxAcquirePromise = undefined
       }
     },
+  }
+
+  // 持久化 session 元数据（userId）到 store
+  if (config.session?.store && !resumeFromExisting) {
+    const storeWithRegister = config.session.store as {
+      registerSession?: (args: {
+        projectKey: string
+        sessionId: string
+        userId: string
+        title?: string
+        metadata?: Record<string, unknown>
+      }) => Promise<void>
+    }
+    if (typeof storeWithRegister.registerSession === 'function') {
+      const projectKey = config.session?.projectKey ?? config.envId
+      storeWithRegister.registerSession({
+        projectKey,
+        sessionId: conversationId,
+        userId,
+      }).catch(() => {
+        // 注册失败不阻塞 session 创建
+        if (process.env.OAK_DEBUG === '1') {
+          // eslint-disable-next-line no-console
+          console.error('[oak] registerSession failed (non-blocking)')
+        }
+      })
+    }
   }
 
   return session
@@ -673,12 +698,20 @@ async function resolveUserCredentials(config: AgentConfig): Promise<CloudBaseUse
 function createSessionsManagement(config: AgentConfig): Agent['sessions'] {
   return {
     async list(opts): Promise<SessionSummary[]> {
-      const store = config.session?.store as { listSessionSummaries?: (k: string) => Promise<unknown[]> } | undefined
-      if (!store?.listSessionSummaries) return []
+      const store = config.session?.store as {
+        listSessions?: (k: string) => Promise<Array<{ sessionId: string; mtime: number; userId?: string }>>
+      } | undefined
+      if (!store?.listSessions) return []
       const projectKey = config.session?.projectKey ?? config.envId
-      const summaries = await store.listSessionSummaries(projectKey)
+      const sessions = await store.listSessions(projectKey)
       void opts
-      return summaries.map((s) => mapSummary(s))
+      return sessions.map((s) => ({
+        conversationId: s.sessionId,
+        userId: s.userId ?? '',
+        status: 'idle' as const,
+        createdAt: s.mtime,
+        updatedAt: s.mtime,
+      }))
     },
     async get(_conversationId): Promise<SessionSummary | null> {
       return null

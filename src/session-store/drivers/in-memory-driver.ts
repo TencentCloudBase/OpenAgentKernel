@@ -41,6 +41,8 @@ export class InMemoryDriver implements SessionStoreDriver {
   private readonly summaries = new Map<string, SummaryRecord>()
   /** sessionKeyString → SessionMessageMeta[]（PR #4.6：会话消息元数据） */
   private readonly sessionMessages = new Map<string, SessionMessageMeta[]>()
+  /** sessionKey → session metadata (userId, title, etc.) */
+  private readonly sessionMeta = new Map<string, { userId: string; title?: string; metadata?: Record<string, unknown> }>()
 
   async appendEntries(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
     const sk = encodeSessionKey(key)
@@ -87,15 +89,32 @@ export class InMemoryDriver implements SessionStoreDriver {
     })
   }
 
-  async listSessions(projectKey: string): Promise<Array<{ sessionId: string; mtime: number }>> {
-    const result: Array<{ sessionId: string; mtime: number }> = []
+  async listSessions(projectKey: string): Promise<Array<{ sessionId: string; mtime: number; userId?: string }>> {
+    const result: Array<{ sessionId: string; mtime: number; userId?: string }> = []
     for (const record of this.sessions.values()) {
       // 仅主 transcript（subpath 为空）算一个 session
       if (record.projectKey === projectKey && record.subpath === undefined) {
-        result.push({ sessionId: record.sessionId, mtime: record.mtime })
+        const sk = `${record.projectKey}|${record.sessionId}`
+        const meta = this.sessionMeta.get(sk)
+        result.push({ sessionId: record.sessionId, mtime: record.mtime, userId: meta?.userId })
       }
     }
     return result
+  }
+
+  async registerSession(args: {
+    projectKey: string
+    sessionId: string
+    userId: string
+    title?: string
+    metadata?: Record<string, unknown>
+  }): Promise<void> {
+    const sk = `${args.projectKey}|${args.sessionId}`
+    this.sessionMeta.set(sk, {
+      userId: args.userId,
+      title: args.title,
+      metadata: args.metadata,
+    })
   }
 
   async listSummaries(projectKey: string): Promise<SessionSummaryEntry[]> {
@@ -257,6 +276,7 @@ export class InMemoryDriver implements SessionStoreDriver {
     this.sessions.clear()
     this.summaries.clear()
     this.sessionMessages.clear()
+    this.sessionMeta.clear()
   }
 
   /** 测试用：返回某 session 的 entries 数（不存在返回 0） */
