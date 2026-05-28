@@ -100,11 +100,12 @@ function printHistory(history: Awaited<ReturnType<typeof session.getHistory>>): 
 
 // ─── 主流程 ────────────────────────────────────────────────────────
 
+const envId = process.env.TCB_ENV_ID ?? 'demo-env'
 const driver = new InMemoryDriver()
-const sessionStore = new CloudBaseSessionStore({ driver })
+const sessionStore = new CloudBaseSessionStore({ driver, projectKey: envId })
 
 const agent = createAgent({
-  envId: process.env.TCB_ENV_ID ?? 'demo-env',
+  envId,
   model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
   systemPrompt:
     'You are a helpful database assistant. You have two tools:\n' +
@@ -113,7 +114,7 @@ const agent = createAgent({
     'When asked to query, use queryDatabase. When asked to delete, use deleteRecord.\n' +
     'Reply concisely in Chinese.',
   mcpServers: { demo: mockTools },
-  session: { store: sessionStore },
+  session: { store: sessionStore, projectKey: envId },
   permissions: {
     // 只有 deleteRecord 需要审批
     requireApproval: 'mcp__demo__deleteRecord',

@@ -176,13 +176,15 @@ export function buildClaudeQueryOptions(
     ...(mergedMcpServers ? { mcpServers: mergedMcpServers } : {}),
     // ── PR #7.0：审批 hooks ──
     ...(hooks ? { hooks } : {}),
-    // ── 权限模式（PR #7.0：有审批配置时不再 bypass） ──
-    ...(userHasApprovalConfig
-      ? {} // hook 已就位，让 SDK 走默认 permission 流；hook 的 deny 会生效
-      : {
-          permissionMode: 'bypassPermissions' as const,
-          allowDangerouslySkipPermissions: true,
-        }),
+    // ── 权限模式：始终 bypass SDK 内置权限系统 ──
+    // SDK 自带的 permissionMode 会对所有工具要求"用户在终端授权"，
+    // 在服务端程序化场景下无人可授权 → 全部被拒绝。
+    // 我们的 PreToolUse Hook 已经完整实现了审批逻辑：
+    //   - 不匹配 requireApproval 的工具 → Hook 返回 {} → 直接放行
+    //   - 匹配 requireApproval 的工具 → Hook 触发 HITL 流程
+    // 因此始终 bypass SDK 的内置权限系统，让 Hook 全权负责。
+    permissionMode: 'bypassPermissions' as const,
+    allowDangerouslySkipPermissions: true,
     // ── 内置工具默认全部禁用（沙箱能力通过上面的 mcpServers 提供） ──
     tools: [],
   }
