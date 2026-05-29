@@ -333,6 +333,41 @@ await session.clearHistory()
 }
 ```
 
+### 5. `getHistory()` 聚合与过滤（2026-05-29）
+
+`getHistory()` 返回的 `MessageRecord[]` 经过 `aggregateHistory()` 后处理，确保前端拿到干净、可直接渲染的数据：
+
+**聚合规则：**
+
+| 原始数据 | 处理方式 |
+|----------|---------|
+| User 消息只含 tool_result | 按 toolUseId 合并到 assistant 的 tool_call 后 → 排除 user 消息 |
+| User 消息含 `__OAK_INTERRUPT__` | 排除（HITL sentinel） |
+| User 消息 `[系统通知]` 开头 | 排除（resume prompt） |
+| `oak_pending_approval_in_turn` tool_result | 排除（同轮保护） |
+| 被 HITL 中断且从未被 respond 的 tool_call | 排除（abandoned，无用户价值） |
+| 连续多条 assistant 消息 | 合并为一条（parts 拼接），保证严格 user→assistant 交替 |
+
+**最终输出格式：**
+```json
+[
+  { "role": "user", "parts": [{ "type": "text", "text": "请查询..." }] },
+  { "role": "assistant", "parts": [
+    { "type": "tool_call", "toolName": "glob", "input": {} },
+    { "type": "tool_result", "toolUseId": "...", "output": [...] },
+    { "type": "text", "text": "查询完成！..." }
+  ]}
+]
+```
+
+前端直接遍历 `parts` 渲染即可：text → 文字气泡，tool_call+tool_result → 工具执行卡片。
+
+### 6. 修复 SDK 权限系统冲突
+
+**问题**: 配置 HITL (`permissions.requireApproval`) 后，SDK 内置权限系统拦截所有工具（包括不需审批的）。
+
+**修复**: `agent-builder.ts` 始终 `permissionMode: 'bypassPermissions'`，由 PreToolUse Hook 全权负责审批逻辑。
+
 ---
 
 ## 九、环境变量
