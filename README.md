@@ -32,7 +32,7 @@ for await (const event of session.send('帮我创建一个 hello.txt 文件')) {
 | **5 分钟上手** | 纯 npm 库 import，`envId` + `model` 两个参数即可启动 |
 | **CloudBase 资源原生集成** | 数据库 / 云存储 / 云函数 / 静态托管 — 自动通过沙箱注入 |
 | **远程沙箱** | AGS Stateful Sandbox，支持 bash / 文件读写 / 编辑 / 搜索 |
-| **MCP 扩展** | 支持 4 种形态的 MCP Server（stdio / http / sse / sdk） |
+| **MCP 扩展** | 支持 4 种形态的 MCP Server（stdio / http / sse / 进程内 SDK） |
 | **HITL 工具审批** | 敏感操作自动暂停等待用户确认，支持分布式跨节点 resume |
 | **会话持久化** | 多轮对话 + 跨进程 resume + 消息历史查询 |
 | **多模态输入** | 图片附件 + 视觉模型（本地文件 / URL / 云存储） |
@@ -127,6 +127,71 @@ for await (const e of resumed.send('还记得我的名字吗？')) { /* ... */ }
 | `storage` | `StorageProvider` | | 多模态附件存储 |
 | `hooks` | `AgentHooks` | | 业务生命周期钩子 |
 
+<details>
+<summary>配置类型定义展开</summary>
+
+```typescript
+/** 模型配置：简单字符串或完整 spec */
+type ModelInput = string | ModelSpec
+interface ModelSpec {
+  id: string             // 模型 ID，如 'glm-5.1'
+  apiKey?: string        // 自带 key（不传走平台网关）
+  apiBaseUrl?: string    // 自带 endpoint
+}
+
+/** 沙箱配置 */
+interface SandboxConfig {
+  runtime?: SandboxRuntime         // AgsStatefulSandbox 实例
+  scope?: 'session' | 'shared'     // 实例粒度（默认 session）
+  cloudbaseTools?: boolean         // 暴露 mcp__cloudbase__* 工具（默认 true）
+  userCredentials?: SandboxUserCredentials | (() => Promise<SandboxUserCredentials>)
+}
+
+/** 会话持久化配置 */
+interface SessionConfig {
+  store?: SessionStore             // CloudBaseSessionStore 实例
+  projectKey?: string              // 多租户隔离键（推荐传 envId）
+  flush?: 'batched' | 'eager'      // 落盘策略
+}
+
+/** HITL 权限配置 */
+interface PermissionConfig {
+  requireApproval?: RequireApprovalRule  // 哪些工具需要审批
+  store?: PermissionStore                // 审批状态存储（默认 InMemory）
+  approvalTimeoutMs?: number             // 超时时间（默认 30 分钟）
+}
+
+/** 审批规则：字符串通配 / 数组 / 函数 */
+type RequireApprovalRule =
+  | string                          // '*' 全部 | 'Bash' 精确 | 'mcp__*' 通配
+  | string[]                        // 多个规则
+  | ((ctx: { toolName: string; input: unknown }) => boolean)
+
+/** 审批决策 */
+type ApprovalDecision =
+  | { kind: 'allow'; scope?: 'once' | 'session' | 'forever'; updatedInput?: Record<string, unknown> }
+  | { kind: 'deny'; scope?: 'once' | 'session'; reason?: string; interrupt?: boolean }
+
+/** MCP Server 配置（4 种形态） */
+type McpServerConfig =
+  | { type: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }  // 子进程
+  | { type: 'http'; url: string; headers?: Record<string, string> }                     // 远程 HTTP
+  | { type: 'sse'; url: string; headers?: Record<string, string> }                      // 远程 SSE
+  | { type: 'sdk'; name: string; instance: McpServerInstance }                          // 进程内 SDK
+
+/** 业务生命周期钩子 */
+interface AgentHooks {
+  onUserMessage?: (ctx: UserMessageContext) => void | { modifiedPrompt?: string }
+  onToolStart?: (ctx: ToolStartContext) => void
+  onToolEnd?: (ctx: ToolEndContext) => void | { updatedOutput?: unknown }
+  onAgentMessage?: (ctx: AgentMessageContext) => void
+  onSessionStart?: (ctx: SessionContext) => void
+  onSessionEnd?: (ctx: SessionContext) => void
+}
+```
+
+</details>
+
 ### `Agent`
 
 ```typescript
@@ -178,17 +243,81 @@ type SessionEvent =
 
 设置 `sandbox.cloudbaseTools: true`（默认）还会额外暴露 `mcp__cloudbase__*` 工具集（数据库 CRUD / 云存储 / 云函数 / 静态托管等）。
 
+## MCP 扩展
+
+支持 4 种形态接入外部工具。工具名规则：`mcp__{serverName}__{toolName}`。
+
+### 进程内 SDK Server（推荐）
+
+零外部依赖，工具就是普通 TS 函数，凭证 / 上下文跟 kernel 共享：
+
+```typescript
+import { createAgent } from '@cloudbase/open-agent-kernel'
+import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
+import { z } from 'zod'
+
+const calculator = createSdkMcpServer({
+  name: 'calc',
+  version: '1.0.0',
+  tools: [
+    tool('add', 'Add two numbers', { a: z.number(), b: z.number() }, async (args) => ({
+      content: [{ type: 'text', text: String(args.a + args.b) }],
+    })),
+  ],
+})
+
+const agent = createAgent({
+  envId: process.env.TCB_ENV_ID!,
+  model: 'glm-5.1',
+  mcpServers: { calc: calculator }, // 模型看到工具名为 mcp__calc__add
+})
+```
+
+### stdio 子进程
+
+```typescript
+mcpServers: {
+  everything: { type: 'stdio', command: 'npx', args: ['-y', '@modelcontextprotocol/server-everything'] },
+}
+```
+
+### 远程 HTTP / SSE
+
+```typescript
+mcpServers: {
+  remote: { type: 'http', url: 'https://example.com/mcp/v1', headers: { Authorization: 'Bearer xxx' } },
+}
+```
+
 ## HITL 工具审批
 
 对敏感工具调用设置人工审批：
 
 ```typescript
+import {
+  createAgent,
+  AgsStatefulSandbox,
+  CloudBaseSessionStore,
+  CloudBaseDbDriver,
+  CloudBasePermissionStore,
+  CloudBaseDbPermissionDriver,
+} from '@cloudbase/open-agent-kernel'
+
+const envId = process.env.TCB_ENV_ID!
+const sessionStore = new CloudBaseSessionStore({ driver: new CloudBaseDbDriver(), projectKey: envId })
+const permissionStore = new CloudBasePermissionStore({
+  driver: new CloudBaseDbPermissionDriver(),
+  projectKey: envId,
+})
+
 const agent = createAgent({
-  envId, model: 'glm-5.1',
-  session: { store: sessionStore },
+  envId,
+  model: 'glm-5.1',
+  sandbox: { runtime: new AgsStatefulSandbox() },
+  session: { store: sessionStore, projectKey: envId },
   permissions: {
     requireApproval: ['mcp__sandbox__bash', 'mcp__cloudbase__deleteData'],
-    store: permissionStore, // 可选：分布式 store（跨节点审批）
+    store: permissionStore,
   },
 })
 
