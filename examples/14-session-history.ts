@@ -20,7 +20,14 @@
 import './_shared/env.js'
 
 import { randomUUID } from 'node:crypto'
-import { AgsStatefulSandbox, CloudBaseSessionStore, createAgent, InMemoryDriver } from '@cloudbase/open-agent-kernel'
+import {
+  AgsStatefulSandbox,
+  CloudBaseDbDriver,
+  CloudBaseDbPermissionDriver,
+  CloudBasePermissionStore,
+  CloudBaseSessionStore,
+  createAgent,
+} from '@cloudbase/open-agent-kernel'
 
 // ─── 辅助函数 ──────────────────────────────────────────────────────
 
@@ -71,8 +78,13 @@ if (!envId) {
   throw new Error('TCB_ENV_ID is required (set it in examples/.env.local)')
 }
 
-const driver = new InMemoryDriver()
+const driver = new CloudBaseDbDriver()
 const sessionStore = new CloudBaseSessionStore({ driver, projectKey: envId })
+
+const permissionStore = new CloudBasePermissionStore({
+  projectKey: envId,
+  driver: new CloudBaseDbPermissionDriver(),
+})
 
 const agent = createAgent({
   envId,
@@ -94,6 +106,7 @@ const agent = createAgent({
   permissions: {
     // bash 命令需要审批（危险操作）
     requireApproval: 'mcp__sandbox__bash',
+    store: permissionStore,
   },
 })
 
