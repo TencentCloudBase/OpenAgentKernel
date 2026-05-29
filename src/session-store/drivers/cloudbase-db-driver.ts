@@ -200,6 +200,9 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
         // 若同一毫秒内 append 多条，i 提供 tiebreak。
         seq: now * 1000 + i,
         uuid: uuid ?? null,
+        // messageId：与 appendSessionMessage 的 messageId 派生逻辑一致
+        // （message.id || uuid），用于 loadEntriesByMessageIds 查询。
+        messageId: (entry as { message?: { id?: string } }).message?.id || uuid || null,
         type: typeof entry.type === 'string' ? entry.type : 'unknown',
         entry,
         createdAt: now,
@@ -276,12 +279,13 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
     const db = app.database() as unknown as { command: { in(arr: string[]): unknown } }
 
     // CloudBase in 查询单次上限 20，分批查询
+    // 查询 messageId 字段（= entry.message.id || entry.uuid，与 appendSessionMessage 一致）
     const BATCH_SIZE = 20
     const allEntries: SessionStoreEntry[] = []
     for (let i = 0; i < messageIds.length; i += BATCH_SIZE) {
       const batch = messageIds.slice(i, i + BATCH_SIZE)
       const { data } = await entriesCol
-        .where({ sessionKey, uuid: db.command.in(batch) })
+        .where({ sessionKey, messageId: db.command.in(batch) })
         .orderBy('seq', 'asc')
         .limit(batch.length)
         .get()
