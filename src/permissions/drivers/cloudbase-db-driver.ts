@@ -1,17 +1,30 @@
 /**
  * CloudBaseDbPermissionDriver: 把 PermissionStoreDriver 落到 CloudBase 数据库（NoSQL）。
  *
+ * 存储在统一的 `oak_state` 表中（type='permission'），与其他临时状态共享同一集合。
+ * 这样每个小租户环境只需开通 1 张临时状态表，而不是每个功能开一张。
+ *
  * 凭证模式（与 CloudBaseDbDriver / CloudBaseStorage 一致）：
  *   - TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY
  *   - 也支持配置注入（CloudBaseDbPermissionDriverOptions.credentials）
  *
- * 单集合：
- *   - {prefix}permissions  一行 = 一个 pending/decided permission entry
+ * oak_state 文档结构（type='permission'）：
+ *   {
+ *     projectKey: string,
+ *     type: 'permission',
+ *     key: `${conversationId}|${toolUseId}`,
+ *     data: PendingApproval,
+ *     toolName: string,               // 冗余：scanRecent 查询需要
+ *     conversationId: string,         // 冗余：查询便利
+ *     createdAt: number,
+ *     expiresAt: number | null,       // 过期时间（approvalTimeoutMs 后）
+ *     mtime: number,
+ *   }
  *
  * 索引建议（生产部署应在 CloudBase 控制台手动创建）：
- *   1. (projectKey, conversationId, toolUseId)         主键查询：get / delete
- *   2. (projectKey, conversationId, toolName, createdAt desc)  scanRecent 加速
- *   3. (createdAt)                                     可选：批量 cleanup stale
+ *   1. (projectKey, type, key)                                  主键查询：get / delete
+ *   2. (projectKey, type, conversationId, toolName, createdAt desc)  scanRecent
+ *   3. (expiresAt)                                              批量 cleanup stale
  *
  * `@cloudbase/node-sdk` 是 peer dependency，运行时按需加载。
  */
@@ -35,14 +48,22 @@ export interface CloudBaseDbPermissionDriverOptions {
   /** 显式凭证；不传则从 process.env 读取 TCB_ENV_ID/TCB_SECRET_ID/TCB_SECRET_KEY */
   credentials?: CloudBasePermissionCredentials
   /**
-   * 集合名前缀（默认 `oak_`，与 SessionStoreDriver 的 oak_sessions / oak_session_entries
-   * 共享同一前缀；最终集合名为 `oak_permissions`）。
+   * 集合名前缀（默认 `oak_`）。
+   * 最终集合名为 `{prefix}state`（统一临时状态表）。
    */
   collectionPrefix?: string
+  /**
+   * Permission entry 过期时间（毫秒）。
+   * 过期后的 entry 会被 cleanup sweep 清除。
+   * 默认 1800_000（30 分钟），与 DEFAULT_APPROVAL_TIMEOUT_MS 一致。
+   */
+  expiresAfterMs?: number
 }
 
 const DEFAULT_PREFIX = 'oak_'
-const COLLECTION_NAME = 'permissions'
+const STATE_COLLECTION = 'state'
+const ENTRY_TYPE = 'permission'
+const DEFAULT_EXPIRES_AFTER_MS = 1_800_000 // 30 分钟
 
 interface ResolvedCredentials extends CloudBasePermissionCredentials {
   region: string
@@ -105,12 +126,14 @@ interface CloudBaseApp {
 export class CloudBaseDbPermissionDriver implements PermissionStoreDriver {
   private readonly creds: ResolvedCredentials
   private readonly prefix: string
+  private readonly expiresAfterMs: number
   private app: CloudBaseApp | null = null
   private ensured = false
 
   constructor(opts?: CloudBaseDbPermissionDriverOptions) {
     this.creds = resolveCredentials(opts)
     this.prefix = opts?.collectionPrefix ?? DEFAULT_PREFIX
+    this.expiresAfterMs = opts?.expiresAfterMs ?? DEFAULT_EXPIRES_AFTER_MS
   }
 
   // ─── 懒加载 CloudBase Node SDK ──────────────────────────────────
@@ -153,7 +176,7 @@ export class CloudBaseDbPermissionDriver implements PermissionStoreDriver {
   private async getCollection(): Promise<CloudBaseCollection> {
     const app = await this.getApp()
     const db = app.database()
-    const fullName = `${this.prefix}${COLLECTION_NAME}`
+    const fullName = `${this.prefix}${STATE_COLLECTION}`
     if (!this.ensured) {
       try {
         await db.createCollection(fullName)
@@ -165,51 +188,57 @@ export class CloudBaseDbPermissionDriver implements PermissionStoreDriver {
     return db.collection(fullName)
   }
 
+  /** 构建 oak_state 的 key 字段（type 内唯一） */
+  private buildKey(conversationId: string, toolUseId: string): string {
+    return `${conversationId}|${toolUseId}`
+  }
+
   // ─── PermissionStoreDriver 接口实现 ──────────────────────────────
 
   async put(args: { projectKey: string; entry: PendingApproval }): Promise<void> {
     const col = await this.getCollection()
     const { projectKey, entry } = args
     const now = Date.now()
+    const key = this.buildKey(entry.conversationId, entry.toolUseId)
 
-    // CloudBase DB 的 update 对嵌套对象字段使用"点路径合并"语义：
-    //   update({ decision: { kind: 'allow' } })
-    //   被转换为 $set: { 'decision.kind': 'allow' }，
-    //   当原行里 decision 是标量 null 时会报 "Cannot create field 'kind' in element {decision: null}"。
-    //
-    // 为绕开这个问题，put 采用"先 remove 旧行，再 add 新行"的 replace 语义：
-    //   - 主键 (projectKey, conversationId, toolUseId) 上无并发更新（单 toolUseId 串行）
-    //   - 简单可靠，避免子字段 schema 漂移
-    //   - 性能可接受（一次审批往返通常 1~3 次 put）
+    // replace 语义：先删旧行，再 add 新行（避免 CloudBase DB 嵌套对象更新问题）
     await col
       .where({
         projectKey,
-        conversationId: entry.conversationId,
-        toolUseId: entry.toolUseId,
+        type: ENTRY_TYPE,
+        key,
       })
       .remove()
 
     await col.add({
       projectKey,
+      type: ENTRY_TYPE,
+      key,
       conversationId: entry.conversationId,
       toolUseId: entry.toolUseId,
       toolName: entry.toolName,
-      // CloudBase DB 透明转储 unknown：JSON-safe 字段（input 应该是 JSON 可序列化的）
-      toolInput: entry.toolInput as unknown,
+      data: {
+        conversationId: entry.conversationId,
+        toolUseId: entry.toolUseId,
+        toolName: entry.toolName,
+        toolInput: entry.toolInput,
+        createdAt: entry.createdAt,
+        decision: entry.decision ?? null,
+      },
       createdAt: entry.createdAt,
-      // CloudBase DB 不接受 undefined，pending 阶段用 null 显式表达
-      decision: entry.decision ?? null,
+      expiresAt: entry.createdAt + this.expiresAfterMs,
       mtime: now,
     })
   }
 
   async get(args: { projectKey: string; conversationId: string; toolUseId: string }): Promise<PendingApproval | null> {
     const col = await this.getCollection()
+    const key = this.buildKey(args.conversationId, args.toolUseId)
     const { data } = await col
       .where({
         projectKey: args.projectKey,
-        conversationId: args.conversationId,
-        toolUseId: args.toolUseId,
+        type: ENTRY_TYPE,
+        key,
       })
       .limit(1)
       .get()
@@ -219,11 +248,12 @@ export class CloudBaseDbPermissionDriver implements PermissionStoreDriver {
 
   async delete(args: { projectKey: string; conversationId: string; toolUseId: string }): Promise<void> {
     const col = await this.getCollection()
+    const key = this.buildKey(args.conversationId, args.toolUseId)
     await col
       .where({
         projectKey: args.projectKey,
-        conversationId: args.conversationId,
-        toolUseId: args.toolUseId,
+        type: ENTRY_TYPE,
+        key,
       })
       .remove()
   }
@@ -234,21 +264,22 @@ export class CloudBaseDbPermissionDriver implements PermissionStoreDriver {
     toolName: string
   }): Promise<PendingApproval | null> {
     const col = await this.getCollection()
-    // CloudBase DB where 不支持 `decision != null` 字面量，需借 db.command.neq。
-    // 先用动态 command 拿 ne(null)；失败时退化为客户端过滤（拉 limit=20 再筛）。
+
+    // 尝试用 db.command.neq(null) 做服务端过滤
     let neqNullFilter: Record<string, unknown> | null = null
     try {
       const app = await this.getApp()
       const db = app.database() as unknown as { command: { neq?(v: unknown): unknown } }
       if (typeof db.command?.neq === 'function') {
-        neqNullFilter = { decision: db.command.neq(null) }
+        neqNullFilter = { 'data.decision': db.command.neq(null) }
       }
     } catch {
-      // 忽略：退化客户端过滤
+      // 退化客户端过滤
     }
 
-    const baseFilter = {
+    const baseFilter: Record<string, unknown> = {
       projectKey: args.projectKey,
+      type: ENTRY_TYPE,
       conversationId: args.conversationId,
       toolName: args.toolName,
     }
@@ -267,23 +298,74 @@ export class CloudBaseDbPermissionDriver implements PermissionStoreDriver {
     }
     // 客户端过滤：取第一个 decision != null 的
     for (const row of data) {
-      if (row['decision'] !== null && row['decision'] !== undefined) {
+      const rowData = row['data'] as Record<string, unknown> | undefined
+      if (rowData && rowData['decision'] !== null && rowData['decision'] !== undefined) {
         return rowToEntry(row)
       }
     }
     return null
   }
+
+  // ─── 扩展：清理过期 entries ──────────────────────────────────────
+
+  /**
+   * 清理已过期的 permission entries。
+   *
+   * 可选择性调用（定时任务 / session 结束时 / 手动清理）。
+   * 非必须——过期 entry 不影响功能（hook 会检查 isStaleApproval），
+   * 但定期清理可以减少存储占用。
+   *
+   * @returns 清理的条目数
+   */
+  async cleanup(projectKey?: string): Promise<number> {
+    const col = await this.getCollection()
+    const now = Date.now()
+
+    try {
+      const app = await this.getApp()
+      const db = app.database() as unknown as { command: { lt(v: number): unknown } }
+
+      const filter: Record<string, unknown> = {
+        type: ENTRY_TYPE,
+        expiresAt: db.command.lt(now),
+      }
+      if (projectKey) {
+        filter.projectKey = projectKey
+      }
+
+      const { data } = await col.where(filter).limit(100).get()
+      if (!data || data.length === 0) return 0
+
+      await col.where(filter).remove()
+      return data.length
+    } catch {
+      return 0
+    }
+  }
 }
 
-/** CloudBase DB row → PendingApproval（处理 decision: null → undefined） */
+/** oak_state row → PendingApproval */
 function rowToEntry(row: Record<string, unknown>): PendingApproval {
-  const decision = row['decision']
+  const data = row['data'] as Record<string, unknown> | undefined
+  if (!data) {
+    // 兜底：从顶层字段恢复
+    const decision = row['decision']
+    return {
+      conversationId: row['conversationId'] as string,
+      toolUseId: row['toolUseId'] as string,
+      toolName: row['toolName'] as string,
+      toolInput: row['toolInput'],
+      createdAt: row['createdAt'] as number,
+      decision: decision === null || decision === undefined ? undefined : (decision as PendingApproval['decision']),
+    }
+  }
+  const decision = data['decision']
   return {
-    conversationId: row['conversationId'] as string,
-    toolUseId: row['toolUseId'] as string,
-    toolName: row['toolName'] as string,
-    toolInput: row['toolInput'],
-    createdAt: row['createdAt'] as number,
+    conversationId: data['conversationId'] as string,
+    toolUseId: data['toolUseId'] as string,
+    toolName: data['toolName'] as string,
+    toolInput: data['toolInput'],
+    createdAt: data['createdAt'] as number,
     decision: decision === null || decision === undefined ? undefined : (decision as PendingApproval['decision']),
   }
 }

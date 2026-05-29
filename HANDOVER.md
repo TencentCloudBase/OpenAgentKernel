@@ -513,6 +513,39 @@ if (process.env.OAK_DEBUG === '1') {
 }
 ```
 
+### `oak_state`（统一临时状态表）
+
+所有短生命周期的临时数据收敛到此表，通过 `type` 字段区分用途。
+当前 type: `permission`（HITL 审批状态）。未来可扩展 `sandbox_ref`、`lock` 等。
+
+```json
+{
+  "_id": "auto",
+  "projectKey": "env-id",
+  "type": "permission",
+  "key": "conversationId|toolUseId",
+  "conversationId": "conversation-id",
+  "toolUseId": "tool-use-id",
+  "toolName": "mcp__sandbox__bash",
+  "data": {
+    "conversationId": "conversation-id",
+    "toolUseId": "tool-use-id",
+    "toolName": "mcp__sandbox__bash",
+    "toolInput": { "command": "rm -rf /" },
+    "createdAt": 1685264125876,
+    "decision": null | { "kind": "allow", "scope": "once" }
+  },
+  "createdAt": 1685264125876,
+  "expiresAt": 1685265925876,
+  "mtime": 1685264125876
+}
+```
+
+**索引建议：**
+1. `(projectKey, type, key)` — 主键查询
+2. `(projectKey, type, conversationId, toolName, createdAt desc)` — scanRecent
+3. `(expiresAt)` — 批量清理过期条目
+
 ---
 
 ## 十二、待办事项 / 已知问题
