@@ -10,7 +10,7 @@
 Open Agent Kernel（OAK）是面向 **CloudBase 平台开发者** 的服务端 Agent SDK。它封装了底层 AI Agent 引擎，让开发者以 `envId` 为锚点，一行代码创建能读写数据库、操作云存储、执行 Shell 命令的 AI Agent。
 
 ```typescript
-import { createAgent } from '@cloudbase/open-agent-kernel'
+import { createAgent, AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
 
 const agent = createAgent({
   envId: 'my-env-123',
