@@ -23,9 +23,10 @@ import type {
   McpServerConfig as SdkMcpServerConfig,
   SessionStore,
 } from '@anthropic-ai/claude-agent-sdk'
+import { createSdkMcpServer, tool as sdkTool } from '@anthropic-ai/claude-agent-sdk'
 import { InvalidConfigError } from '../internal/errors.js'
 import { createPreToolUsePermissionHook, type PreToolUseHookLocalState } from '../permissions/hooks.js'
-import type { AgentConfig } from '../public/types.js'
+import type { AgentConfig, ToolDefinition } from '../public/types.js'
 import { createSandboxMcpServer } from '../sandbox/sandbox-tools.js'
 import type { SandboxInstance } from '../sandbox/types.js'
 import { resolveCredential, type ResolvedCredential } from './credential-factory.js'
@@ -138,6 +139,11 @@ export function buildClaudeQueryOptions(
       // PR #6.5：cloudbase MCP（mcp__cloudbase__*）等额外内置 server
       Object.assign(merged, extra.extraMcpServers)
     }
+    // ── 用户自定义 ToolDefinition[] → SDK MCP server 'kernel' (mcp__kernel__*)
+    // SDK 的 query() 不接受 tools 数组——所有工具必须打包成 MCP server 注入。
+    if (config.tools && config.tools.length > 0) {
+      merged.kernel = wrapKernelToolsAsMcpServer(config.tools)
+    }
     return Object.keys(merged).length > 0 ? merged : undefined
   })()
 
@@ -193,6 +199,57 @@ export function buildClaudeQueryOptions(
 }
 
 // ─── 辅助 ────────────────────────────────────────────────────────
+
+/**
+ * Wrap user-supplied ToolDefinition[] as a single SDK MCP server. The Claude
+ * Agent SDK exposes user-provided tools only via `mcpServers` (its query()
+ * options has no `tools` array). We pack all of AgentConfig.tools[] into a
+ * single in-process server keyed `kernel`, which makes them visible to the
+ * model as `mcp__kernel__<name>`.
+ *
+ * The user-facing tool name (config.tools[i].name) is preserved as the
+ * MCP-server-tool name; the model sees `mcp__kernel__<name>` but our
+ * event-translator strips the prefix when emitting `tool_call` events
+ * (see toolCallNames map; the SDK gives us the raw bare name).
+ *
+ * Each kernel tool's execute() is wrapped to:
+ *   - parse the input through its Zod schema (kernel does this anyway)
+ *   - call the user's execute()
+ *   - format the return value as { content: [{type:'text', text:...}] }
+ *     because the SDK's MCP transport requires that wire format.
+ *   - propagate thrown errors as is (PR #7.0 sentinel for HITL flows still
+ *     bubbles up; client-side tool sentinels also bubble up unchanged).
+ */
+function wrapKernelToolsAsMcpServer(
+  tools: ToolDefinition[],
+): ReturnType<typeof createSdkMcpServer> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sdkTools: any[] = tools.map((t) =>
+    sdkTool(
+      t.name,
+      t.description,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      t.parameters as any,
+      async (input: Record<string, unknown>) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const out = await (t.execute as any)(input, {
+          toolUseId: '',
+          conversationId: '',
+          userId: '',
+          envId: '',
+          signal: new AbortController().signal,
+        })
+        const text = typeof out === 'string' ? out : JSON.stringify(out)
+        return { content: [{ type: 'text', text }] }
+      },
+    ),
+  )
+  return createSdkMcpServer({
+    name: 'kernel',
+    version: '1.0.0',
+    tools: sdkTools,
+  })
+}
 
 /**
  * 校验 mcpServers：在交给 SDK 前做一些显而易见的预检，
