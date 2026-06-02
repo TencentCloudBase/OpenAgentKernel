@@ -27,7 +27,7 @@ interface SDKUserMessageLike {
   type: 'user'
   message: {
     role: 'user'
-    content: string | Array<TextBlockParam | ImageBlockParam>
+    content: string | Array<TextBlockParam | ImageBlockParam | ToolResultBlockParam>
   }
   parent_tool_use_id: string | null
 }
@@ -40,6 +40,13 @@ interface TextBlockParam {
 interface ImageBlockParam {
   type: 'image'
   source: ImageSource
+}
+
+interface ToolResultBlockParam {
+  type: 'tool_result'
+  tool_use_id: string
+  content: string
+  is_error?: boolean
 }
 
 export interface BuildPromptArgs {
@@ -58,8 +65,30 @@ export interface BuildPromptArgs {
 export async function* buildPromptAsync(args: BuildPromptArgs): AsyncGenerator<SDKUserMessageLike, void, unknown> {
   const { input, storage, envId, sessionId } = args
 
-  // 1. 归一化为 { text, attachments }
+  // 1. 归一化为 NormalizedInput（区分 message / tool_result）
   const normalized = normalizeInput(input)
+
+  // 1.5 tool_result 回灌：构造单个 tool_result content block，直接产出
+  if (normalized.kind === 'tool_result') {
+    const tr = normalized.toolResult
+    const contentText = typeof tr.output === 'string' ? tr.output : safeStringify(tr.output)
+    yield {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: tr.toolUseId,
+            content: contentText,
+            is_error: tr.isError ?? false,
+          },
+        ],
+      },
+      parent_tool_use_id: null,
+    }
+    return
+  }
 
   // 2. 没有 attachments → 走纯文本快路径
   if (!normalized.attachments || normalized.attachments.length === 0) {
@@ -109,18 +138,32 @@ export async function* buildPromptAsync(args: BuildPromptArgs): AsyncGenerator<S
 
 // ─── 辅助 ────────────────────────────────────────────────────────
 
-interface NormalizedInput {
-  text: string
-  attachments?: AttachmentInput[]
-}
+type NormalizedInput =
+  | { kind: 'message'; text: string; attachments?: AttachmentInput[] }
+  | { kind: 'tool_result'; toolResult: Extract<SessionInput, { type: 'tool_result' }> }
+
+// 兼容旧字段访问（text/attachments），message 分支直接展开
+type _MessageNormalized = Extract<NormalizedInput, { kind: 'message' }>
+interface _TextWrap extends _MessageNormalized {}
 
 function normalizeInput(input: string | SessionInput): NormalizedInput {
   if (typeof input === 'string') {
-    return { text: input }
+    return { kind: 'message', text: input }
   }
   if (input.type === 'message') {
-    return { text: input.content, attachments: input.attachments }
+    return { kind: 'message', text: input.content, attachments: input.attachments }
   }
-  // tool_result 类型 v0.1 不支持
+  if (input.type === 'tool_result') {
+    return { kind: 'tool_result', toolResult: input }
+  }
+  // @ts-expect-error: exhaustiveness guard
   throw new InvalidConfigError(`SessionInput.type='${input.type}' is not supported in this version`)
+}
+
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value)
+  } catch {
+    return String(value)
+  }
 }
