@@ -45,7 +45,7 @@ interface ImageBlockParam {
 interface ToolResultBlockParam {
   type: 'tool_result'
   tool_use_id: string
-  content: string
+  content: string | Array<TextBlockParam>
   is_error?: boolean
 }
 
@@ -68,11 +68,16 @@ export async function* buildPromptAsync(args: BuildPromptArgs): AsyncGenerator<S
   // 1. 归一化为 NormalizedInput（区分 message / tool_result）
   const normalized = normalizeInput(input)
 
-  // 1.5 tool_result 回灌：构造单个 tool_result content block，直接产出
+  // 1.5 tool_result 回灌：构造单个 tool_result content block，直接产出。
+  //
+  // Anthropic 协议里 tool_result.content 既支持纯字符串也支持
+  // [{type:'text', text}] 数组形态。某些代理（Anthropic-compatible 网关，
+  // 比如 mimo / OpenRouter 的某些路径）对字符串形态解析不稳，转为数组形态
+  // 兼容性最好。
   if (normalized.kind === 'tool_result') {
     const tr = normalized.toolResult
     const contentText = typeof tr.output === 'string' ? tr.output : safeStringify(tr.output)
-    yield {
+    const message: SDKUserMessageLike = {
       type: 'user',
       message: {
         role: 'user',
@@ -80,13 +85,17 @@ export async function* buildPromptAsync(args: BuildPromptArgs): AsyncGenerator<S
           {
             type: 'tool_result',
             tool_use_id: tr.toolUseId,
-            content: contentText,
+            content: [{ type: 'text', text: contentText }],
             is_error: tr.isError ?? false,
           },
         ],
       },
       parent_tool_use_id: null,
     }
+    if (process.env.OAK_DEBUG_PROMPT) {
+      console.error('[prompt-builder] tool_result yield:', JSON.stringify(message))
+    }
+    yield message
     return
   }
 
