@@ -139,10 +139,13 @@ export function buildClaudeQueryOptions(
       // PR #6.5：cloudbase MCP（mcp__cloudbase__*）等额外内置 server
       Object.assign(merged, extra.extraMcpServers)
     }
-    // ── 用户自定义 ToolDefinition[] → SDK MCP server 'kernel' (mcp__kernel__*)
+    // ── 用户自定义 ToolDefinition[] → SDK MCP server 'custom' (mcp__custom__*)
     // SDK 的 query() 不接受 tools 数组——所有工具必须打包成 MCP server 注入。
+    // 用 'custom' 作为 server key（而不是 'kernel'）：模型看到的工具名前缀
+    // mcp__custom__<name> 在语义上明确告诉调用链"这是用户声明的、由 client/上层
+    // 业务代码实现的工具"，与 mcp__sandbox__* / mcp__cloudbase__* 区分开。
     if (config.tools && config.tools.length > 0) {
-      merged.kernel = wrapKernelToolsAsMcpServer(config.tools)
+      merged.custom = wrapKernelToolsAsMcpServer(config.tools)
     }
     return Object.keys(merged).length > 0 ? merged : undefined
   })()
@@ -204,13 +207,15 @@ export function buildClaudeQueryOptions(
  * Wrap user-supplied ToolDefinition[] as a single SDK MCP server. The Claude
  * Agent SDK exposes user-provided tools only via `mcpServers` (its query()
  * options has no `tools` array). We pack all of AgentConfig.tools[] into a
- * single in-process server keyed `kernel`, which makes them visible to the
- * model as `mcp__kernel__<name>`.
+ * single in-process server keyed `custom`, which makes them visible to the
+ * model as `mcp__custom__<name>`. The 'custom' name signals "user-declared
+ * tool, not a kernel-provided builtin like sandbox/cloudbase".
  *
  * The user-facing tool name (config.tools[i].name) is preserved as the
- * MCP-server-tool name; the model sees `mcp__kernel__<name>` but our
- * event-translator strips the prefix when emitting `tool_call` events
- * (see toolCallNames map; the SDK gives us the raw bare name).
+ * MCP-server-tool name. Consumers see `mcp__custom__<name>` in tool_call
+ * events — they should match against that prefix when needed (e.g. the
+ * stop-and-resume pump in a runtime that needs to distinguish client-side
+ * custom tools from sandbox tools).
  *
  * Each kernel tool's execute() is wrapped to:
  *   - parse the input through its Zod schema (kernel does this anyway)
@@ -220,9 +225,7 @@ export function buildClaudeQueryOptions(
  *   - propagate thrown errors as is (PR #7.0 sentinel for HITL flows still
  *     bubbles up; client-side tool sentinels also bubble up unchanged).
  */
-function wrapKernelToolsAsMcpServer(
-  tools: ToolDefinition[],
-): ReturnType<typeof createSdkMcpServer> {
+function wrapKernelToolsAsMcpServer(tools: ToolDefinition[]): ReturnType<typeof createSdkMcpServer> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sdkTools: any[] = tools.map((t) =>
     sdkTool(
@@ -245,7 +248,7 @@ function wrapKernelToolsAsMcpServer(
     ),
   )
   return createSdkMcpServer({
-    name: 'kernel',
+    name: 'custom',
     version: '1.0.0',
     tools: sdkTools,
   })
