@@ -20,6 +20,28 @@ import type { ApprovalDecision, PendingApproval, PermissionConfig } from '../pub
 import { compileRequireApprovalPredicate, DEFAULT_APPROVAL_TIMEOUT_MS, isStaleApproval } from './store.js'
 
 /**
+ * Magic string used inside `updatedInput` to inject a client-supplied tool
+ * result back into a custom tool's execute() call. The client-tool stub
+ * reads this key and returns its content as the tool result, so the SDK
+ * writes a real (non-error) tool_result to the transcript.
+ */
+export const OAK_CLIENT_TOOL_RESULT_KEY = '__oak_client_tool_result__'
+
+/**
+ * Pending entry shape for client-side tools (mirrors PendingApproval but
+ * carries `output` instead of `decision`).
+ */
+export interface PendingClientToolResult {
+  conversationId: string
+  toolUseId: string
+  toolName: string
+  toolInput: unknown
+  /** Set once the host calls session.respondToolUse(). */
+  result?: { output: unknown; isError: boolean }
+  createdAt: number
+}
+
+/**
  * Sentinel：识别 deny reason 是 kernel 自己塞的"中断信号"还是模型/真实 deny。
  *
  * 选择 `__OAK_INTERRUPT__` 是为了：
@@ -101,6 +123,42 @@ export function parseInterruptSignal(reason: string): InterruptSignalPayload | n
 }
 
 // ─────────────────────────────────────────────────────────
+// Client-tool sentinel (PR #7.1)
+// ─────────────────────────────────────────────────────────
+//
+// Same idea as the approval sentinel but signals "stop the turn — this tool
+// must be executed by the client". Used for tools whose definitions live in
+// AgentConfig.tools[] and whose `execute()` is a stub: the kernel never
+// actually runs them, it pauses the turn (via permissionDecision='deny' +
+// sentinel) and emits a `tool_use_required` SessionEvent so the host can
+// run the tool elsewhere and feed the result back via session.send({type:
+// 'tool_result'}).
+//
+// Wire format mirrors InterruptSignalPayload to share parser code; the
+// discriminator is OAK_CLIENT_TOOL_SENTINEL (different magic string).
+
+export const OAK_CLIENT_TOOL_SENTINEL = '__OAK_CLIENT_TOOL__'
+
+export interface ClientToolSignalPayload {
+  [OAK_CLIENT_TOOL_SENTINEL]: true
+  conversationId: string
+  toolUseId: string
+  toolName: string
+  toolInput: unknown
+}
+
+export function parseClientToolSignal(reason: string): ClientToolSignalPayload | null {
+  if (!reason.includes(OAK_CLIENT_TOOL_SENTINEL)) return null
+  try {
+    const parsed = JSON.parse(reason) as Partial<ClientToolSignalPayload>
+    if (parsed[OAK_CLIENT_TOOL_SENTINEL] === true) return parsed as ClientToolSignalPayload
+  } catch {
+    /* fall through */
+  }
+  return null
+}
+
+// ─────────────────────────────────────────────────────────
 // Hook factory
 // ─────────────────────────────────────────────────────────
 
@@ -109,6 +167,26 @@ export interface PreToolUsePermissionHookArgs {
   permissions: PermissionConfig
   /** 闭包共享单轮状态（同一 SDK query 内复用） */
   localState: PreToolUseHookLocalState
+  /**
+   * Names of user-defined client-side tools (config.tools[].name). When the
+   * model invokes one of these, the hook denies with a client-tool sentinel
+   * so the SDK never calls execute(); the runtime intercepts the sentinel
+   * to surface a 'tool_use_required' event and pause the turn.
+   *
+   * On resume, the hook reads the host-supplied result from the
+   * clientToolStore and ALLOWs the call after rewriting `updatedInput` to
+   * carry the result under OAK_CLIENT_TOOL_RESULT_KEY. The wrapped MCP
+   * stub reads this key and returns its content as the tool result.
+   */
+  clientToolNames?: ReadonlySet<string>
+  clientToolStore?: ClientToolResultStore
+}
+
+export interface ClientToolResultStore {
+  put(entry: PendingClientToolResult): Promise<void>
+  get(key: { conversationId: string; toolUseId: string }): Promise<PendingClientToolResult | null>
+  delete(key: { conversationId: string; toolUseId: string }): Promise<void>
+  scanRecent?(key: { conversationId: string; toolName: string }): Promise<PendingClientToolResult | null>
 }
 
 /**
@@ -156,7 +234,7 @@ export function createPreToolUsePermissionHook(
   toolUseID: string | undefined,
   options: { signal: AbortSignal },
 ) => Promise<PreToolUseHookOutput | Record<string, never>> {
-  const { conversationId, permissions, localState } = args
+  const { conversationId, permissions, localState, clientToolNames, clientToolStore } = args
   const requirePredicate = compileRequireApprovalPredicate(permissions.requireApproval)
   const store = permissions.store
   const timeoutMs = permissions.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS
@@ -168,6 +246,83 @@ export function createPreToolUsePermissionHook(
     const toolName = input.tool_name
     const toolInput = input.tool_input
     const toolUseId = input.tool_use_id ?? toolUseID ?? ''
+
+    // ── PR #7.1: client-side tool flow ─────────────────────────────────
+    // Tools whose names appear in clientToolNames have stub execute()s in
+    // an in-process MCP server (mcp__custom__<name>). The kernel must NOT
+    // run them; instead pause the turn and let the host execute the tool.
+    //
+    // Lookup is by the bare tool name (config.tools[].name), but the SDK
+    // reports the prefixed form 'mcp__custom__<bare>'. Strip the prefix
+    // before matching.
+    const bareToolName = toolName.startsWith('mcp__custom__')
+      ? toolName.slice('mcp__custom__'.length)
+      : toolName
+    const isClientTool = !!clientToolNames && clientToolNames.has(bareToolName)
+
+    if (isClientTool && clientToolStore) {
+      // Phase A: a result is already waiting in the store (resume path).
+      // Allow the call but pass the result through `updatedInput` so the
+      // wrapped MCP stub returns it directly without doing real work.
+      // We try by toolUseId first (rare race), then by toolName scan.
+      if (toolUseId) {
+        const existing = await clientToolStore.get({ conversationId, toolUseId })
+        if (existing?.result) {
+          await clientToolStore.delete({ conversationId, toolUseId })
+          return buildClientToolAllow(toolInput, existing.result)
+        }
+      }
+      if (clientToolStore.scanRecent) {
+        const scanned = await clientToolStore.scanRecent({ conversationId, toolName: bareToolName })
+        if (scanned?.result) {
+          await clientToolStore.delete({ conversationId, toolUseId: scanned.toolUseId })
+          return buildClientToolAllow(toolInput, scanned.result)
+        }
+      }
+
+      // Phase B: no result → pause. Mirror the approval flow: write a
+      // pending entry, return deny + sentinel. Translator detects the
+      // sentinel and emits a 'tool_use_required' SessionEvent.
+      if (!toolUseId) {
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'deny',
+            permissionDecisionReason: JSON.stringify({
+              reason: 'Internal error: missing toolUseId for client-side tool flow.',
+              type: 'oak_internal_error',
+            }),
+          },
+        }
+      }
+      const pending: PendingClientToolResult = {
+        conversationId,
+        toolUseId,
+        toolName: bareToolName,
+        toolInput,
+        createdAt: Date.now(),
+      }
+      await clientToolStore.put(pending)
+
+      const signal: ClientToolSignalPayload = {
+        [OAK_CLIENT_TOOL_SENTINEL]: true,
+        conversationId,
+        toolUseId,
+        toolName: bareToolName,
+        toolInput,
+      }
+      const reasonForModel =
+        `Tool call deferred to the client (toolUseId=${toolUseId}). ` +
+        `Do not retry this tool yourself; the client is executing it. ` +
+        `Stop the current turn and wait for the next user message.`
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason: JSON.stringify({ ...signal, message: reasonForModel }),
+        },
+      }
+    }
 
     // 没配 store → 直接放行（PR #7.0 防御：缺 store 时审批无法持久化，避免误暂停）
     if (!store) {
@@ -346,6 +501,32 @@ export function createPreToolUsePermissionHook(
 // ─────────────────────────────────────────────────────────
 // 辅助：把 store 里的 decision 转成 hook output
 // ─────────────────────────────────────────────────────────
+
+/**
+ * Build the allow output that injects a client-supplied tool result into
+ * the wrapped MCP stub via `updatedInput`. The stub reads the magic key
+ * and returns its value as the tool result, so the SDK records a real
+ * (non-error) tool_result in the transcript.
+ */
+function buildClientToolAllow(
+  originalInput: unknown,
+  result: { output: unknown; isError: boolean },
+): PreToolUseHookOutput {
+  const baseInput = originalInput && typeof originalInput === 'object' ? (originalInput as Record<string, unknown>) : {}
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'allow',
+      updatedInput: {
+        ...baseInput,
+        [OAK_CLIENT_TOOL_RESULT_KEY]: {
+          output: result.output,
+          isError: result.isError,
+        },
+      },
+    },
+  }
+}
 
 interface ApplyDecisionResult {
   output: PreToolUseHookOutput

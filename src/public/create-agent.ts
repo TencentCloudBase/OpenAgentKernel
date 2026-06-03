@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk'
 import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
 import { InvalidConfigError, ResourceError } from '../internal/errors.js'
-import { createHookLocalState, InMemoryPermissionStore, type PreToolUseHookLocalState } from '../permissions/index.js'
+import { createHookLocalState, InMemoryClientToolStore, InMemoryPermissionStore, type ClientToolResultStore, type PreToolUseHookLocalState } from '../permissions/index.js'
 import { buildClaudeQueryOptions } from '../runtime/agent-builder.js'
 import { createTranslatorState, translateSdkMessage } from '../runtime/event-translator.js'
 import { buildPromptAsync } from '../runtime/prompt-builder.js'
@@ -130,6 +130,15 @@ function createSession(deps: SessionDeps): Session {
       ? (config.permissions.store ?? createDefaultPermissionStore())
       : undefined
 
+  // PR #7.1: client-side tools store + name set. The set lets the
+  // PreToolUse hook recognise mcp__custom__* tools (custom = user-declared,
+  // execute() in the wrapped MCP server is a stub). The store carries
+  // host-supplied tool results between SDK turns (turn-1 emits
+  // tool_use_required; respondToolUse() stashes; turn-2 reads).
+  const clientToolNames: Set<string> = new Set((config.tools ?? []).map((t) => t.name))
+  const clientToolStore: ClientToolResultStore | undefined =
+    clientToolNames.size > 0 ? new InMemoryClientToolStore() : undefined
+
   async function ensureSandbox(): Promise<SandboxInstance | undefined> {
     if (!sandboxRuntime) return undefined
     if (sandboxInstance) return sandboxInstance
@@ -200,6 +209,8 @@ function createSession(deps: SessionDeps): Session {
         ensureSandbox,
         ensureCloudbaseMcp,
         permissionStore,
+        ...(clientToolNames.size > 0 ? { clientToolNames } : {}),
+        ...(clientToolStore ? { clientToolStore } : {}),
       })
     },
 
@@ -224,6 +235,43 @@ function createSession(deps: SessionDeps): Session {
         ensureSandbox,
         ensureCloudbaseMcp,
         permissionStore,
+        ...(clientToolNames.size > 0 ? { clientToolNames } : {}),
+        ...(clientToolStore ? { clientToolStore } : {}),
+      })
+    },
+
+    /**
+     * PR #7.1: respond to a client-side tool_use_required pause.
+     *
+     * Wire flow:
+     *   1. Stash the host-supplied result in the in-memory clientToolStore.
+     *   2. Resume the SDK with a short prompt asking the model to retry
+     *      the same tool. The PreToolUse hook will scan the store, find the
+     *      result, allow + inject it via updatedInput so the wrapped MCP
+     *      stub returns it as the actual tool_result. The transcript ends
+     *      up with a clean (non-error) tool_result for the new tool_use_id;
+     *      the original (errored, sentinel-bearing) tool_result remains in
+     *      the transcript but is harmless because the hook's deny outcome
+     *      already aborted that branch of reasoning.
+     */
+    respondToolUse(opts: {
+      toolUseId: string
+      output: unknown
+      isError?: boolean
+    }): AsyncIterable<SessionEvent> {
+      abortController = new AbortController()
+      return runClientToolResume({
+        config,
+        conversationId,
+        toolUseId: opts.toolUseId,
+        output: opts.output,
+        isError: opts.isError ?? false,
+        abortController,
+        ensureSandbox,
+        ensureCloudbaseMcp,
+        permissionStore,
+        clientToolNames,
+        clientToolStore,
       })
     },
 
@@ -560,6 +608,10 @@ interface RunClaudeQueryArgs {
   ensureSandbox: () => Promise<SandboxInstance | undefined>
   ensureCloudbaseMcp: (sandbox: SandboxInstance) => Promise<SdkMcpServerConfig | undefined>
   permissionStore?: PermissionStore
+  /** PR #7.1: names of user-defined client-side tools (config.tools[].name set). */
+  clientToolNames?: ReadonlySet<string>
+  /** PR #7.1: store for client-supplied tool results. */
+  clientToolStore?: ClientToolResultStore
 }
 
 async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<SessionEvent, void, unknown> {
@@ -573,6 +625,8 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
     ensureSandbox,
     ensureCloudbaseMcp,
     permissionStore,
+    clientToolNames,
+    clientToolStore,
   } = args
 
   let q: ReturnType<typeof claudeQuery> | undefined
@@ -592,6 +646,8 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
       extraMcpServers: cloudbaseMcp ? { cloudbase: cloudbaseMcp } : undefined,
       conversationId,
       hookLocalState,
+      ...(clientToolNames ? { clientToolNames } : {}),
+      ...(clientToolStore ? { clientToolStore } : {}),
     })
     const storage = extractStorageProvider(config)
     const promptStream = buildPromptAsync({
@@ -636,6 +692,8 @@ interface RunApprovalResumeArgs {
   ensureSandbox: () => Promise<SandboxInstance | undefined>
   ensureCloudbaseMcp: (sandbox: SandboxInstance) => Promise<SdkMcpServerConfig | undefined>
   permissionStore?: PermissionStore
+  clientToolNames?: ReadonlySet<string>
+  clientToolStore?: ClientToolResultStore
 }
 
 async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<SessionEvent, void, unknown> {
@@ -648,6 +706,8 @@ async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<S
     ensureSandbox,
     ensureCloudbaseMcp,
     permissionStore,
+    clientToolNames,
+    clientToolStore,
   } = args
 
   if (!permissionStore) {
@@ -699,6 +759,100 @@ async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<S
     ensureSandbox,
     ensureCloudbaseMcp,
     permissionStore,
+    ...(clientToolNames ? { clientToolNames } : {}),
+    ...(clientToolStore ? { clientToolStore } : {}),
+  })
+}
+
+// ============================================================
+// 内部：注入客户端工具结果并 resume agent 运行（PR #7.1）
+// ============================================================
+
+interface RunClientToolResumeArgs {
+  config: AgentConfig
+  conversationId: string
+  toolUseId: string
+  output: unknown
+  isError: boolean
+  abortController: AbortController
+  ensureSandbox: () => Promise<SandboxInstance | undefined>
+  ensureCloudbaseMcp: (sandbox: SandboxInstance) => Promise<SdkMcpServerConfig | undefined>
+  permissionStore?: PermissionStore
+  clientToolNames: ReadonlySet<string>
+  clientToolStore?: ClientToolResultStore
+}
+
+async function* runClientToolResume(
+  args: RunClientToolResumeArgs,
+): AsyncGenerator<SessionEvent, void, unknown> {
+  const {
+    config,
+    conversationId,
+    toolUseId,
+    output,
+    isError,
+    abortController,
+    ensureSandbox,
+    ensureCloudbaseMcp,
+    permissionStore,
+    clientToolNames,
+    clientToolStore,
+  } = args
+
+  if (!clientToolStore) {
+    yield {
+      type: 'error',
+      error: new InvalidConfigError(
+        'session.respondToolUse requires AgentConfig.tools[] to be configured. ' +
+          'Without client-side tool definitions, no client-tool flow exists to resume.',
+      ),
+    }
+    yield { type: 'session_idle', reason: 'error' }
+    return
+  }
+
+  const existing = await clientToolStore.get({ conversationId, toolUseId })
+  if (!existing) {
+    yield {
+      type: 'error',
+      error: new ResourceError(
+        `No pending client tool found for toolUseId=${toolUseId}. ` +
+          'It may have expired or already been resolved.',
+      ),
+    }
+    yield { type: 'session_idle', reason: 'error' }
+    return
+  }
+  if (existing.result) {
+    yield {
+      type: 'error',
+      error: new ResourceError(`Client tool result for toolUseId=${toolUseId} has already been resolved.`),
+    }
+    yield { type: 'session_idle', reason: 'error' }
+    return
+  }
+
+  await clientToolStore.put({ ...existing, result: { output, isError } })
+
+  // Mirror the approval-resume prompt: tell the model the prior call has
+  // been resolved and ask it to retry the same tool. The hook will scan the
+  // store on this new call and inject the result via updatedInput.
+  const resumePrompt = isError
+    ? `[系统通知] 用户为刚才的工具调用 \`${existing.toolName}\` 提供了执行错误结果。请重新调用该工具以获取结果（hook 会注入），然后基于错误结果继续。`
+    : `[系统通知] 用户为刚才的工具调用 \`${existing.toolName}\` 提供了实际执行结果。请重新调用该工具以获取该结果（hook 会自动注入），然后基于结果继续。`
+
+  yield* runClaudeQuery({
+    config,
+    input: resumePrompt,
+    abortController,
+    sessionId: conversationId,
+    conversationId,
+    isContinuation: true,
+    ensureSandbox,
+    ensureCloudbaseMcp,
+    permissionStore,
+    clientToolNames,
+    clientToolStore,
   })
 }
 

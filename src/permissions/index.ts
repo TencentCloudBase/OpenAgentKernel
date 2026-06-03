@@ -4,6 +4,7 @@
 
 export {
   InMemoryPermissionStore,
+  InMemoryClientToolStore,
   DEFAULT_APPROVAL_TIMEOUT_MS,
   compileRequireApprovalPredicate,
   isStaleApproval,
@@ -11,11 +12,17 @@ export {
 
 export {
   OAK_INTERRUPT_SENTINEL,
+  OAK_CLIENT_TOOL_SENTINEL,
+  OAK_CLIENT_TOOL_RESULT_KEY,
   isInterruptSignal,
   parseInterruptSignal,
+  parseClientToolSignal,
   createPreToolUsePermissionHook,
   createHookLocalState,
   type InterruptSignalPayload,
+  type ClientToolSignalPayload,
+  type ClientToolResultStore,
+  type PendingClientToolResult,
   type PreToolUseHookLocalState,
 } from './hooks.js'
 

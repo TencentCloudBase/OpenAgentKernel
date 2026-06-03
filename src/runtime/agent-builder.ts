@@ -25,7 +25,7 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk'
 import { createSdkMcpServer, tool as sdkTool } from '@anthropic-ai/claude-agent-sdk'
 import { InvalidConfigError } from '../internal/errors.js'
-import { createPreToolUsePermissionHook, type PreToolUseHookLocalState } from '../permissions/hooks.js'
+import { createPreToolUsePermissionHook, OAK_CLIENT_TOOL_RESULT_KEY, type PreToolUseHookLocalState } from '../permissions/hooks.js'
 import type { AgentConfig, ToolDefinition } from '../public/types.js'
 import { createSandboxMcpServer } from '../sandbox/sandbox-tools.js'
 import type { SandboxInstance } from '../sandbox/types.js'
@@ -75,6 +75,10 @@ export function buildClaudeQueryOptions(
     extraMcpServers?: Record<string, SdkMcpServerConfig>
     conversationId?: string
     hookLocalState?: PreToolUseHookLocalState
+    /** PR #7.1: names of user-defined client-side tools (for hook routing). */
+    clientToolNames?: ReadonlySet<string>
+    /** PR #7.1: store for client-supplied tool results (in-memory by default). */
+    clientToolStore?: import('../permissions/hooks.js').ClientToolResultStore
   } = {},
 ): BuiltClaudeQueryParams {
   const credential = resolveCredential({
@@ -116,15 +120,15 @@ export function buildClaudeQueryOptions(
     })
   }
 
-  // ── 决定权限模式（PR #7.0）──────────────────────────────────
-  // PR #5 阶段为了让 mcpServers 工具直接放行，默认走 permissionMode='bypassPermissions'。
-  // PR #7.0 起，如果用户配了 permissions.requireApproval，则启用 PreToolUse hook 实现审批流，
-  // permissionMode 不再 bypass（让 hook 决策生效）。
+  // ── 决定权限模式（PR #7.0 / PR #7.1）─────────────────────────
+  // PreToolUse hook 启用条件：
+  //   - 用户配了 permissions.requireApproval（PR #7.0 审批流），或
+  //   - 用户声明了 config.tools[]（PR #7.1 client-side 工具流），或
+  //   - 上述任一并提供了 conversationId + hookLocalState（runtime 必须配齐）
+  const hasClientTools = Boolean(config.tools && config.tools.length > 0)
+  const hasApproval = config.permissions !== undefined && config.permissions.requireApproval !== undefined
   const userHasApprovalConfig =
-    config.permissions !== undefined &&
-    config.permissions.requireApproval !== undefined &&
-    Boolean(extra.conversationId) &&
-    Boolean(extra.hookLocalState)
+    (hasApproval || hasClientTools) && Boolean(extra.conversationId) && Boolean(extra.hookLocalState)
 
   // ── 合并 mcpServers：用户配置 + 沙箱 MCP（PR #6A）+ 内置 cloudbase MCP（PR #6.5）─
   // 沙箱实例由 create-agent 在 send 前 acquire 好后传入，这里只是注入。
@@ -153,10 +157,14 @@ export function buildClaudeQueryOptions(
   // ── PR #7.0：构造 PreToolUse hook（审批桥接）──
   const hooks: ClaudeOptions['hooks'] = (() => {
     if (!userHasApprovalConfig) return undefined
+    // permissions config is optional when only client-tools are configured.
+    const permissionsForHook = config.permissions ?? { requireApproval: undefined }
     const preToolUseHook = createPreToolUsePermissionHook({
       conversationId: extra.conversationId!,
-      permissions: config.permissions!,
+      permissions: permissionsForHook,
       localState: extra.hookLocalState!,
+      ...(extra.clientToolNames ? { clientToolNames: extra.clientToolNames } : {}),
+      ...(extra.clientToolStore ? { clientToolStore: extra.clientToolStore } : {}),
     })
     return {
       PreToolUse: [
@@ -234,6 +242,25 @@ function wrapKernelToolsAsMcpServer(tools: ToolDefinition[]): ReturnType<typeof 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       t.parameters as any,
       async (input: Record<string, unknown>) => {
+        // PR #7.1: client-side tool fast path. The PreToolUse hook injects
+        // a host-supplied result via `updatedInput.__oak_client_tool_result__`
+        // when resuming after the host called session.respondToolUse(). We
+        // detect the magic key and return its content directly — the user's
+        // execute() is never invoked. Since the hook only allows the call
+        // when the result is present, every legitimate execution comes
+        // through here; bare invocations (no key) mean the hook didn't fire
+        // (i.e. host forgot to wire client tools), in which case calling
+        // execute() would just throw the stub sentinel and abort the turn.
+        const injected = input?.[OAK_CLIENT_TOOL_RESULT_KEY] as
+          | { output?: unknown; isError?: boolean }
+          | undefined
+        if (injected !== undefined && injected !== null) {
+          const text = typeof injected.output === 'string' ? injected.output : JSON.stringify(injected.output)
+          return {
+            content: [{ type: 'text', text }],
+            isError: !!injected.isError,
+          }
+        }
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const out = await (t.execute as any)(input, {
           toolUseId: '',

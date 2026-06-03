@@ -505,6 +505,21 @@ export interface Session {
    */
   respondApproval(opts: { toolUseId: string; decision: ApprovalDecision }): AsyncIterable<SessionEvent>
 
+  /**
+   * PR #7.1: 注入客户端工具结果并 resume agent 运行。
+   *
+   * 配套 'tool_use_required' 事件使用：业务侧在客户端执行完 AgentConfig.tools[]
+   * 中声明的工具后，调本方法把结果回灌给 kernel：
+   *   1. kernel 把结果写入内部 client-tool store
+   *   2. 起一轮 SDK query（resume）→ 模型重发同名工具 → PreToolUse hook 这次
+   *      把结果通过 updatedInput 注入 → 包装的 MCP stub 直接返回它，写一条
+   *      正常（非 error）的 tool_result 进 transcript。
+   *
+   * 返回的事件流是"结果注入后"的运行流（可能包含 message_delta / tool_call /
+   * tool_result / session_idle 等）。
+   */
+  respondToolUse(opts: { toolUseId: string; output: unknown; isError?: boolean }): AsyncIterable<SessionEvent>
+
   /** 拉取历史消息 */
   getHistory(opts?: { limit?: number; before?: number }): Promise<MessageRecord[]>
 
@@ -611,6 +626,26 @@ export type SessionEvent =
        * 此字段留作未来跨进程 RunState 持久化的扩展点）。
        */
       runStateJson: string
+    }
+  | {
+      /**
+       * 客户端工具需要客户端执行（PR #7.1）。
+       *
+       * 当模型调用 AgentConfig.tools[] 中声明的"client-side custom tool"时，
+       * kernel 不会真的调 execute()，而是让 PreToolUse hook 拦截：
+       *   1. 写一个 pending entry 到内部 client-tool store
+       *   2. 用一个 sentinel deny 让 SDK 终止本轮
+       *   3. 翻译层识别 sentinel 后吐出本事件
+       *
+       * 业务侧收到本事件 → 在客户端实际执行工具 → 调
+       * `session.respondToolUse({ toolUseId, output, isError? })` 注入结果，
+       * kernel 会 resume 一轮 SDK 让模型重发同名工具，hook 这次会注入结果，
+       * 模型基于真实结果继续。
+       */
+      type: 'tool_use_required'
+      toolUseId: string
+      toolName: string
+      input: unknown
     }
   | {
       type: 'handoff'

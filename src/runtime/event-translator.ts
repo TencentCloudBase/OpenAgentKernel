@@ -24,7 +24,7 @@
  */
 
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
-import { parseInterruptSignal } from '../permissions/hooks.js'
+import { parseClientToolSignal, parseInterruptSignal } from '../permissions/hooks.js'
 import type { SessionEvent } from '../public/types.js'
 
 /**
@@ -129,6 +129,23 @@ export function* translateSdkMessage(
                 }),
               }
               continue // ← 关键：不再 yield 这条 tool_result（吃掉假 deny）
+            }
+
+            // ── PR #7.1: client-side tool sentinel ──
+            // PreToolUse hook denied with the client-tool sentinel; turn
+            // pauses so the host can run the tool and resume via
+            // session.respondToolUse(). Same trick as the approval flow:
+            // emit tool_use_required, swallow the synthetic tool_result.
+            const clientSignal = reasonText ? parseClientToolSignal(reasonText) : null
+            if (clientSignal) {
+              state.approvalTriggered = true
+              yield {
+                type: 'tool_use_required',
+                toolUseId: clientSignal.toolUseId,
+                toolName: clientSignal.toolName,
+                input: clientSignal.toolInput,
+              }
+              continue
             }
 
             // 正常 tool_result

@@ -13,6 +13,7 @@
  */
 
 import type { PendingApproval, PermissionStore, RequireApprovalRule } from '../public/types.js'
+import type { ClientToolResultStore, PendingClientToolResult } from './hooks.js'
 
 /**
  * 默认审批超时：30 分钟（与 tcb-headless-service.copilot 对齐）。
@@ -74,6 +75,50 @@ export class InMemoryPermissionStore implements PermissionStore {
 
 function buildKey(conversationId: string, toolUseId: string): string {
   return `${conversationId}::${toolUseId}`
+}
+
+/**
+ * In-memory ClientToolResultStore (PR #7.1 — client-side tool flow).
+ *
+ * Used to stash a client-supplied tool result between two SDK runs:
+ *   1. SDK turn 1: PreToolUse hook denies a custom tool with a sentinel.
+ *      Stream emits 'tool_use_required'; turn ends.
+ *   2. Host calls session.respondToolUse(...) → store.put(... result).
+ *   3. SDK turn 2 (resume): PreToolUse hook scans the store, finds the
+ *      result, allows + injects it via updatedInput. The wrapped MCP stub
+ *      returns the injected value as the real tool_result.
+ */
+export class InMemoryClientToolStore implements ClientToolResultStore {
+  private readonly entries = new Map<string, PendingClientToolResult>()
+
+  async put(entry: PendingClientToolResult): Promise<void> {
+    this.entries.set(buildKey(entry.conversationId, entry.toolUseId), entry)
+  }
+
+  async get(key: { conversationId: string; toolUseId: string }): Promise<PendingClientToolResult | null> {
+    return this.entries.get(buildKey(key.conversationId, key.toolUseId)) ?? null
+  }
+
+  async delete(key: { conversationId: string; toolUseId: string }): Promise<void> {
+    this.entries.delete(buildKey(key.conversationId, key.toolUseId))
+  }
+
+  async scanRecent(key: {
+    conversationId: string
+    toolName: string
+  }): Promise<PendingClientToolResult | null> {
+    let best: PendingClientToolResult | null = null
+    for (const entry of this.entries.values()) {
+      if (
+        entry.conversationId === key.conversationId &&
+        entry.toolName === key.toolName &&
+        entry.result !== undefined
+      ) {
+        if (!best || entry.createdAt > best.createdAt) best = entry
+      }
+    }
+    return best
+  }
 }
 
 /**
