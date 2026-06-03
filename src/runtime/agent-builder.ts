@@ -25,7 +25,11 @@ import type {
 } from '@anthropic-ai/claude-agent-sdk'
 import { createSdkMcpServer, tool as sdkTool } from '@anthropic-ai/claude-agent-sdk'
 import { InvalidConfigError } from '../internal/errors.js'
-import { createPreToolUsePermissionHook, OAK_CLIENT_TOOL_RESULT_KEY, type PreToolUseHookLocalState } from '../permissions/hooks.js'
+import {
+  createPreToolUsePermissionHook,
+  OAK_CLIENT_TOOL_RESULT_KEY,
+  type PreToolUseHookLocalState,
+} from '../permissions/hooks.js'
 import type { AgentConfig, ToolDefinition } from '../public/types.js'
 import { createSandboxMcpServer } from '../sandbox/sandbox-tools.js'
 import type { SandboxInstance } from '../sandbox/types.js'
@@ -251,9 +255,7 @@ function wrapKernelToolsAsMcpServer(tools: ToolDefinition[]): ReturnType<typeof 
         // through here; bare invocations (no key) mean the hook didn't fire
         // (i.e. host forgot to wire client tools), in which case calling
         // execute() would just throw the stub sentinel and abort the turn.
-        const injected = input?.[OAK_CLIENT_TOOL_RESULT_KEY] as
-          | { output?: unknown; isError?: boolean }
-          | undefined
+        const injected = input?.[OAK_CLIENT_TOOL_RESULT_KEY] as { output?: unknown; isError?: boolean } | undefined
         if (injected !== undefined && injected !== null) {
           const text = typeof injected.output === 'string' ? injected.output : JSON.stringify(injected.output)
           return {

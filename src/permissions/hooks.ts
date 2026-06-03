@@ -255,9 +255,7 @@ export function createPreToolUsePermissionHook(
     // Lookup is by the bare tool name (config.tools[].name), but the SDK
     // reports the prefixed form 'mcp__custom__<bare>'. Strip the prefix
     // before matching.
-    const bareToolName = toolName.startsWith('mcp__custom__')
-      ? toolName.slice('mcp__custom__'.length)
-      : toolName
+    const bareToolName = toolName.startsWith('mcp__custom__') ? toolName.slice('mcp__custom__'.length) : toolName
     const isClientTool = !!clientToolNames && clientToolNames.has(bareToolName)
 
     if (isClientTool && clientToolStore) {

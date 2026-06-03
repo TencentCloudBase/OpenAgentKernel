@@ -103,10 +103,7 @@ export class InMemoryClientToolStore implements ClientToolResultStore {
     this.entries.delete(buildKey(key.conversationId, key.toolUseId))
   }
 
-  async scanRecent(key: {
-    conversationId: string
-    toolName: string
-  }): Promise<PendingClientToolResult | null> {
+  async scanRecent(key: { conversationId: string; toolName: string }): Promise<PendingClientToolResult | null> {
     let best: PendingClientToolResult | null = null
     for (const entry of this.entries.values()) {
       if (

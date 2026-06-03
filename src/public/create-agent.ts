@@ -2,7 +2,13 @@ import { randomUUID } from 'node:crypto'
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk'
 import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
 import { InvalidConfigError, ResourceError } from '../internal/errors.js'
-import { createHookLocalState, InMemoryClientToolStore, InMemoryPermissionStore, type ClientToolResultStore, type PreToolUseHookLocalState } from '../permissions/index.js'
+import {
+  createHookLocalState,
+  InMemoryClientToolStore,
+  InMemoryPermissionStore,
+  type ClientToolResultStore,
+  type PreToolUseHookLocalState,
+} from '../permissions/index.js'
 import { buildClaudeQueryOptions } from '../runtime/agent-builder.js'
 import { createTranslatorState, translateSdkMessage } from '../runtime/event-translator.js'
 import { buildPromptAsync } from '../runtime/prompt-builder.js'
@@ -254,11 +260,7 @@ function createSession(deps: SessionDeps): Session {
      *      the transcript but is harmless because the hook's deny outcome
      *      already aborted that branch of reasoning.
      */
-    respondToolUse(opts: {
-      toolUseId: string
-      output: unknown
-      isError?: boolean
-    }): AsyncIterable<SessionEvent> {
+    respondToolUse(opts: { toolUseId: string; output: unknown; isError?: boolean }): AsyncIterable<SessionEvent> {
       abortController = new AbortController()
       return runClientToolResume({
         config,
@@ -503,10 +505,13 @@ function aggregateHistory(records: MessageRecord[]): MessageRecord[] {
   for (const msg of records) {
     if (msg.role !== 'user') continue
 
-    // 检测 HITL sentinel
+    // 检测内部 sentinel（HITL approval / client-tool）
     const isSentinel = msg.parts.some(
       (p) =>
-        p.type === 'tool_result' && typeof p.output === 'string' && (p.output as string).includes('__OAK_INTERRUPT__'),
+        p.type === 'tool_result' &&
+        typeof p.output === 'string' &&
+        ((p.output as string).includes('__OAK_INTERRUPT__') ||
+          (p.output as string).includes('__OAK_CLIENT_TOOL__')),
     )
     if (isSentinel) {
       for (const p of msg.parts) {
@@ -782,9 +787,7 @@ interface RunClientToolResumeArgs {
   clientToolStore?: ClientToolResultStore
 }
 
-async function* runClientToolResume(
-  args: RunClientToolResumeArgs,
-): AsyncGenerator<SessionEvent, void, unknown> {
+async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerator<SessionEvent, void, unknown> {
   const {
     config,
     conversationId,
@@ -816,8 +819,7 @@ async function* runClientToolResume(
     yield {
       type: 'error',
       error: new ResourceError(
-        `No pending client tool found for toolUseId=${toolUseId}. ` +
-          'It may have expired or already been resolved.',
+        `No pending client tool found for toolUseId=${toolUseId}. ` + 'It may have expired or already been resolved.',
       ),
     }
     yield { type: 'session_idle', reason: 'error' }
