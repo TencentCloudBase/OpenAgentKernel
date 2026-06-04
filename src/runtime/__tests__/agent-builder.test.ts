@@ -47,15 +47,15 @@ describe('buildClaudeQueryOptions — cwd / settingSources', () => {
   })
 
   it('user cwd = ~/.claude → throws InvalidConfigError', () => {
-    expect(() =>
-      buildClaudeQueryOptions({ ...baseConfig, cwd: path.join(os.homedir(), '.claude') }),
-    ).toThrow(/cannot point at host/)
+    expect(() => buildClaudeQueryOptions({ ...baseConfig, cwd: path.join(os.homedir(), '.claude') })).toThrow(
+      /cannot point at host/,
+    )
   })
 
   it('user cwd = ~/.claude/sub → throws InvalidConfigError', () => {
-    expect(() =>
-      buildClaudeQueryOptions({ ...baseConfig, cwd: path.join(os.homedir(), '.claude/sub') }),
-    ).toThrow(/cannot point at host/)
+    expect(() => buildClaudeQueryOptions({ ...baseConfig, cwd: path.join(os.homedir(), '.claude/sub') })).toThrow(
+      /cannot point at host/,
+    )
   })
 })
 
