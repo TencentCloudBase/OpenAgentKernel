@@ -395,6 +395,24 @@ export interface AgentConfig {
 
   // ── 能力 ────────────────────────────────────────
   tools?: ToolDefinition<any, any>[]
+  /**
+   * Client-side tool 结果存储（PR #7.1 分布式支持）。
+   *
+   * - 不传：kernel 使用进程内 `InMemoryClientToolStore`（单进程可用）
+   * - 传：可跨节点 / 跨进程 resume；同一 conversationId 的请求可路由到任意节点
+   *
+   * 推荐用法：
+   *   ```ts
+   *   import { CloudBaseClientToolStore, CloudBaseDbClientToolDriver } from '@cloudbase/open-agent-kernel'
+   *   toolStore: new CloudBaseClientToolStore({
+   *     driver: new CloudBaseDbClientToolDriver(),
+   *     projectKey: envId,
+   *   })
+   *   ```
+   *
+   * 类型故意宽泛（unknown），避免公共类型层依赖底层实现。
+   */
+  toolStore?: unknown
   mcpServers?: Record<string, McpServerConfig>
   /** 子 agent（handoffs） */
   handoffs?: Agent[]
@@ -519,6 +537,19 @@ export interface Session {
    * tool_result / session_idle 等）。
    */
   respondToolUse(opts: { toolUseId: string; output: unknown; isError?: boolean }): AsyncIterable<SessionEvent>
+
+  /**
+   * 注入用户对 askUser 提问的回答并 resume agent 运行。
+   *
+   * 配套 'ask_user_required' 事件使用：业务侧收集到用户回答后，
+   * 调本方法把回答回灌给 kernel：
+   *   1. kernel 把回答写入内部 askUser store
+   *   2. 起一轮 SDK query（resume）→ 模型重发 askUser 工具 → PreToolUse hook 这次
+   *      从 store 读到回答 → 放行 → MCP stub 返回回答作为 tool_result
+   *
+   * 返回的事件流是"回答注入后"的运行流。
+   */
+  respondAskUser(opts: { toolUseId: string; answer: string }): AsyncIterable<SessionEvent>
 
   /** 拉取历史消息 */
   getHistory(opts?: { limit?: number; before?: number }): Promise<MessageRecord[]>
@@ -646,6 +677,22 @@ export type SessionEvent =
       toolUseId: string
       toolName: string
       input: unknown
+    }
+  | {
+      /**
+       * Agent 主动向用户提问。
+       *
+       * 当模型调用内置 askUser 工具时，kernel 用 sentinel 中断 turn，
+       * 翻译层识别后吐出本事件。业务侧收集用户回答后调
+       * `session.respondAskUser({ toolUseId, answer })` 注入回答并 resume。
+       *
+       * 与 codebuddy 的区别：codebuddy 的 AskUser hang 住进程；
+       * OAK 的 askUser 是流终止+resume，不阻塞、支持分布式。
+       */
+      type: 'ask_user_required'
+      toolUseId: string
+      question: string
+      options?: string[]
     }
   | {
       type: 'handoff'

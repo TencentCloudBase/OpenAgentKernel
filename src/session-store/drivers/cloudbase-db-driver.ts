@@ -81,6 +81,11 @@ interface CloudBaseCollection {
   orderBy(field: string, direction: 'asc' | 'desc'): CloudBaseQuery
   limit(n: number): CloudBaseQuery
   get(): Promise<{ data: Array<Record<string, unknown>> }>
+  createIndex(opts: {
+    indexName: string
+    keys: Array<{ name: string; direction: 1 | -1 }>
+    unique?: boolean
+  }): Promise<unknown>
 }
 
 interface CloudBaseQuery {
@@ -164,7 +169,24 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
       }
       this.ensuredCollections.add(fullName)
     }
-    return db.collection(fullName)
+    const col = db.collection(fullName)
+    // Ensure unique index on sessions for (projectKey, sessionId) to prevent duplicates
+    if (name === 'sessions' && !this.ensuredCollections.has(`${fullName}:idx`)) {
+      try {
+        await col.createIndex({
+          indexName: 'uniq_project_session',
+          keys: [
+            { name: 'projectKey', direction: 1 },
+            { name: 'sessionId', direction: 1 },
+          ],
+          unique: true,
+        })
+      } catch {
+        // index already exists, ignore
+      }
+      this.ensuredCollections.add(`${fullName}:idx`)
+    }
+    return col
   }
 
   // ─── SessionStoreDriver 接口实现 ────────────────────────────────
@@ -284,10 +306,13 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
     const allEntries: SessionStoreEntry[] = []
     for (let i = 0; i < messageIds.length; i += BATCH_SIZE) {
       const batch = messageIds.slice(i, i + BATCH_SIZE)
+      // Note: no limit — the same messageId may have multiple entries
+      // (SDK sends separate entries for text/tool_use/tool_result within
+      // one logical message). Using limit(batch.length) would silently
+      // drop later entries for the same messageId.
       const { data } = await entriesCol
         .where({ sessionKey, messageId: db.command.in(batch) })
         .orderBy('seq', 'asc')
-        .limit(batch.length)
         .get()
       for (const row of data) {
         const entry = row['entry']
@@ -320,17 +345,8 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
     metadata?: Record<string, unknown>
   }): Promise<void> {
     const sessionsCol = await this.getCollection('sessions')
-    const existing = await sessionsCol.where({ projectKey: args.projectKey, sessionId: args.sessionId }).limit(1).get()
-
     const now = Date.now()
-    if (existing.data && existing.data.length > 0) {
-      await sessionsCol.where({ projectKey: args.projectKey, sessionId: args.sessionId }).update({
-        userId: args.userId,
-        ...(args.title !== undefined ? { title: args.title } : {}),
-        ...(args.metadata !== undefined ? { metadata: args.metadata } : {}),
-        mtime: now,
-      })
-    } else {
+    try {
       await sessionsCol.add({
         sessionKey: `${args.projectKey}|${args.sessionId}`,
         projectKey: args.projectKey,
@@ -341,6 +357,19 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
         mtime: now,
         createdAt: now,
       })
+    } catch (err: unknown) {
+      // Duplicate key (unique index violation) → already exists, update instead
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('duplicate') || msg.includes('E11000') || msg.includes('already exists')) {
+        await sessionsCol.where({ projectKey: args.projectKey, sessionId: args.sessionId }).update({
+          userId: args.userId,
+          ...(args.title !== undefined ? { title: args.title } : {}),
+          ...(args.metadata !== undefined ? { metadata: args.metadata } : {}),
+          mtime: now,
+        })
+      } else {
+        throw err
+      }
     }
   }
 

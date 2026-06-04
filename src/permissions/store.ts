@@ -13,7 +13,7 @@
  */
 
 import type { PendingApproval, PermissionStore, RequireApprovalRule } from '../public/types.js'
-import type { ClientToolResultStore, PendingClientToolResult } from './hooks.js'
+import type { AskUserStore, ClientToolResultStore, PendingAskUserEntry, PendingClientToolResult } from './hooks.js'
 
 /**
  * 默认审批超时：30 分钟（与 tcb-headless-service.copilot 对齐）。
@@ -167,4 +167,40 @@ function globToRegex(pattern: string): RegExp {
  */
 export function isStaleApproval(call: PendingApproval, timeoutMs: number, now: number = Date.now()): boolean {
   return now - call.createdAt > timeoutMs
+}
+
+/**
+ * In-memory AskUserStore (agent 主动提问).
+ *
+ * 与 InMemoryClientToolStore 结构相同，但语义独立：
+ * 存储模型通过 askUser 工具向用户提问时的 pending entry。
+ */
+export class InMemoryAskUserStore implements AskUserStore {
+  private readonly entries = new Map<string, PendingAskUserEntry>()
+
+  async put(entry: PendingAskUserEntry): Promise<void> {
+    this.entries.set(buildKey(entry.conversationId, entry.toolUseId), entry)
+  }
+
+  async get(key: { conversationId: string; toolUseId: string }): Promise<PendingAskUserEntry | null> {
+    return this.entries.get(buildKey(key.conversationId, key.toolUseId)) ?? null
+  }
+
+  async delete(key: { conversationId: string; toolUseId: string }): Promise<void> {
+    this.entries.delete(buildKey(key.conversationId, key.toolUseId))
+  }
+
+  async scanRecent(key: { conversationId: string; question: string }): Promise<PendingAskUserEntry | null> {
+    let best: PendingAskUserEntry | null = null
+    for (const entry of this.entries.values()) {
+      if (
+        entry.conversationId === key.conversationId &&
+        entry.question === key.question &&
+        entry.result !== undefined
+      ) {
+        if (!best || entry.createdAt > best.createdAt) best = entry
+      }
+    }
+    return best
+  }
 }

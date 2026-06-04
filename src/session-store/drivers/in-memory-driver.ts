@@ -118,6 +118,18 @@ export class InMemoryDriver implements SessionStoreDriver {
       title: args.title,
       metadata: args.metadata,
     })
+    // Placeholder in main index so listSessions sees it immediately.
+    // Subsequent appendEntries will populate entries and update mtime.
+    if (!this.sessions.has(sk)) {
+      this.sessions.set(sk, {
+        projectKey: args.projectKey,
+        sessionId: args.sessionId,
+        subpath: undefined,
+        entries: [],
+        uuidSet: new Set(),
+        mtime: Date.now(),
+      })
+    }
   }
 
   async listSummaries(projectKey: string): Promise<SessionSummaryEntry[]> {

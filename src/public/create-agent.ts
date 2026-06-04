@@ -4,8 +4,10 @@ import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude
 import { InvalidConfigError, ResourceError } from '../internal/errors.js'
 import {
   createHookLocalState,
+  InMemoryAskUserStore,
   InMemoryClientToolStore,
   InMemoryPermissionStore,
+  type AskUserStore,
   type ClientToolResultStore,
   type PreToolUseHookLocalState,
 } from '../permissions/index.js'
@@ -143,7 +145,13 @@ function createSession(deps: SessionDeps): Session {
   // tool_use_required; respondToolUse() stashes; turn-2 reads).
   const clientToolNames: Set<string> = new Set((config.tools ?? []).map((t) => t.name))
   const clientToolStore: ClientToolResultStore | undefined =
-    clientToolNames.size > 0 ? new InMemoryClientToolStore() : undefined
+    clientToolNames.size > 0
+      ? ((config.toolStore as ClientToolResultStore | undefined) ?? new InMemoryClientToolStore())
+      : undefined
+
+  // askUser: 内置提问工具 store（agent 主动向用户提问）。
+  // 始终启用——askUser 是内置工具，不依赖用户配置 tools[]。
+  const askUserStore: AskUserStore = new InMemoryAskUserStore()
 
   async function ensureSandbox(): Promise<SandboxInstance | undefined> {
     if (!sandboxRuntime) return undefined
@@ -217,6 +225,7 @@ function createSession(deps: SessionDeps): Session {
         permissionStore,
         ...(clientToolNames.size > 0 ? { clientToolNames } : {}),
         ...(clientToolStore ? { clientToolStore } : {}),
+        askUserStore,
       })
     },
 
@@ -243,6 +252,7 @@ function createSession(deps: SessionDeps): Session {
         permissionStore,
         ...(clientToolNames.size > 0 ? { clientToolNames } : {}),
         ...(clientToolStore ? { clientToolStore } : {}),
+        askUserStore,
       })
     },
 
@@ -274,6 +284,31 @@ function createSession(deps: SessionDeps): Session {
         permissionStore,
         clientToolNames,
         clientToolStore,
+        askUserStore,
+      })
+    },
+
+    /**
+     * 注入用户对 askUser 提问的回答并 resume agent 运行。
+     *
+     * 流终止+resume 范式（与 respondApproval / respondToolUse 同一模式）：
+     *   1. 把回答写入 askUserStore
+     *   2. 起一轮 SDK query（resume）→ 模型重发 askUser 工具 → hook 从 store 读到回答 → 放行
+     */
+    respondAskUser(opts: { toolUseId: string; answer: string }): AsyncIterable<SessionEvent> {
+      abortController = new AbortController()
+      return runAskUserResume({
+        config,
+        conversationId,
+        toolUseId: opts.toolUseId,
+        answer: opts.answer,
+        abortController,
+        ensureSandbox,
+        ensureCloudbaseMcp,
+        permissionStore,
+        clientToolNames,
+        clientToolStore,
+        askUserStore,
       })
     },
 
@@ -336,6 +371,14 @@ function createSession(deps: SessionDeps): Session {
 
       // metas 是 desc 排序，返回给用户改为 asc（时间正序）
       result.reverse()
+
+      if (process.env.OAK_DEBUG === '1') {
+        console.error('[oak][getHistory] raw records:', result.length)
+        for (const r of result) {
+          console.error(`  ${r.role} id=${r.id} parts=${r.parts.map((p) => p.type).join(',')}`)
+        }
+      }
+
       return aggregateHistory(result)
     },
 
@@ -387,12 +430,12 @@ function createSession(deps: SessionDeps): Session {
           sessionId: conversationId,
           userId,
         })
-        .catch(() => {
-          // 注册失败不阻塞 session 创建
-          if (process.env.OAK_DEBUG === '1') {
-            // eslint-disable-next-line no-console
-            console.error('[oak] registerSession failed (non-blocking)')
-          }
+        .catch((err) => {
+          // Registration failure is non-fatal for session creation,
+          // but always log it (not just in OAK_DEBUG mode) so operators
+          // can detect lost writes in SCF/cloudrun environments.
+          // eslint-disable-next-line no-console
+          console.error('[oak] registerSession failed:', err)
         })
     }
   }
@@ -505,13 +548,14 @@ function aggregateHistory(records: MessageRecord[]): MessageRecord[] {
   for (const msg of records) {
     if (msg.role !== 'user') continue
 
-    // 检测内部 sentinel（HITL approval / client-tool）
+    // 检测内部 sentinel（HITL approval / client-tool / askUser）
     const isSentinel = msg.parts.some(
       (p) =>
         p.type === 'tool_result' &&
         typeof p.output === 'string' &&
         ((p.output as string).includes('__OAK_INTERRUPT__') ||
-          (p.output as string).includes('__OAK_CLIENT_TOOL__')),
+          (p.output as string).includes('__OAK_CLIENT_TOOL__') ||
+          (p.output as string).includes('__OAK_ASK_USER__')),
     )
     if (isSentinel) {
       for (const p of msg.parts) {
@@ -617,6 +661,8 @@ interface RunClaudeQueryArgs {
   clientToolNames?: ReadonlySet<string>
   /** PR #7.1: store for client-supplied tool results. */
   clientToolStore?: ClientToolResultStore
+  /** askUser: store for pending askUser entries. */
+  askUserStore?: AskUserStore
 }
 
 async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<SessionEvent, void, unknown> {
@@ -632,6 +678,7 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
     permissionStore,
     clientToolNames,
     clientToolStore,
+    askUserStore,
   } = args
 
   let q: ReturnType<typeof claudeQuery> | undefined
@@ -653,6 +700,7 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
       hookLocalState,
       ...(clientToolNames ? { clientToolNames } : {}),
       ...(clientToolStore ? { clientToolStore } : {}),
+      ...(askUserStore ? { askUserStore } : {}),
     })
     const storage = extractStorageProvider(config)
     const promptStream = buildPromptAsync({
@@ -699,6 +747,7 @@ interface RunApprovalResumeArgs {
   permissionStore?: PermissionStore
   clientToolNames?: ReadonlySet<string>
   clientToolStore?: ClientToolResultStore
+  askUserStore?: AskUserStore
 }
 
 async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<SessionEvent, void, unknown> {
@@ -713,6 +762,7 @@ async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<S
     permissionStore,
     clientToolNames,
     clientToolStore,
+    askUserStore,
   } = args
 
   if (!permissionStore) {
@@ -766,6 +816,7 @@ async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<S
     permissionStore,
     ...(clientToolNames ? { clientToolNames } : {}),
     ...(clientToolStore ? { clientToolStore } : {}),
+    ...(askUserStore ? { askUserStore } : {}),
   })
 }
 
@@ -785,6 +836,7 @@ interface RunClientToolResumeArgs {
   permissionStore?: PermissionStore
   clientToolNames: ReadonlySet<string>
   clientToolStore?: ClientToolResultStore
+  askUserStore?: AskUserStore
 }
 
 async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerator<SessionEvent, void, unknown> {
@@ -800,6 +852,7 @@ async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerat
     permissionStore,
     clientToolNames,
     clientToolStore,
+    askUserStore,
   } = args
 
   if (!clientToolStore) {
@@ -836,6 +889,12 @@ async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerat
 
   await clientToolStore.put({ ...existing, result: { output, isError } })
 
+  // Note: session_entries retains the sentinel deny tool_result as-is.
+  // This is by design — the SDK transcript is append-only. The sentinel
+  // is filtered at the presentation layer by aggregateHistory() in getHistory().
+  // Updating the entry would break aggregateHistory()'s sentinel detection
+  // and cause duplicate tool_calls in the output.
+
   // Mirror the approval-resume prompt: tell the model the prior call has
   // been resolved and ask it to retry the same tool. The hook will scan the
   // store on this new call and inject the result via updatedInput.
@@ -855,6 +914,82 @@ async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerat
     permissionStore,
     clientToolNames,
     clientToolStore,
+    ...(askUserStore ? { askUserStore } : {}),
+  })
+}
+
+// ============================================================
+// 内部：注入 askUser 回答并 resume agent 运行
+// ============================================================
+
+interface RunAskUserResumeArgs {
+  config: AgentConfig
+  conversationId: string
+  toolUseId: string
+  answer: string
+  abortController: AbortController
+  ensureSandbox: () => Promise<SandboxInstance | undefined>
+  ensureCloudbaseMcp: (sandbox: SandboxInstance) => Promise<SdkMcpServerConfig | undefined>
+  permissionStore?: PermissionStore
+  clientToolNames: ReadonlySet<string>
+  clientToolStore?: ClientToolResultStore
+  askUserStore: AskUserStore
+}
+
+async function* runAskUserResume(args: RunAskUserResumeArgs): AsyncGenerator<SessionEvent, void, unknown> {
+  const {
+    config,
+    conversationId,
+    toolUseId,
+    answer,
+    abortController,
+    ensureSandbox,
+    ensureCloudbaseMcp,
+    permissionStore,
+    clientToolNames,
+    clientToolStore,
+    askUserStore,
+  } = args
+
+  const existing = await askUserStore.get({ conversationId, toolUseId })
+  if (!existing) {
+    yield {
+      type: 'error',
+      error: new ResourceError(
+        `No pending askUser found for toolUseId=${toolUseId}. ` + 'It may have expired or already been resolved.',
+      ),
+    }
+    yield { type: 'session_idle', reason: 'error' }
+    return
+  }
+  if (existing.result) {
+    yield {
+      type: 'error',
+      error: new ResourceError(`askUser for toolUseId=${toolUseId} has already been resolved.`),
+    }
+    yield { type: 'session_idle', reason: 'error' }
+    return
+  }
+
+  await askUserStore.put({ ...existing, result: { answer } })
+
+  // Resume prompt: tell the model the user has answered, ask it to retry
+  // the askUser tool so the hook can inject the answer.
+  const resumePrompt = `[系统通知] 用户已回答了你刚才的提问。请重新调用 askUser 工具以获取用户的回答（hook 会自动注入），然后基于回答继续。`
+
+  yield* runClaudeQuery({
+    config,
+    input: resumePrompt,
+    abortController,
+    sessionId: conversationId,
+    conversationId,
+    isContinuation: true,
+    ensureSandbox,
+    ensureCloudbaseMcp,
+    permissionStore,
+    clientToolNames,
+    clientToolStore,
+    askUserStore,
   })
 }
 

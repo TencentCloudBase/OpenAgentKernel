@@ -159,6 +159,64 @@ export function parseClientToolSignal(reason: string): ClientToolSignalPayload |
 }
 
 // ─────────────────────────────────────────────────────────
+// askUser sentinel (agent 主动向用户提问)
+// ─────────────────────────────────────────────────────────
+//
+// 与 approval / client-tool 同一流终止+resume 范式：
+//   1. 模型调用内置 askUser 工具 → PreToolUse hook 拦截
+//   2. 写 PendingAskUserEntry 到 store → 返回 deny + sentinel
+//   3. translator 识别 sentinel → yield 'ask_user_required' 事件
+//   4. Host 收集用户回答 → session.respondAskUser() → resume
+//
+// 与 codebuddy 的区别：codebuddy 的 AskUser 会 hang 住进程；
+// OAK 的 askUser 是流终止+resume，不阻塞、支持分布式。
+
+export const OAK_ASK_USER_SENTINEL = '__OAK_ASK_USER__'
+
+export interface AskUserSignalPayload {
+  [OAK_ASK_USER_SENTINEL]: true
+  conversationId: string
+  toolUseId: string
+  question: string
+  options?: string[]
+}
+
+export function parseAskUserSignal(reason: string): AskUserSignalPayload | null {
+  if (!reason.includes(OAK_ASK_USER_SENTINEL)) return null
+  try {
+    const parsed = JSON.parse(reason) as Partial<AskUserSignalPayload>
+    if (parsed[OAK_ASK_USER_SENTINEL] === true) return parsed as AskUserSignalPayload
+  } catch {
+    /* fall through */
+  }
+  return null
+}
+
+/**
+ * Pending entry for askUser flow (mirrors PendingClientToolResult).
+ */
+export interface PendingAskUserEntry {
+  conversationId: string
+  toolUseId: string
+  question: string
+  options?: string[]
+  /** Set once the host calls session.respondAskUser(). */
+  result?: { answer: string }
+  createdAt: number
+}
+
+/**
+ * Store interface for askUser pending entries.
+ * Structure is identical to ClientToolResultStore but kept separate for semantic clarity.
+ */
+export interface AskUserStore {
+  put(entry: PendingAskUserEntry): Promise<void>
+  get(key: { conversationId: string; toolUseId: string }): Promise<PendingAskUserEntry | null>
+  delete(key: { conversationId: string; toolUseId: string }): Promise<void>
+  scanRecent?(key: { conversationId: string; question: string }): Promise<PendingAskUserEntry | null>
+}
+
+// ─────────────────────────────────────────────────────────
 // Hook factory
 // ─────────────────────────────────────────────────────────
 
@@ -180,6 +238,8 @@ export interface PreToolUsePermissionHookArgs {
    */
   clientToolNames?: ReadonlySet<string>
   clientToolStore?: ClientToolResultStore
+  /** Store for askUser pending entries (agent主动提问). */
+  askUserStore?: AskUserStore
 }
 
 export interface ClientToolResultStore {
@@ -234,7 +294,7 @@ export function createPreToolUsePermissionHook(
   toolUseID: string | undefined,
   options: { signal: AbortSignal },
 ) => Promise<PreToolUseHookOutput | Record<string, never>> {
-  const { conversationId, permissions, localState, clientToolNames, clientToolStore } = args
+  const { conversationId, permissions, localState, clientToolNames, clientToolStore, askUserStore } = args
   const requirePredicate = compileRequireApprovalPredicate(permissions.requireApproval)
   const store = permissions.store
   const timeoutMs = permissions.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS
@@ -260,21 +320,24 @@ export function createPreToolUsePermissionHook(
 
     if (isClientTool && clientToolStore) {
       // Phase A: a result is already waiting in the store (resume path).
-      // Allow the call but pass the result through `updatedInput` so the
-      // wrapped MCP stub returns it directly without doing real work.
-      // We try by toolUseId first (rare race), then by toolName scan.
+      // Allow the call — the MCP stub will read the result from the store
+      // directly (Claude Agent SDK does NOT pass `updatedInput` to MCP
+      // servers, so we cannot inject via hook output). The stub deletes
+      // the entry after reading.
+      //
+      // We check by toolUseId first (exact match), then by toolName scan.
       if (toolUseId) {
         const existing = await clientToolStore.get({ conversationId, toolUseId })
         if (existing?.result) {
-          await clientToolStore.delete({ conversationId, toolUseId })
-          return buildClientToolAllow(toolInput, existing.result)
+          // Don't delete — MCP stub will read and delete
+          return {}
         }
       }
       if (clientToolStore.scanRecent) {
         const scanned = await clientToolStore.scanRecent({ conversationId, toolName: bareToolName })
         if (scanned?.result) {
-          await clientToolStore.delete({ conversationId, toolUseId: scanned.toolUseId })
-          return buildClientToolAllow(toolInput, scanned.result)
+          // Don't delete — MCP stub will read and delete
+          return {}
         }
       }
 
@@ -312,6 +375,69 @@ export function createPreToolUsePermissionHook(
       const reasonForModel =
         `Tool call deferred to the client (toolUseId=${toolUseId}). ` +
         `Do not retry this tool yourself; the client is executing it. ` +
+        `Stop the current turn and wait for the next user message.`
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason: JSON.stringify({ ...signal, message: reasonForModel }),
+        },
+      }
+    }
+
+    // ── askUser: 内置提问工具 ─────────────────────────────────────────
+    // 当模型调用内置 askUser 工具时，拦截并暂停 turn，让 Host 收集用户回答。
+    // 与 client-tool 共享同一"deny + sentinel → resume"范式。
+    // 工具注册在 'kernel' MCP server 下，SDK 报告为 'mcp__kernel__askUser'。
+    const isAskUserTool = toolName === 'askUser' || bareToolName === 'askUser' || toolName === 'mcp__kernel__askUser'
+    if (isAskUserTool && askUserStore) {
+      // Resume path: result already waiting
+      if (toolUseId) {
+        const existing = await askUserStore.get({ conversationId, toolUseId })
+        if (existing?.result) {
+          return {}
+        }
+      }
+
+      // No result → pause. Extract question from tool input.
+      if (!toolUseId) {
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'deny',
+            permissionDecisionReason: JSON.stringify({
+              reason: 'Internal error: missing toolUseId for askUser flow.',
+              type: 'oak_internal_error',
+            }),
+          },
+        }
+      }
+      const questionText =
+        typeof toolInput === 'object' && toolInput !== null
+          ? ((toolInput as { question?: string }).question ?? String(toolInput))
+          : String(toolInput)
+      const optionsList =
+        typeof toolInput === 'object' && toolInput !== null ? (toolInput as { options?: string[] }).options : undefined
+
+      const pending: PendingAskUserEntry = {
+        conversationId,
+        toolUseId,
+        question: questionText,
+        options: optionsList,
+        createdAt: Date.now(),
+      }
+      await askUserStore.put(pending)
+
+      const signal: AskUserSignalPayload = {
+        [OAK_ASK_USER_SENTINEL]: true,
+        conversationId,
+        toolUseId,
+        question: questionText,
+        options: optionsList,
+      }
+      const reasonForModel =
+        `Agent asked the user a question (toolUseId=${toolUseId}). ` +
+        `Do not retry this tool yourself; the user is answering. ` +
         `Stop the current turn and wait for the next user message.`
       return {
         hookSpecificOutput: {
@@ -499,32 +625,6 @@ export function createPreToolUsePermissionHook(
 // ─────────────────────────────────────────────────────────
 // 辅助：把 store 里的 decision 转成 hook output
 // ─────────────────────────────────────────────────────────
-
-/**
- * Build the allow output that injects a client-supplied tool result into
- * the wrapped MCP stub via `updatedInput`. The stub reads the magic key
- * and returns its value as the tool result, so the SDK records a real
- * (non-error) tool_result in the transcript.
- */
-function buildClientToolAllow(
-  originalInput: unknown,
-  result: { output: unknown; isError: boolean },
-): PreToolUseHookOutput {
-  const baseInput = originalInput && typeof originalInput === 'object' ? (originalInput as Record<string, unknown>) : {}
-  return {
-    hookSpecificOutput: {
-      hookEventName: 'PreToolUse',
-      permissionDecision: 'allow',
-      updatedInput: {
-        ...baseInput,
-        [OAK_CLIENT_TOOL_RESULT_KEY]: {
-          output: result.output,
-          isError: result.isError,
-        },
-      },
-    },
-  }
-}
 
 interface ApplyDecisionResult {
   output: PreToolUseHookOutput

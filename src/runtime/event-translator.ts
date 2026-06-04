@@ -24,7 +24,7 @@
  */
 
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
-import { parseClientToolSignal, parseInterruptSignal } from '../permissions/hooks.js'
+import { parseAskUserSignal, parseClientToolSignal, parseInterruptSignal } from '../permissions/hooks.js'
 import type { SessionEvent } from '../public/types.js'
 
 /**
@@ -144,6 +144,22 @@ export function* translateSdkMessage(
                 toolUseId: clientSignal.toolUseId,
                 toolName: clientSignal.toolName,
                 input: clientSignal.toolInput,
+              }
+              continue
+            }
+
+            // ── askUser: 内置提问工具 sentinel ──
+            // PreToolUse hook denied with askUser sentinel; turn pauses so
+            // the host can collect user answer and resume via
+            // session.respondAskUser().
+            const askUserSignal = reasonText ? parseAskUserSignal(reasonText) : null
+            if (askUserSignal) {
+              state.approvalTriggered = true
+              yield {
+                type: 'ask_user_required',
+                toolUseId: askUserSignal.toolUseId,
+                question: askUserSignal.question,
+                ...(askUserSignal.options ? { options: askUserSignal.options } : {}),
               }
               continue
             }

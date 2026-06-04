@@ -29,6 +29,8 @@ import {
   createPreToolUsePermissionHook,
   OAK_CLIENT_TOOL_RESULT_KEY,
   type PreToolUseHookLocalState,
+  type ClientToolResultStore,
+  type AskUserStore,
 } from '../permissions/hooks.js'
 import type { AgentConfig, ToolDefinition } from '../public/types.js'
 import { createSandboxMcpServer } from '../sandbox/sandbox-tools.js'
@@ -83,6 +85,8 @@ export function buildClaudeQueryOptions(
     clientToolNames?: ReadonlySet<string>
     /** PR #7.1: store for client-supplied tool results (in-memory by default). */
     clientToolStore?: import('../permissions/hooks.js').ClientToolResultStore
+    /** askUser: store for pending askUser entries. */
+    askUserStore?: AskUserStore
   } = {},
 ): BuiltClaudeQueryParams {
   const credential = resolveCredential({
@@ -131,8 +135,9 @@ export function buildClaudeQueryOptions(
   //   - 上述任一并提供了 conversationId + hookLocalState（runtime 必须配齐）
   const hasClientTools = Boolean(config.tools && config.tools.length > 0)
   const hasApproval = config.permissions !== undefined && config.permissions.requireApproval !== undefined
+  const hasAskUser = Boolean(extra.askUserStore)
   const userHasApprovalConfig =
-    (hasApproval || hasClientTools) && Boolean(extra.conversationId) && Boolean(extra.hookLocalState)
+    (hasApproval || hasClientTools || hasAskUser) && Boolean(extra.conversationId) && Boolean(extra.hookLocalState)
 
   // ── 合并 mcpServers：用户配置 + 沙箱 MCP（PR #6A）+ 内置 cloudbase MCP（PR #6.5）─
   // 沙箱实例由 create-agent 在 send 前 acquire 好后传入，这里只是注入。
@@ -147,13 +152,22 @@ export function buildClaudeQueryOptions(
       // PR #6.5：cloudbase MCP（mcp__cloudbase__*）等额外内置 server
       Object.assign(merged, extra.extraMcpServers)
     }
+    // ── 内置 askUser 工具 → SDK MCP server 'kernel' (mcp__kernel__askUser)
+    // 模型可通过此工具主动向用户提问，kernel 用 sentinel 中断 turn，
+    // Host 收集回答后调 respondAskUser() resume。
+    if (extra.askUserStore) {
+      merged.kernel = createBuiltinAskUserMcpServer(extra.askUserStore, extra.conversationId)
+    }
     // ── 用户自定义 ToolDefinition[] → SDK MCP server 'custom' (mcp__custom__*)
     // SDK 的 query() 不接受 tools 数组——所有工具必须打包成 MCP server 注入。
     // 用 'custom' 作为 server key（而不是 'kernel'）：模型看到的工具名前缀
     // mcp__custom__<name> 在语义上明确告诉调用链"这是用户声明的、由 client/上层
     // 业务代码实现的工具"，与 mcp__sandbox__* / mcp__cloudbase__* 区分开。
     if (config.tools && config.tools.length > 0) {
-      merged.custom = wrapKernelToolsAsMcpServer(config.tools)
+      merged.custom = wrapKernelToolsAsMcpServer(config.tools, {
+        clientToolStore: extra.clientToolStore,
+        conversationId: extra.conversationId,
+      })
     }
     return Object.keys(merged).length > 0 ? merged : undefined
   })()
@@ -169,6 +183,7 @@ export function buildClaudeQueryOptions(
       localState: extra.hookLocalState!,
       ...(extra.clientToolNames ? { clientToolNames: extra.clientToolNames } : {}),
       ...(extra.clientToolStore ? { clientToolStore: extra.clientToolStore } : {}),
+      ...(extra.askUserStore ? { askUserStore: extra.askUserStore } : {}),
     })
     return {
       PreToolUse: [
@@ -237,7 +252,10 @@ export function buildClaudeQueryOptions(
  *   - propagate thrown errors as is (PR #7.0 sentinel for HITL flows still
  *     bubbles up; client-side tool sentinels also bubble up unchanged).
  */
-function wrapKernelToolsAsMcpServer(tools: ToolDefinition[]): ReturnType<typeof createSdkMcpServer> {
+function wrapKernelToolsAsMcpServer(
+  tools: ToolDefinition[],
+  opts?: { clientToolStore?: ClientToolResultStore; conversationId?: string },
+): ReturnType<typeof createSdkMcpServer> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sdkTools: any[] = tools.map((t) =>
     sdkTool(
@@ -246,21 +264,31 @@ function wrapKernelToolsAsMcpServer(tools: ToolDefinition[]): ReturnType<typeof 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       t.parameters as any,
       async (input: Record<string, unknown>) => {
-        // PR #7.1: client-side tool fast path. The PreToolUse hook injects
-        // a host-supplied result via `updatedInput.__oak_client_tool_result__`
-        // when resuming after the host called session.respondToolUse(). We
-        // detect the magic key and return its content directly — the user's
-        // execute() is never invoked. Since the hook only allows the call
-        // when the result is present, every legitimate execution comes
-        // through here; bare invocations (no key) mean the hook didn't fire
-        // (i.e. host forgot to wire client tools), in which case calling
-        // execute() would just throw the stub sentinel and abort the turn.
-        const injected = input?.[OAK_CLIENT_TOOL_RESULT_KEY] as { output?: unknown; isError?: boolean } | undefined
-        if (injected !== undefined && injected !== null) {
-          const text = typeof injected.output === 'string' ? injected.output : JSON.stringify(injected.output)
-          return {
-            content: [{ type: 'text', text }],
-            isError: !!injected.isError,
+        // PR #7.1: client-side tool fast path.
+        //
+        // Claude Agent SDK does NOT pass `updatedInput` from the PreToolUse
+        // hook to the MCP server's execute(). So we cannot rely on the magic
+        // key injection approach. Instead, the MCP stub checks the
+        // `clientToolStore` directly for a pending result with matching
+        // toolName. The hook stores the result there (via scanRecent) before
+        // allowing the call, so by the time execute() runs, the result is
+        // already waiting.
+        if (opts?.clientToolStore && opts?.conversationId && opts.clientToolStore.scanRecent) {
+          const scanned = await opts.clientToolStore.scanRecent({
+            conversationId: opts.conversationId,
+            toolName: t.name,
+          })
+          if (scanned?.result) {
+            await opts.clientToolStore.delete({
+              conversationId: opts.conversationId,
+              toolUseId: scanned.toolUseId,
+            })
+            const text =
+              typeof scanned.result.output === 'string' ? scanned.result.output : JSON.stringify(scanned.result.output)
+            return {
+              content: [{ type: 'text', text }],
+              isError: !!scanned.result.isError,
+            }
           }
         }
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -357,4 +385,68 @@ function extractSessionStore(config: AgentConfig): SessionStore | null {
   }
 
   return raw as SessionStore
+}
+
+/**
+ * 创建内置 askUser MCP server。
+ *
+ * 注册一个 `askUser` 工具，模型可通过它主动向用户提问。
+ * 工具的 execute() 是 stub——实际执行由 PreToolUse hook 拦截（sentinel 模式），
+ * Host 收集用户回答后调 session.respondAskUser() resume。
+ *
+ * resume 时 hook 从 store 读到回答 → allow → 此 stub 读取回答并返回。
+ */
+function createBuiltinAskUserMcpServer(
+  askUserStore: AskUserStore,
+  conversationId?: string,
+): ReturnType<typeof createSdkMcpServer> {
+  const askUserTool = sdkTool(
+    'askUser',
+    'Ask the user a question and wait for their answer. Use this when you need clarification, confirmation, or a choice from the user.',
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    {
+      type: 'object' as const,
+      properties: {
+        question: {
+          type: 'string' as const,
+          description: 'The question to ask the user',
+        },
+        options: {
+          type: 'array' as const,
+          items: { type: 'string' as const },
+          description: 'Optional predefined answer options for the user to choose from',
+        },
+      },
+      required: ['question'],
+    } as any,
+    async (input: Record<string, unknown>) => {
+      // Resume path: check if an answer is already stashed in the store.
+      if (conversationId && askUserStore.scanRecent) {
+        const questionText = (input.question as string) ?? ''
+        const scanned = await askUserStore.scanRecent({
+          conversationId,
+          question: questionText,
+        })
+        if (scanned?.result) {
+          await askUserStore.delete({
+            conversationId,
+            toolUseId: scanned.toolUseId,
+          })
+          return {
+            content: [{ type: 'text', text: scanned.result.answer }],
+          }
+        }
+      }
+      // Should not reach here in normal flow — the hook intercepts before execute().
+      return {
+        content: [{ type: 'text', text: '(askUser: no answer available)' }],
+        isError: true,
+      }
+    },
+  )
+  return createSdkMcpServer({
+    name: 'kernel',
+    version: '1.0.0',
+    tools: [askUserTool],
+  })
 }
