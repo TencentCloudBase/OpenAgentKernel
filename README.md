@@ -126,6 +126,9 @@ for await (const e of resumed.send('还记得我的名字吗？')) { /* ... */ }
 | `mcpServers` | `Record<string, McpServerConfig>` | | MCP 服务器 |
 | `storage` | `StorageProvider` | | 多模态附件存储 |
 | `hooks` | `AgentHooks` | | 业务生命周期钩子 |
+| `cwd` | `string` | | 平台资产层根目录(skills + 项目级 CLAUDE.md 加载根) |
+| `skills` | `{ enabled?: 'all' \| string[] }` | | 启用 SDK skills 能力(需配合 `cwd`) |
+| `userMemory` | `{ enabled?: boolean }` | | 用户级长期记忆(SDK auto-memory 同步到 envId 对应 COS) |
 
 <details>
 <summary>配置类型定义展开</summary>
@@ -388,6 +391,41 @@ pnpm dlx tsx packages/open-agent-kernel/examples/14-session-history.ts
 ```
 
 完整示例列表见 [`examples/README.md`](./examples/README.md)。
+
+## 平台资产 vs 用户私产
+
+OAK 把 Claude SDK 文件系统资产分两类:
+
+**平台资产**(共享 / 只读心智 — 业务方在镜像或 cwd 中管理):
+- 项目级 `CLAUDE.md`(`cwd/CLAUDE.md`)
+- Skills(`cwd/.claude/skills/`)
+- 子 agent 定义、规则、命令(`cwd/.claude/{agents,rules,commands}/`)
+
+**用户私产**(独占 / 读写心智 — SDK 自动写,跨节点同步到 COS):
+- 用户级 `CLAUDE.md`(`<CLAUDE_CONFIG_DIR>/CLAUDE.md`)
+- 主会话自动记忆(`<CLAUDE_CONFIG_DIR>/projects/*/memory/`)
+- 子 agent 用户级记忆(`<CLAUDE_CONFIG_DIR>/agent-memory/`)
+
+两者用不同的载体:平台资产走 `cwd` 字段,用户私产走 `userMemory.enabled = true`。
+
+## 沙箱粒度(scope)与术语对照
+
+`sandbox.scope` 描述 AGS 实例粒度,**与"沙箱内工作区目录派生"是两层正交关系**。
+
+| OAK SDK | server feature/stateful-infra | 含义 |
+|---|---|---|
+| `scope: 'session'`(默认) | `sandboxMode: 'isolated'` | 每 session 一个独立 AGS 实例 |
+| `scope: 'shared'` | `sandboxMode: 'shared'` | 同 envId 多 session 共享一个 AGS 实例 |
+
+工作区目录派生(`/home/user/{conversationId}/`)由沙箱镜像负责,SDK 不感知。
+
+## userMemory 启用前提
+
+启用 `userMemory.enabled = true` 后,业务方上游必须保证:
+
+> **同一 userId 的请求不能并发处理** — 即同一时刻不能有两个 SDK 节点同时为 alice 服务。
+
+注意:这只要求"串行性",**不要求"永远固定到同一节点"**。alice 这次请求落 node1、下次落 node2 完全可以,只要两次不重叠即可。常见实现路径:Redis 互斥锁 / userId 队列 / 会话级路由 / 一致性哈希 — 任选其一。
 
 ## 架构
 
