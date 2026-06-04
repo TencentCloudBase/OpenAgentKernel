@@ -17,6 +17,8 @@
  *   - handoffs / agents 注入                    → PR #2+ 后续
  */
 
+import { randomBytes } from 'node:crypto'
+import { mkdirSync, realpathSync } from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type {
@@ -26,11 +28,7 @@ import type {
   SessionStore,
   SettingSource,
 } from '@anthropic-ai/claude-agent-sdk'
-import {
-  ClaudeHomeSyncEngine,
-  CloudBaseCosClaudeHomeStore,
-  deriveClaudeConfigDir,
-} from '../claude-home/index.js'
+import { ClaudeHomeSyncEngine, CloudBaseCosClaudeHomeStore, deriveClaudeConfigDir } from '../claude-home/index.js'
 import { InvalidConfigError } from '../internal/errors.js'
 import { createPreToolUsePermissionHook, type PreToolUseHookLocalState } from '../permissions/hooks.js'
 import type { AgentConfig } from '../public/types.js'
@@ -103,7 +101,9 @@ export function buildClaudeQueryOptions(
   // 1) 用户传 cwd:走"受控 settingSources"路径
   // 2) 用户没传:用 ephemeral 目录,settingSources=[](等价 v0 isolation)
   const userCwd = config.cwd
-  if (userCwd) assertSafeUserCwd(userCwd)
+  if (userCwd) {
+    assertSafeUserCwd(userCwd)
+  }
   const effectiveCwd = userCwd ?? deriveEphemeralCwd()
   const settingSources: SettingSource[] = userCwd ? ['project'] : []
 
@@ -125,6 +125,13 @@ export function buildClaudeQueryOptions(
   const sessionStore = extractSessionStore(config)
   const enablePersist = sessionStore !== null
 
+  // CLAUDE_CONFIG_DIR 单一来源(优先级):
+  //   1) userMemory.enabled + userId → per-user 派生路径
+  //   2) sessionStore enablePersist → tmpdir(避免污染 host)
+  //   3) 都没有 → 不设置(SDK 用默认)
+  // 显式合并避免依赖 spread 顺序,后续维护更稳。
+  const configDirOverride = claudeConfigDir ?? (enablePersist ? getSessionLocalDir() : undefined)
+
   // 透传给 SDK 子进程的环境变量
   const env: Record<string, string | undefined> = {
     ...process.env,
@@ -134,10 +141,7 @@ export function buildClaudeQueryOptions(
     API_TIMEOUT_MS: String(DEFAULT_API_TIMEOUT_MS),
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     CLAUDE_AGENT_SDK_CLIENT_APP: '@cloudbase/open-agent-kernel/0.1.0-alpha.0',
-    // 启用 sessionStore 时把本地 dual-write 路径指到临时目录
-    ...(enablePersist ? { CLAUDE_CONFIG_DIR: getSessionLocalDir() } : {}),
-    // userMemory 启用时覆盖 CLAUDE_CONFIG_DIR(per-user 派生)
-    ...(claudeConfigDir ? { CLAUDE_CONFIG_DIR: claudeConfigDir } : {}),
+    ...(configDirOverride ? { CLAUDE_CONFIG_DIR: configDirOverride } : {}),
   }
 
   // 诊断日志（OAK_DEBUG=1 时打开）
@@ -317,26 +321,38 @@ function extractSessionStore(config: AgentConfig): SessionStore | null {
  *
  * 这个目录是空白的,settingSources=[]:SDK 进去什么都读不到,等价 v0 isolation。
  * 进程级:每个 SDK 进程实例化时生成一次,进程结束时清理(我们不主动清,依赖 OS tmpdir GC)。
+ *
+ * **必须 mkdir**:SDK spawn 子进程时若 cwd 不存在会 ENOENT 崩溃。
+ * 用 crypto.randomBytes 取代 Math.random,避免可预测性(虽然非安全场景)。
  */
 let ephemeralCwdCache: string | undefined
 function deriveEphemeralCwd(): string {
   if (ephemeralCwdCache) return ephemeralCwdCache
-  const random = Math.random().toString(36).slice(2, 10)
+  const random = randomBytes(4).toString('hex')
   ephemeralCwdCache = path.join(os.tmpdir(), `oak-ephemeral-${random}`)
+  mkdirSync(ephemeralCwdCache, { recursive: true })
   return ephemeralCwdCache
 }
 
 /**
  * 拒绝用户传 ~/.claude 或其子目录作 cwd(防止误用 + 跨用户读取宿主机配置)。
  * Spec A §5.1 安全约束。
+ *
+ * 用 realpathSync 解析 symlink,避免 cwd='/data/projects/foo'(符号链接到 ~/.claude)
+ * 绕过校验。如果路径不存在(尚未创建),fall back 到 path.resolve 仅做字面校验。
  */
 function assertSafeUserCwd(cwd: string): void {
-  const absolute = path.resolve(cwd)
+  let absolute: string
+  try {
+    absolute = realpathSync(cwd)
+  } catch {
+    absolute = path.resolve(cwd)
+  }
   const home = os.homedir()
   const homeClaude = path.join(home, '.claude')
   if (absolute === homeClaude || absolute.startsWith(homeClaude + path.sep)) {
     throw new InvalidConfigError(
-      `AgentConfig.cwd cannot point at host ~/.claude/ or its subdirectory (got ${cwd}). ` +
+      `AgentConfig.cwd cannot point at host ~/.claude/ or its subdirectory (got ${cwd}, resolved to ${absolute}). ` +
         'OAK refuses to share host-level Claude config across multi-tenant requests.',
     )
   }
