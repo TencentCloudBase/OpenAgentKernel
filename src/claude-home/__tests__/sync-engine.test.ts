@@ -78,7 +78,7 @@ describe('ClaudeHomeSyncEngine', () => {
       localDir: await fs.mkdtemp(path.join(os.tmpdir(), 'oak-sync-fresh2-')),
     })
     await fresh.pullOnSendStart()
-    expect(await readFile((fresh as any).opts.localDir, 'CLAUDE.md')).toBe('v2')
+    expect(await readFile(fresh.opts.localDir, 'CLAUDE.md')).toBe('v2')
   })
 
   it('pushOnSendEnd does reverse deletion (baseline has, currentMap missing)', async () => {
@@ -141,5 +141,27 @@ describe('ClaudeHomeSyncEngine', () => {
     await fresh.pullOnSendStart()
     expect(fresh.baselineSnapshot().has('projects/abc/memory/MEMORY.md')).toBe(true)
     expect(fresh.baselineSnapshot().has('projects/abc/memory/debugging.md')).toBe(true)
+  })
+
+  it('handles partial-failure: upload succeeds, delete fails preserves baseline entry', async () => {
+    // setup: store 中有 CLAUDE.md 和 obsolete agent-memory file
+    await store.put({ envId: 'env-1', userId: 'alice' }, 'CLAUDE.md', Buffer.from('keep'))
+    await store.put({ envId: 'env-1', userId: 'alice' }, 'agent-memory/foo/MEMORY.md', Buffer.from('to-delete'))
+    await engine.pullOnSendStart()
+
+    // 删除 agent-memory/foo/MEMORY.md(本地)→ 应触发反向删除
+    await fs.unlink(path.join(localDir, 'agent-memory/foo/MEMORY.md'))
+
+    // 让 store.delete 抛错(用 spy)
+    let deleteCalled = false
+    store.delete = async (_ctx, _relPath) => {
+      deleteCalled = true
+      throw new Error('simulated COS delete failure')
+    }
+
+    // pushOnSendEnd 应不抛(graceful degrade),但 baseline 应保留 obsolete 项以便下次重试
+    await expect(engine.pushOnSendEnd()).resolves.toBeUndefined()
+    expect(deleteCalled).toBe(true)
+    expect(engine.baselineSnapshot().has('agent-memory/foo/MEMORY.md')).toBe(true)
   })
 })
