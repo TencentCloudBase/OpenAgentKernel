@@ -66,10 +66,15 @@ export interface SandboxConfig {
    */
   runtime?: unknown
   /**
-   * 沙箱粒度：
-   * - `'session'`（默认）：每个 startSession 一个独立 AGS 实例，session.abort 时 Pause。
-   * - `'shared'`：同 envId 多个 session 共享一个 AGS 实例，按需 Resume / Stop 漂移实例，
-   *   abort 不 Pause（由 AGS 按 DefaultTimeout 自动回收）。
+   * 沙箱粒度(AGS 实例层):
+   * - `'session'`(默认):每个 startSession 一个独立 AGS 实例,session.abort 时 Pause。
+   *   对应 server feature/stateful-infra 的 `sandboxMode: 'isolated'`。
+   * - `'shared'`:同 envId 多个 session 共享一个 AGS 实例,按需 Resume / Stop 漂移实例,
+   *   abort 不 Pause(由 AGS 按 DefaultTimeout 自动回收)。
+   *   对应 server feature/stateful-infra 的 `sandboxMode: 'shared'`。
+   *
+   * 注意:这两个 scope 是 AGS 实例粒度,与"沙箱内工作区目录"是两层正交关系。
+   * 工作区目录派生由沙箱镜像负责(/home/user/{conversationId}/ 约定),SDK 不感知。
    */
   scope?: 'session' | 'shared'
   /** 沙箱生命周期（秒，传给 AGS Timeout）*/
@@ -122,27 +127,10 @@ export interface SandboxUserCredentials {
 }
 
 export interface SandboxCapabilities {
-  /** 文件系统工具（read/write/edit/ls/glob/grep）*/
+  /** 文件系统工具(read/write/edit/ls/glob/grep)*/
   filesystem?: boolean
-  /** Shell 工具（bash 命令）*/
+  /** Shell 工具(bash 命令)*/
   shell?: boolean
-  /**
-   * Skills（领域知识进阶式披露）
-   * - true: 启用但无内置 skills
-   * - { sources }: 加载指定 SKILL.md 文件
-   */
-  skills?: boolean | { sources: string[] }
-  /** Memory（跨 run 学习）*/
-  memory?: boolean
-  /** Compaction（长会话自动压缩）*/
-  compaction?: boolean | CompactionConfig
-}
-
-export interface CompactionConfig {
-  /** 触发压缩的条目数阈值，默认 10 */
-  threshold?: number
-  /** 自定义判定函数（基于 token 数 / 自定义启发式）*/
-  shouldTrigger?: (ctx: { itemCount: number; tokenCount?: number }) => boolean
 }
 
 // ============================================================
@@ -413,6 +401,55 @@ export interface AgentConfig {
    * 类型故意宽泛（unknown），避免公共类型层依赖底层实现。
    */
   storage?: unknown
+
+  // ── 平台资产层(宿主机 cwd)──────────────────
+  /**
+   * SDK 加载本机文件型资产的根目录。
+   * 影响:Skills 扫描根、项目级 CLAUDE.md 查找根、SDK 子进程 spawn cwd。
+   * 默认:OAK 自管的纯净 ephemeral 目录(无 skills、无 CLAUDE.md,等价 v0 行为)。
+   * 业务方通常传镜像内的固定路径(如 '/app/skills-bundle')。
+   *
+   * ⚠️ 安全:OAK 内部强制 settingSources 仅含 'project',永远不读 'user'(宿主机 ~/.claude)。
+   * cwd 指向 ~/.claude/ 或其子目录会被 OAK 拒绝。
+   */
+  cwd?: string
+
+  /**
+   * 启用 Claude Agent SDK 的 skills 能力。
+   * SDK 在 cwd/.claude/skills/ 下扫描 SKILL.md,按 enabled 过滤后注入到 system prompt。
+   * 不传或 enabled 未配 → skills 关闭(等价 v0 行为)。
+   *
+   * 仅当同时传了 cwd 且 cwd 下有 .claude/skills/ 目录时才生效。
+   */
+  skills?: {
+    enabled?: 'all' | string[]
+  }
+
+  // ── 用户级长期记忆(SDK 原生 .claude/ 同步)────
+  /**
+   * 用户级长期记忆。启用后:
+   *   1. SDK 子进程的 CLAUDE_CONFIG_DIR 自动按 (envId, userId) 派生到独立目录
+   *   2. 每次 session.send() 开始:从 CloudBase COS 拉取 + 算 SHA-256 baseline
+   *   3. 每次 session.send() 结束(包括 abort):diff baseline → PUT 变化 + DELETE 反向
+   *
+   * 同步范围(spec §3.4):仅 SDK 自动写入的"用户私产"
+   *   - <CLAUDE_CONFIG_DIR>/CLAUDE.md
+   *   - <CLAUDE_CONFIG_DIR>/projects/* /memory/
+   *   - <CLAUDE_CONFIG_DIR>/agent-memory/
+   * 不同步:settings.json / skills / commands / rules / agents / .claude.json 等。
+   *
+   * 默认:disabled(等价 v0 行为)。
+   *
+   * 依赖:启用时该 envId 必须开通 CloudBase COS。COS 不可达时记 warning,
+   * 不阻塞 send(graceful degrade — agent 仍可工作,只是这次不同步)。
+   *
+   * ⚠️ 前提条件(业务方需保证):同一 userId 的请求不能并发处理 —
+   * 即同一时刻不能有两个 SDK 节点同时为 alice 服务。SDK 不在并发场景下做冲突
+   * 防御。但允许 alice 这次落 node1、下次落 node2,只要两次不重叠。
+   */
+  userMemory?: {
+    enabled?: boolean
+  }
 
   // ── 钩子 ────────────────────────────────────────
   hooks?: AgentHooks

@@ -33,7 +33,6 @@ export type {
   SandboxConfig,
   SandboxCapabilities,
   SandboxUserCredentials,
-  CompactionConfig,
   ToolDefinition,
   ToolContext,
   McpServerConfig,
