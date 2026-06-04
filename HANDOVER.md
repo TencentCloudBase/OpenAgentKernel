@@ -1,6 +1,27 @@
 # @cloudbase/open-agent-kernel 交接文档
 
-> 最后更新：2026-05-28 20:30 | 分支：`feat/support-open-agent-kernel` | 版本：`0.1.0-alpha.0`
+> 最后更新：2026-06-04 16:37 | 分支：`feat/support-open-agent-kernel` | 版本：`0.2.0-alpha.0`
+
+---
+
+## v0.2.0 — cwd / skills / userMemory (Spec A)
+
+**新增公共 API**:
+- `AgentConfig.cwd?: string` — 平台资产根目录(skills + 项目 CLAUDE.md)
+- `AgentConfig.skills?: { enabled?: 'all' | string[] }` — SDK skills 透传
+- `AgentConfig.userMemory?: { enabled?: boolean }` — 用户级长期记忆(基于 SDK 原生 `.claude/` + COS 同步)
+
+**破坏性改动**(从未生效字段,可接受):
+- 删除 `SandboxCapabilities.skills` / `.memory` / `.compaction`
+- 删除 `CompactionConfig` interface
+
+**新增 internal 模块**:`src/claude-home/`(同步引擎 / store / 工具)— 不公开 export。
+
+**新增 examples**:`15-skills.ts` / `16-user-memory.ts` / `17-user-memory-distributed.ts`
+
+**测试**:`pnpm test` 跑 5 套单元测试(path-derivation / sync-rules / in-memory-store / sync-engine / agent-builder),共 48 个 case。
+
+**Spec**:`docs/superpowers/specs/2026-06-01-oak-cwd-skills-user-memory-design.md`(commit `2968bdd`)。
 
 ---
 
