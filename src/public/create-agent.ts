@@ -196,6 +196,7 @@ function createSession(deps: SessionDeps): Session {
         abortController,
         sessionId: conversationId,
         conversationId,
+        userId,
         isContinuation,
         ensureSandbox,
         ensureCloudbaseMcp,
@@ -218,6 +219,7 @@ function createSession(deps: SessionDeps): Session {
       return runApprovalResume({
         config,
         conversationId,
+        userId,
         toolUseId: opts.toolUseId,
         decision: opts.decision,
         abortController,
@@ -556,6 +558,7 @@ interface RunClaudeQueryArgs {
   abortController: AbortController
   sessionId: string
   conversationId: string
+  userId: string
   isContinuation: boolean
   ensureSandbox: () => Promise<SandboxInstance | undefined>
   ensureCloudbaseMcp: (sandbox: SandboxInstance) => Promise<SdkMcpServerConfig | undefined>
@@ -569,6 +572,7 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
     abortController,
     sessionId,
     conversationId,
+    userId,
     isContinuation,
     ensureSandbox,
     ensureCloudbaseMcp,
@@ -576,6 +580,7 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
   } = args
 
   let q: ReturnType<typeof claudeQuery> | undefined
+  let syncEngine: ReturnType<typeof buildClaudeQueryOptions>['syncEngine']
   try {
     const sandbox = await ensureSandbox()
     const cloudbaseMcp = sandbox ? await ensureCloudbaseMcp(sandbox) : undefined
@@ -587,12 +592,26 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
     const effectivePermissions = config.permissions ? { ...config.permissions, store: permissionStore } : undefined
     const effectiveConfig = effectivePermissions ? { ...config, permissions: effectivePermissions } : config
 
-    const { options } = buildClaudeQueryOptions(effectiveConfig, {
+    const built = buildClaudeQueryOptions(effectiveConfig, {
       sandboxInstance: sandbox,
       extraMcpServers: cloudbaseMcp ? { cloudbase: cloudbaseMcp } : undefined,
       conversationId,
       hookLocalState,
+      userId,
     })
+    const options = built.options
+    syncEngine = built.syncEngine
+
+    // ── userMemory: send-start pull(失败不抛,记 warning)───
+    if (syncEngine) {
+      try {
+        await syncEngine.pullOnSendStart()
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[oak/userMemory] pullOnSendStart failed:', (err as Error)?.message)
+      }
+    }
+
     const storage = extractStorageProvider(config)
     const promptStream = buildPromptAsync({
       input,
@@ -620,6 +639,16 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
       error: err instanceof Error ? err : new Error(String(err)),
     }
     yield { type: 'session_idle', reason: 'error' }
+  } finally {
+    // ── userMemory: send-end push(abort/异常都触发,失败不抛)───
+    if (syncEngine) {
+      try {
+        await syncEngine.pushOnSendEnd()
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[oak/userMemory] pushOnSendEnd failed:', (err as Error)?.message)
+      }
+    }
   }
 }
 
@@ -630,6 +659,7 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
 interface RunApprovalResumeArgs {
   config: AgentConfig
   conversationId: string
+  userId: string
   toolUseId: string
   decision: ApprovalDecision
   abortController: AbortController
@@ -642,6 +672,7 @@ async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<S
   const {
     config,
     conversationId,
+    userId,
     toolUseId,
     decision,
     abortController,
@@ -695,6 +726,7 @@ async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<S
     abortController,
     sessionId: conversationId,
     conversationId,
+    userId,
     isContinuation: true,
     ensureSandbox,
     ensureCloudbaseMcp,
