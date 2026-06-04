@@ -17,12 +17,20 @@
  *   - handoffs / agents 注入                    → PR #2+ 后续
  */
 
+import * as os from 'node:os'
+import * as path from 'node:path'
 import type {
   HookCallback as SdkHookCallback,
   Options as ClaudeOptions,
   McpServerConfig as SdkMcpServerConfig,
   SessionStore,
+  SettingSource,
 } from '@anthropic-ai/claude-agent-sdk'
+import {
+  ClaudeHomeSyncEngine,
+  CloudBaseCosClaudeHomeStore,
+  deriveClaudeConfigDir,
+} from '../claude-home/index.js'
 import { InvalidConfigError } from '../internal/errors.js'
 import { createPreToolUsePermissionHook, type PreToolUseHookLocalState } from '../permissions/hooks.js'
 import type { AgentConfig } from '../public/types.js'
@@ -51,6 +59,13 @@ export interface BuiltClaudeQueryParams {
   options: ClaudeOptions
   /** 派生出的凭证信息，调试/日志用 */
   credential: ResolvedCredential
+  /**
+   * 当 userMemory.enabled = true 时返回的同步引擎。
+   * 调用方(create-agent.ts)负责挂到 session.send 两端:
+   *   send-start → syncEngine.pullOnSendStart()
+   *   send-end (含 abort) → syncEngine.pushOnSendEnd()
+   */
+  syncEngine?: ClaudeHomeSyncEngine
 }
 
 /**
@@ -74,6 +89,8 @@ export function buildClaudeQueryOptions(
     extraMcpServers?: Record<string, SdkMcpServerConfig>
     conversationId?: string
     hookLocalState?: PreToolUseHookLocalState
+    /** Task 9 for userMemory:agent.startSession({ userId }) 透传过来 */
+    userId?: string
   } = {},
 ): BuiltClaudeQueryParams {
   const credential = resolveCredential({
@@ -81,6 +98,26 @@ export function buildClaudeQueryOptions(
     model: config.model,
     resources: config.resources,
   })
+
+  // ── cwd / settingSources 派生(spec §4.1)─────────
+  // 1) 用户传 cwd:走"受控 settingSources"路径
+  // 2) 用户没传:用 ephemeral 目录,settingSources=[](等价 v0 isolation)
+  const userCwd = config.cwd
+  if (userCwd) assertSafeUserCwd(userCwd)
+  const effectiveCwd = userCwd ?? deriveEphemeralCwd()
+  const settingSources: SettingSource[] = userCwd ? ['project'] : []
+
+  // ── userMemory 派生(spec §4.2 + §4.6)───────────
+  let claudeConfigDir: string | undefined
+  let syncEngine: ClaudeHomeSyncEngine | undefined
+  if (config.userMemory?.enabled && extra.userId) {
+    claudeConfigDir = deriveClaudeConfigDir(config.envId, extra.userId)
+    syncEngine = new ClaudeHomeSyncEngine({
+      store: new CloudBaseCosClaudeHomeStore(), // 复用 process.env 凭证
+      ctx: { envId: config.envId, userId: extra.userId },
+      localDir: claudeConfigDir,
+    })
+  }
 
   // ── 决定是否启用 SDK 持久化 ──────────────────────────────────────
   // 注入 sessionStore 时，SDK 强制要求 persistSession=true（dual-write 模式：
@@ -99,6 +136,8 @@ export function buildClaudeQueryOptions(
     CLAUDE_AGENT_SDK_CLIENT_APP: '@cloudbase/open-agent-kernel/0.1.0-alpha.0',
     // 启用 sessionStore 时把本地 dual-write 路径指到临时目录
     ...(enablePersist ? { CLAUDE_CONFIG_DIR: getSessionLocalDir() } : {}),
+    // userMemory 启用时覆盖 CLAUDE_CONFIG_DIR(per-user 派生)
+    ...(claudeConfigDir ? { CLAUDE_CONFIG_DIR: claudeConfigDir } : {}),
   }
 
   // 诊断日志（OAK_DEBUG=1 时打开）
@@ -163,8 +202,9 @@ export function buildClaudeQueryOptions(
   const options: ClaudeOptions = {
     model: credential.modelId,
     env,
-    // ── 关键：禁用本地配置文件依赖（kernel 是云服务，不依赖本机 ~/.claude 配置） ──
-    settingSources: [],
+    cwd: effectiveCwd,
+    // ── settingSources(spec §4.1):用户传 cwd→['project'];否则 []（v0 isolation）──
+    settingSources,
     strictMcpConfig: true,
     // 持久化策略：注入 store 时必须 true（SDK 强制约束）
     persistSession: enablePersist,
@@ -172,6 +212,8 @@ export function buildClaudeQueryOptions(
     ...(config.session?.flush ? { sessionStoreFlush: config.session.flush } : {}),
     // ── 系统提示 ──
     ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
+    // ── Skills 注入(spec §4.1):仅当用户显式配置时透传 ──
+    ...(config.skills?.enabled !== undefined ? { skills: config.skills.enabled } : {}),
     // ── MCP servers（PR #5 + PR #6A） ──
     ...(mergedMcpServers ? { mcpServers: mergedMcpServers } : {}),
     // ── PR #7.0：审批 hooks ──
@@ -189,7 +231,7 @@ export function buildClaudeQueryOptions(
     tools: [],
   }
 
-  return { options, credential }
+  return { options, credential, syncEngine }
 }
 
 // ─── 辅助 ────────────────────────────────────────────────────────
@@ -268,4 +310,34 @@ function extractSessionStore(config: AgentConfig): SessionStore | null {
   }
 
   return raw as SessionStore
+}
+
+/**
+ * 派生 OAK 自管的纯净 ephemeral cwd(用户没传 cwd 时使用)。
+ *
+ * 这个目录是空白的,settingSources=[]:SDK 进去什么都读不到,等价 v0 isolation。
+ * 进程级:每个 SDK 进程实例化时生成一次,进程结束时清理(我们不主动清,依赖 OS tmpdir GC)。
+ */
+let ephemeralCwdCache: string | undefined
+function deriveEphemeralCwd(): string {
+  if (ephemeralCwdCache) return ephemeralCwdCache
+  const random = Math.random().toString(36).slice(2, 10)
+  ephemeralCwdCache = path.join(os.tmpdir(), `oak-ephemeral-${random}`)
+  return ephemeralCwdCache
+}
+
+/**
+ * 拒绝用户传 ~/.claude 或其子目录作 cwd(防止误用 + 跨用户读取宿主机配置)。
+ * Spec A §5.1 安全约束。
+ */
+function assertSafeUserCwd(cwd: string): void {
+  const absolute = path.resolve(cwd)
+  const home = os.homedir()
+  const homeClaude = path.join(home, '.claude')
+  if (absolute === homeClaude || absolute.startsWith(homeClaude + path.sep)) {
+    throw new InvalidConfigError(
+      `AgentConfig.cwd cannot point at host ~/.claude/ or its subdirectory (got ${cwd}). ` +
+        'OAK refuses to share host-level Claude config across multi-tenant requests.',
+    )
+  }
 }
