@@ -85,29 +85,39 @@ export class CloudBaseCosClaudeHomeStore implements ClaudeHomeSyncStore {
 
   private async getApp(): Promise<CloudBaseApp> {
     if (this.app) return this.app
-    const tcbModule = await import('@cloudbase/node-sdk').catch(() => null)
-    if (!tcbModule) {
+    // 与 src/storage/cloudbase-storage.ts 一致的懒加载模式:
+    //   1) 用 new Function 绕过 tsup 静态打包(否则 ESM 入口找不到 @cloudbase/node-sdk)
+    //   2) `@cloudbase/node-sdk` 是 CommonJS,ESM import 后真实导出在 mod.default
+    const mod = await this.requireCloudBase()
+    const init = (mod.default ?? mod) as { init?: (opts: Record<string, unknown>) => CloudBaseApp }
+    if (typeof init.init !== 'function') {
       throw new ResourceError(
-        'CloudBaseCosClaudeHomeStore requires @cloudbase/node-sdk. Install via:\n' + '  pnpm add @cloudbase/node-sdk',
+        '@cloudbase/node-sdk loaded but `.init()` not available. Check the version (>= 3.0.0 required).',
       )
     }
-    const tcb = tcbModule as unknown as {
-      init: (opts: {
-        env: string
-        secretId: string
-        secretKey: string
-        sessionToken?: string
-        region?: string
-      }) => CloudBaseApp
-    }
-    this.app = tcb.init({
+    this.app = init.init({
       env: this.creds.envId,
+      region: this.creds.region,
       secretId: this.creds.secretId,
       secretKey: this.creds.secretKey,
-      sessionToken: this.creds.sessionToken,
-      region: this.creds.region,
+      ...(this.creds.sessionToken ? { sessionToken: this.creds.sessionToken } : {}),
     })
     return this.app
+  }
+
+  private async requireCloudBase(): Promise<{ default?: unknown; init?: unknown }> {
+    try {
+      // 必须用 new Function 包,避免 tsup 把 import('@cloudbase/node-sdk')
+      // 静态展开成相对路径(运行时 ESM 解析失败)。
+      const dynamicImport = new Function('p', 'return import(p)') as (
+        p: string,
+      ) => Promise<{ default?: unknown; init?: unknown }>
+      return await dynamicImport('@cloudbase/node-sdk')
+    } catch {
+      throw new ResourceError(
+        'CloudBaseCosClaudeHomeStore requires @cloudbase/node-sdk. Install via:\n  pnpm add @cloudbase/node-sdk',
+      )
+    }
   }
 
   async pull(ctx: ClaudeHomeContext, localDir: string): Promise<Map<RelativePath, string>> {
