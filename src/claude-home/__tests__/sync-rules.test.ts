@@ -3,11 +3,7 @@ import { matchesSyncRule, SYNC_INCLUDES } from '../sync-rules.js'
 
 describe('SYNC_INCLUDES', () => {
   it('contains the expected three patterns', () => {
-    expect(SYNC_INCLUDES).toEqual([
-      'CLAUDE.md',
-      'projects/*/memory/**',
-      'agent-memory/**/MEMORY.md',
-    ])
+    expect(SYNC_INCLUDES).toEqual(['CLAUDE.md', 'projects/*/memory/**', 'agent-memory/**/MEMORY.md'])
   })
 })
 

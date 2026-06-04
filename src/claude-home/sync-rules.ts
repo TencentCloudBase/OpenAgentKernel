@@ -13,11 +13,7 @@
  * 是 OAK 派生的受控目录时才同步,详见 §3.4 注释。本文件只处理 CLAUDE_CONFIG_DIR 内的同步。
  */
 
-export const SYNC_INCLUDES = [
-  'CLAUDE.md',
-  'projects/*/memory/**',
-  'agent-memory/**/MEMORY.md',
-] as const
+export const SYNC_INCLUDES = ['CLAUDE.md', 'projects/*/memory/**', 'agent-memory/**/MEMORY.md'] as const
 
 /**
  * 判断一个相对路径是否应该被同步。
@@ -28,7 +24,7 @@ export const SYNC_INCLUDES = [
 export function matchesSyncRule(relPath: string): boolean {
   if (!relPath) return false
   if (relPath.startsWith('/')) return false
-  if (relPath.includes('..')) return false   // 防御:本不该出现,但保险
+  if (relPath.includes('..')) return false // 防御:本不该出现,但保险
 
   // CLAUDE.md(只在根)
   if (relPath === 'CLAUDE.md') return true

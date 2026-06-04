@@ -120,10 +120,7 @@ export class ClaudeHomeSyncEngine {
         const oldHash = this.baseline.get(relPath)
         if (oldHash !== undefined) newBaseline.set(relPath, oldHash)
         // 旧 baseline 没有 → 这是新文件的 upload 失败 → 不进 newBaseline,下次会重试 upload
-        console.warn(
-          `[oak/userMemory] push failed for ${relPath}:`,
-          (result.reason as Error)?.message ?? result.reason,
-        )
+        console.warn(`[oak/userMemory] push failed for ${relPath}:`, (result.reason as Error)?.message ?? result.reason)
       }
     }
 

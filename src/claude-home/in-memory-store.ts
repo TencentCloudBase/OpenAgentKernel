@@ -40,7 +40,7 @@ export class InMemoryClaudeHomeStore implements ClaudeHomeSyncStore {
       ns = new Map()
       this.objects.set(key, ns)
     }
-    ns.set(relPath, Buffer.from(content))    // copy to detach
+    ns.set(relPath, Buffer.from(content)) // copy to detach
   }
 
   async delete(ctx: ClaudeHomeContext, relPath: RelativePath): Promise<void> {

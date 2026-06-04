@@ -36,10 +36,7 @@ describe('InMemoryClaudeHomeStore', () => {
   it('put creates nested directories on pull', async () => {
     await store.put(ctxA, 'projects/abc/memory/MEMORY.md', Buffer.from('# memory'))
     await store.pull(ctxA, tmpDir)
-    const content = await fs.readFile(
-      path.join(tmpDir, 'projects', 'abc', 'memory', 'MEMORY.md'),
-      'utf8'
-    )
+    const content = await fs.readFile(path.join(tmpDir, 'projects', 'abc', 'memory', 'MEMORY.md'), 'utf8')
     expect(content).toBe('# memory')
   })
 

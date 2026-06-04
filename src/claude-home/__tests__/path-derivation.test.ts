@@ -10,7 +10,7 @@ describe('sanitizePathSegment', () => {
 
   it('replaces forbidden chars with underscore', () => {
     expect(sanitizePathSegment('alice/bob')).toBe('alice_bob')
-    expect(sanitizePathSegment('alice..bob')).toBe('alice..bob')   // dots are allowed but '..' segment must be blocked at path-level (we test deriveClaudeConfigDir)
+    expect(sanitizePathSegment('alice..bob')).toBe('alice..bob') // dots are allowed but '..' segment must be blocked at path-level (we test deriveClaudeConfigDir)
     expect(sanitizePathSegment('alice bob')).toBe('alice_bob')
     expect(sanitizePathSegment('alice@bob')).toBe('alice_bob')
   })
