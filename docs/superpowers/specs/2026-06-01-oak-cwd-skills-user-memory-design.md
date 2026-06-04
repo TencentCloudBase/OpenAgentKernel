@@ -84,8 +84,17 @@ interface AgentConfig {
   
   /**
    * 启用 Claude Agent SDK 的 skills 能力。
-   * SDK 在 cwd/.claude/skills/ 下扫描 SKILL.md,按 enabled 过滤后注入到 system prompt。
+   * SDK 在 cwd/.claude/skills/ 下扫描 SKILL.md,把 frontmatter 注入 system prompt
+   * 让模型知道有什么 skill 可用;模型遇到匹配场景时**主动调用 `Skill` 工具**加载
+   * SKILL.md 全文。Skills 不是 prompt 直接注入,是 **model-invoked tool**。
    * 不传或 enabled 未配 → skills 关闭(等价 v0 行为)。
+   *
+   * OAK 启用 skills 时会(spec §4.1.2):
+   *   - 把 settingSources 设为 ['project'](让 SDK 扫 cwd/.claude/skills/)
+   *   - 把 'Skill' 工具加入 options.tools(让模型能 invoke)
+   *
+   * 仅当同时传了 cwd 且 cwd 下有 .claude/skills/ 目录时才生效。
+   * 配了 skills 但没传 cwd → console.warn 提示(不抛错,等价无效)。
    */
   skills?: {
     enabled?: 'all' | string[]

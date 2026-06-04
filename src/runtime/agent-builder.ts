@@ -107,6 +107,28 @@ export function buildClaudeQueryOptions(
   const effectiveCwd = userCwd ?? deriveEphemeralCwd()
   const settingSources: SettingSource[] = userCwd ? ['project'] : []
 
+  // ── Skills 启用前置校验(spec §4.1.2)──────────
+  // 启用 skills 但未传 cwd → SDK 找不到 SKILL.md(settingSources=[] 不发现)
+  // 静默无效易混淆 → 显式 warning(不抛错,不破坏向后兼容)
+  if (config.skills?.enabled !== undefined && !userCwd) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[oak/skills] skills configured but cwd not set — SKILL.md will not be discovered. ' +
+        'Pass `cwd` pointing to a directory containing `.claude/skills/`.',
+    )
+  }
+
+  // ── Skills 启用前置校验(spec §4.1.2)──────────
+  // 启用 skills 但未传 cwd → SDK 找不到 SKILL.md(settingSources=[] 不发现)
+  // 静默无效易混淆 → 显式 warning(不抛错,不破坏向后兼容)
+  if (config.skills?.enabled !== undefined && !userCwd) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[oak/skills] skills configured but cwd not set — SKILL.md will not be discovered. ' +
+        'Pass `cwd` pointing to a directory containing `.claude/skills/`.',
+    )
+  }
+
   // ── userMemory 派生(spec §4.2 + §4.6)───────────
   // spec §3.1: COS 不可达 / 凭证缺失 → graceful degrade(本次 send 不同步,但 send 仍可继续)
   let claudeConfigDir: string | undefined
@@ -243,8 +265,11 @@ export function buildClaudeQueryOptions(
     // 因此始终 bypass SDK 的内置权限系统，让 Hook 全权负责。
     permissionMode: 'bypassPermissions' as const,
     allowDangerouslySkipPermissions: true,
-    // ── 内置工具默认全部禁用（沙箱能力通过上面的 mcpServers 提供） ──
-    tools: [],
+    // ── 内置工具默认全部禁用(沙箱能力通过上面的 mcpServers 提供)──
+    // 例外:启用 skills 时必须保留 'Skill' 工具,否则模型无法 invoke discovered skills
+    // (SDK 文档:"If you also pass an explicit tools list, include 'Skill' in that list
+    //   so Claude can invoke skills.")
+    tools: config.skills?.enabled !== undefined ? ['Skill'] : [],
   }
 
   return { options, credential, syncEngine }

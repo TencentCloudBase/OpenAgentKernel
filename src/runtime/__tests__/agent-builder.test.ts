@@ -9,7 +9,7 @@
  *   - I2 修复:assertSafeUserCwd 走 realpathSync
  */
 
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { existsSync } from 'node:fs'
@@ -78,6 +78,47 @@ describe('buildClaudeQueryOptions — skills', () => {
   it('no skills config → options.skills undefined', () => {
     const { options } = buildClaudeQueryOptions(baseConfig)
     expect(options.skills).toBeUndefined()
+  })
+
+  // 关键 bug 修复:启用 skills 时,'Skill' 工具必须在 options.tools 中,
+  // 否则 SDK 加载了 skill 元数据但模型无工具可 invoke(用户实测发现的 bug)
+  // SDK 文档:"If you also pass an explicit tools list, include 'Skill' in that list
+  //          so Claude can invoke skills."
+  it('skills.enabled set → tools includes "Skill"', () => {
+    const { options } = buildClaudeQueryOptions({ ...baseConfig, skills: { enabled: 'all' } })
+    expect(options.tools).toEqual(['Skill'])
+  })
+
+  it('skills.enabled = string[] → tools includes "Skill"', () => {
+    const { options } = buildClaudeQueryOptions({ ...baseConfig, skills: { enabled: ['greet'] } })
+    expect(options.tools).toEqual(['Skill'])
+  })
+
+  it('no skills config → tools is empty (existing behavior)', () => {
+    const { options } = buildClaudeQueryOptions(baseConfig)
+    expect(options.tools).toEqual([])
+  })
+
+  it('skills configured but cwd missing → emits warning', () => {
+    // 此场景 SDK settingSources=[] 不会发现 SKILL.md → skills 静默失效
+    // OAK 显式 warning 提醒业务方
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      buildClaudeQueryOptions({ ...baseConfig, skills: { enabled: 'all' } })
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/skills configured but cwd not set/))
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('skills configured AND cwd set → no warning (skills will be discovered)', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      buildClaudeQueryOptions({ ...baseConfig, cwd: os.tmpdir(), skills: { enabled: 'all' } })
+      expect(warnSpy).not.toHaveBeenCalledWith(expect.stringMatching(/skills configured but cwd not set/))
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 })
 
