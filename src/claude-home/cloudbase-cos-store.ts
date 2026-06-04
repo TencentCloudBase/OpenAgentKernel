@@ -88,8 +88,7 @@ export class CloudBaseCosClaudeHomeStore implements ClaudeHomeSyncStore {
     const tcbModule = await import('@cloudbase/node-sdk').catch(() => null)
     if (!tcbModule) {
       throw new ResourceError(
-        'CloudBaseCosClaudeHomeStore requires @cloudbase/node-sdk. Install via:\n' +
-          '  pnpm add @cloudbase/node-sdk',
+        'CloudBaseCosClaudeHomeStore requires @cloudbase/node-sdk. Install via:\n' + '  pnpm add @cloudbase/node-sdk',
       )
     }
     const tcb = tcbModule as unknown as {
@@ -125,7 +124,7 @@ export class CloudBaseCosClaudeHomeStore implements ClaudeHomeSyncStore {
 
     await Promise.all(
       listed.map(async (item) => {
-        if (item.Size === 0) return    // 目录占位文件
+        if (item.Size === 0) return // 目录占位文件
         const fileID = item.Key
         assertSafeKey(ctx.userId, fileID)
         const relPath = fileID.substring(prefix.length)
