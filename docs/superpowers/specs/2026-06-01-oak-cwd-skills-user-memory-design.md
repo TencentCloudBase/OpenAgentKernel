@@ -8,7 +8,7 @@
 >
 > **v3 变更**:推翻 v1/v2 的"工具型 MemoryStore + MCP 工具"方案,改为"基于 SDK 原生 `.claude/` 目录的同步方案"。详见 §8 与 §11。
 >
-> **v3.1 变更**:简化同步策略 — 从"acquire pull + 30s 周期 push + release push" 改为 "**send-start pull + send-end push**" + SHA-256 hash diff + 反向删除。前提是业务方上游保证"同 user 请求路由到固定节点"(SDK 不做跨节点并发防御)。详见 §4.3。
+> **v3.1 变更**:简化同步策略 — 从"acquire pull + 30s 周期 push + release push" 改为 "**send-start pull + send-end push**" + SHA-256 hash diff + 反向删除。前提是业务方上游保证"同 user 请求不并发处理"(同一时刻单节点,SDK 不做并发防御)。详见 §4.3。
 
 ## 1. 背景与动机
 
@@ -281,7 +281,7 @@ class ClaudeHomeSyncEngine {
 |---|---|---|
 | 同步时机 | send 边界(start pull / end push)| 与"用户感觉"对齐;无周期任务复杂度;失败可下次重试 |
 | 变更检测 | SHA-256 hash diff | 不依赖 mtime(假阳性多)/ ETag(网络往返);hash 是确定性的 |
-| 并发策略 | **不防御**(覆盖式 PUT) | 业务方上游保证同 user 路由固定节点;SDK 不复杂化 |
+| 并发策略 | **不防御**(覆盖式 PUT) | 业务方上游保证同 user 请求串行(同时刻单节点);SDK 不复杂化 |
 | abort 处理 | abort 也 push | 不丢数据 — SDK 已写出来的 memory 仍持久化 |
 | 反向删除 | 支持(baseline diff) | SDK / 用户主动删的文件不会在下次 pull 时僵尸复活 |
 | baseline 复用 | 同 session 内多次 send 共享 baseline | push 完后 `baseline = currentMap`,下次 send 直接走 diff,不重新 pull(可选优化) |
@@ -645,7 +645,7 @@ example 16 / 17 必须显式验证:
 | 复杂度 | 自己造 store + 4 工具 + dedup + 引导文案 | 目录 ↔ COS,send 边界同步,hash diff |
 | 跨 SDK 可移植 | 高(KV 通用) | 低(绑 Claude SDK 文件格式) |
 | 与 SDK 演进同步 | 要追 SDK 新能力 | 自动跟随(SDK 加新目录时只更新 SYNC_INCLUDES) |
-| 业务方理解成本 | 中(要懂 KV / 工具引导 / dedup) | 低(`enabled: true` 一行 + 路由前提) |
+| 业务方理解成本 | 中(要懂 KV / 工具引导 / dedup) | 低(`enabled: true` 一行 + 串行前提) |
 | 跨节点并发安全 | DB 行级 / namespace 隔离天然安全 | **业务方上游保证同 user 请求串行**(SDK 不防御,V2 可选启用 ETag) |
 
 **核心论点**:OAK 选 Claude SDK 的价值是 SDK 在 memory / dream / agent 等维度领先。同步方案保留这个领先性,工具型方案放弃这个领先性。**并发安全的取舍**是同步方案唯一的代价 — 通过将其声明为业务前提,保持 SDK 简单。
