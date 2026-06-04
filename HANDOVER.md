@@ -23,6 +23,12 @@
 
 **Spec**:`docs/superpowers/specs/2026-06-01-oak-cwd-skills-user-memory-design.md`(commit `2968bdd`)。
 
+**已知限制**(可在 V2 评估补齐):
+- **项目级 subagent memory 不同步**:`<cwd>/.claude/agent-memory/<agent>/MEMORY.md`(SDK `memory: 'project'` 配置)目前不在 SYNC_INCLUDES 范围,跨节点不持久化。需要的业务方暂时改用 `memory: 'user'`(走 `<CLAUDE_CONFIG_DIR>/agent-memory/`,该路径已同步)。
+- **默认 ephemeral cwd 是 process-level 随机的**:不传 `cwd` 时,SDK 把项目级 auto-memory 写到 `<CLAUDE_CONFIG_DIR>/projects/<random-hash>/memory/`。跨节点 hash 不一致,**项目级主会话 auto-memory 跨节点不可复用**。要复用请传一个稳定的 `cwd`(业务镜像内固定路径)。**用户级 CLAUDE.md 与 user-level subagent memory 不受影响,跨节点正常工作**。
+- **CloudBaseCosClaudeHomeStore 缺 mock 单测**:目前仅集成层(example 16/17)验证。建议在 V2 加 mock 单测覆盖 key pattern / assertSafeKey / delete-404。
+- **session.send / runClaudeQuery 缺 sync-hook 集成测**:try/finally 触发 push 这条不变量目前没单测验证,只靠 spec compliance review 确认。建议 V2 加。
+
 ---
 
 ## 一、项目定位

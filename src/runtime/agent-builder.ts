@@ -108,15 +108,27 @@ export function buildClaudeQueryOptions(
   const settingSources: SettingSource[] = userCwd ? ['project'] : []
 
   // ── userMemory 派生(spec §4.2 + §4.6)───────────
+  // spec §3.1: COS 不可达 / 凭证缺失 → graceful degrade(本次 send 不同步,但 send 仍可继续)
   let claudeConfigDir: string | undefined
   let syncEngine: ClaudeHomeSyncEngine | undefined
   if (config.userMemory?.enabled && extra.userId) {
-    claudeConfigDir = deriveClaudeConfigDir(config.envId, extra.userId)
-    syncEngine = new ClaudeHomeSyncEngine({
-      store: new CloudBaseCosClaudeHomeStore(), // 复用 process.env 凭证
-      ctx: { envId: config.envId, userId: extra.userId },
-      localDir: claudeConfigDir,
-    })
+    try {
+      claudeConfigDir = deriveClaudeConfigDir(config.envId, extra.userId)
+      syncEngine = new ClaudeHomeSyncEngine({
+        store: new CloudBaseCosClaudeHomeStore(), // 复用 process.env 凭证
+        ctx: { envId: config.envId, userId: extra.userId },
+        localDir: claudeConfigDir,
+      })
+    } catch (err) {
+      // ResourceError 等(比如缺 TCB_* 凭证) → graceful degrade,本次 send 不同步,继续工作
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[oak/userMemory] failed to construct sync engine, sync disabled this turn:',
+        (err as Error)?.message,
+      )
+      claudeConfigDir = undefined
+      syncEngine = undefined
+    }
   }
 
   // ── 决定是否启用 SDK 持久化 ──────────────────────────────────────
@@ -140,7 +152,7 @@ export function buildClaudeQueryOptions(
     ANTHROPIC_API_KEY: undefined,
     API_TIMEOUT_MS: String(DEFAULT_API_TIMEOUT_MS),
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-    CLAUDE_AGENT_SDK_CLIENT_APP: '@cloudbase/open-agent-kernel/0.1.0-alpha.0',
+    CLAUDE_AGENT_SDK_CLIENT_APP: '@cloudbase/open-agent-kernel/0.2.0-alpha.0',
     ...(configDirOverride ? { CLAUDE_CONFIG_DIR: configDirOverride } : {}),
   }
 

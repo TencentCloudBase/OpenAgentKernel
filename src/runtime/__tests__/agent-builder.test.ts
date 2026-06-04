@@ -118,4 +118,21 @@ describe('buildClaudeQueryOptions — userMemory', () => {
     expect(syncEngine).toBeUndefined()
     expect(options.env?.CLAUDE_CONFIG_DIR).toBeUndefined()
   })
+
+  it('userMemory + missing TCB_* env → graceful degrade (no syncEngine, no throw)', () => {
+    // 模拟 spec §3.1:COS 凭证缺失时,构造 store 抛 ResourceError →
+    // agent-builder 应 try/catch 兜住,返回 syncEngine=undefined,不影响 send 主流程
+    delete process.env.TCB_ENV_ID
+    delete process.env.TCB_SECRET_ID
+    delete process.env.TCB_SECRET_KEY
+    expect(() => {
+      const { options, syncEngine } = buildClaudeQueryOptions(
+        { ...baseConfig, userMemory: { enabled: true } },
+        { userId: 'alice' },
+      )
+      expect(syncEngine).toBeUndefined()
+      // CLAUDE_CONFIG_DIR 也跟着清空(graceful degrade 全套不留半截状态)
+      expect(options.env?.CLAUDE_CONFIG_DIR).toBeUndefined()
+    }).not.toThrow()
+  })
 })

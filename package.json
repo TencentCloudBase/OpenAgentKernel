@@ -1,6 +1,6 @@
 {
   "name": "@cloudbase/open-agent-kernel",
-  "version": "0.1.0-alpha.0",
+  "version": "0.2.0-alpha.0",
   "description": "CloudBase Open Agent Kernel — server-side agentic agent SDK with built-in CloudBase resources",
   "license": "MIT",
   "type": "module",

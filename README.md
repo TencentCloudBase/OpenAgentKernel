@@ -427,6 +427,13 @@ OAK 把 Claude SDK 文件系统资产分两类:
 
 注意:这只要求"串行性",**不要求"永远固定到同一节点"**。alice 这次请求落 node1、下次落 node2 完全可以,只要两次不重叠即可。常见实现路径:Redis 互斥锁 / userId 队列 / 会话级路由 / 一致性哈希 — 任选其一。
 
+### 已知限制
+
+- **项目级主会话 auto-memory 不传 `cwd` 时跨节点不可复用** — SDK 用 cwd hash 派生项目子目录,默认 ephemeral cwd 是随机的。要跨节点复用项目级记忆请传稳定的 `cwd`。
+- **项目级 subagent memory 不同步** — 仅同步 `<CLAUDE_CONFIG_DIR>/agent-memory/`(用户级)。子 agent 用 `memory: 'project'` 时不持久化,改用 `memory: 'user'`。
+
+用户级偏好(`CLAUDE.md`)与用户级 subagent memory 跨节点正常工作。
+
 ## 架构
 
 ```
