@@ -54,6 +54,7 @@ export class ClaudeHomeSyncEngine {
     await fs.mkdir(this.opts.localDir, { recursive: true })
     this.baseline = await this.opts.store.pull(this.opts.ctx, this.opts.localDir)
     if (process.env.OAK_DEBUG === '1') {
+      const cosPrefix = `oak/users/${this.opts.ctx.userId}/claude-home/`
       // eslint-disable-next-line no-console
       console.error(
         `[oak/userMemory] pull complete (envId=${this.opts.ctx.envId} userId=${this.opts.ctx.userId}): ` +
@@ -61,7 +62,9 @@ export class ClaudeHomeSyncEngine {
       )
       for (const [relPath] of this.baseline) {
         // eslint-disable-next-line no-console
-        console.error(`  baseline: ${relPath}`)
+        console.error(
+          `  baseline: ${relPath}  (local: ${path.join(this.opts.localDir, relPath)}  ←  COS key=${cosPrefix}${relPath})`,
+        )
       }
     }
   }
@@ -85,7 +88,7 @@ export class ClaudeHomeSyncEngine {
       )
       for (const [relPath] of currentMap) {
         // eslint-disable-next-line no-console
-        console.error(`  current: ${relPath}`)
+        console.error(`  current: ${relPath}  (abs: ${path.join(this.opts.localDir, relPath)})`)
       }
       // 同时列出 localDir 下"所有"文件(不仅 SYNC_INCLUDES 命中的),帮诊断 SDK 是否真的在写
       try {
@@ -94,7 +97,7 @@ export class ClaudeHomeSyncEngine {
         console.error(`[oak/userMemory] push scan: total files in localDir = ${all.length}`)
         for (const relPath of all) {
           // eslint-disable-next-line no-console
-          console.error(`  found: ${relPath}`)
+          console.error(`  found: ${relPath}  (abs: ${path.join(this.opts.localDir, relPath)})`)
         }
       } catch (err) {
         // eslint-disable-next-line no-console
@@ -117,6 +120,17 @@ export class ClaudeHomeSyncEngine {
     if (process.env.OAK_DEBUG === '1') {
       // eslint-disable-next-line no-console
       console.error(`[oak/userMemory] push diff: ${toUpload.length} to upload, ${toDelete.length} to delete`)
+      const cosPrefix = `oak/users/${this.opts.ctx.userId}/claude-home/`
+      for (const relPath of toUpload) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `  PUT  local=${path.join(this.opts.localDir, relPath)}  →  COS key=${cosPrefix}${relPath}`,
+        )
+      }
+      for (const relPath of toDelete) {
+        // eslint-disable-next-line no-console
+        console.error(`  DEL  COS key=${cosPrefix}${relPath}`)
+      }
     }
 
     // 3. upload 与 delete 独立处理,allSettled 兼容部分失败
