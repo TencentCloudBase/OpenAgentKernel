@@ -49,10 +49,16 @@ export class ClaudeHomeSyncEngine {
    *
    * 网络/凭证错误会抛 Error — 调用方(create-agent.ts)负责 try/catch
    * 实现 graceful degrade(失败不阻塞 send loop)。
+   *
+   * pull 完成后会 ensure 一个最小 settings.json 存在(若用户没有 — settings.json
+   * 不在 SYNC_INCLUDES,所以 COS 不会有,首次 pull 永远空),让 SDK 通过
+   * `settingSources: 'user'` 读到 `autoMemoryEnabled: true` — 否则 SDK 默认
+   * 不开 auto-memory,projects/<hash>/memory/ 永远不会被写。
    */
   async pullOnSendStart(): Promise<void> {
     await fs.mkdir(this.opts.localDir, { recursive: true })
     this.baseline = await this.opts.store.pull(this.opts.ctx, this.opts.localDir)
+    await this.ensureUserSettings()
     if (process.env.OAK_DEBUG === '1') {
       const cosPrefix = `oak/users/${this.opts.ctx.userId}/claude-home/`
       // eslint-disable-next-line no-console
@@ -64,6 +70,40 @@ export class ClaudeHomeSyncEngine {
         // eslint-disable-next-line no-console
         console.error(
           `  baseline: ${relPath}  (local: ${path.join(this.opts.localDir, relPath)}  ←  COS key=${cosPrefix}${relPath})`,
+        )
+      }
+    }
+  }
+
+  /**
+   * 确保 <localDir>/settings.json 存在,含 autoMemoryEnabled: true。
+   *
+   * - 不存在 → 写一个 minimal settings(开 auto-memory)
+   * - 存在 → 读取并 merge:autoMemoryEnabled 缺失时填 true,其他字段保持原样
+   *   (用户/SDK 自己改的设置我们不覆盖)
+   *
+   * settings.json 不在 SYNC_INCLUDES 范围内(平台资产,不跨节点同步),
+   * 每节点本地维护即可。
+   */
+  private async ensureUserSettings(): Promise<void> {
+    const settingsPath = path.join(this.opts.localDir, 'settings.json')
+    let current: Record<string, unknown> = {}
+    try {
+      const raw = await fs.readFile(settingsPath, 'utf8')
+      const parsed = JSON.parse(raw) as unknown
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        current = parsed as Record<string, unknown>
+      }
+    } catch {
+      // 不存在或解析失败 → 当成空 settings 处理
+    }
+    if (current.autoMemoryEnabled === undefined) {
+      current.autoMemoryEnabled = true
+      await fs.writeFile(settingsPath, JSON.stringify(current, null, 2) + '\n', 'utf8')
+      if (process.env.OAK_DEBUG === '1') {
+        // eslint-disable-next-line no-console
+        console.error(
+          `[oak/userMemory] wrote default settings.json (autoMemoryEnabled=true) at ${settingsPath}`,
         )
       }
     }
@@ -123,9 +163,7 @@ export class ClaudeHomeSyncEngine {
       const cosPrefix = `oak/users/${this.opts.ctx.userId}/claude-home/`
       for (const relPath of toUpload) {
         // eslint-disable-next-line no-console
-        console.error(
-          `  PUT  local=${path.join(this.opts.localDir, relPath)}  →  COS key=${cosPrefix}${relPath}`,
-        )
+        console.error(`  PUT  local=${path.join(this.opts.localDir, relPath)}  →  COS key=${cosPrefix}${relPath}`)
       }
       for (const relPath of toDelete) {
         // eslint-disable-next-line no-console

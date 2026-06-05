@@ -127,6 +127,40 @@ describe('ClaudeHomeSyncEngine', () => {
     expect(baselineAfterSecond).toEqual(baselineAfterFirst)
   })
 
+  it('writes default settings.json with autoMemoryEnabled=true after pullOnSendStart (when missing)', async () => {
+    await engine.pullOnSendStart()
+    const settingsPath = path.join(localDir, 'settings.json')
+    const content = await fs.readFile(settingsPath, 'utf8')
+    const parsed = JSON.parse(content)
+    expect(parsed.autoMemoryEnabled).toBe(true)
+  })
+
+  it('preserves existing settings.json (only fills missing autoMemoryEnabled)', async () => {
+    // pre-populate COS with a custom settings.json (missing autoMemoryEnabled)
+    await store.put(
+      { envId: 'env-1', userId: 'alice' },
+      'settings.json',
+      Buffer.from(JSON.stringify({ theme: 'dark' })),
+    )
+    await engine.pullOnSendStart()
+    const content = await fs.readFile(path.join(localDir, 'settings.json'), 'utf8')
+    const parsed = JSON.parse(content)
+    expect(parsed.autoMemoryEnabled).toBe(true)
+    expect(parsed.theme).toBe('dark')
+  })
+
+  it('does not modify settings.json that already has autoMemoryEnabled', async () => {
+    await store.put(
+      { envId: 'env-1', userId: 'alice' },
+      'settings.json',
+      Buffer.from(JSON.stringify({ autoMemoryEnabled: false, foo: 'bar' })),
+    )
+    await engine.pullOnSendStart()
+    const content = await fs.readFile(path.join(localDir, 'settings.json'), 'utf8')
+    const parsed = JSON.parse(content)
+    expect(parsed).toEqual({ autoMemoryEnabled: false, foo: 'bar' })
+  })
+
   it('handles deeply nested paths', async () => {
     await engine.pullOnSendStart()
     await writeFile(localDir, 'projects/abc/memory/MEMORY.md', '# index')

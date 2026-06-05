@@ -143,8 +143,7 @@ export function buildClaudeQueryOptions(
   //   1) 用户传 cwd → 用 userCwd(平台资产路径,如 /app/skills-bundle)
   //   2) userMemory 启用 → 用 claudeConfigDir 上一级(确保 SDK projects/<cwd-hash>/ 跨节点稳定)
   //   3) 都没有 → ephemeral 随机(v0 行为)
-  const effectiveCwd =
-    userCwd ?? (claudeConfigDir !== undefined ? path.dirname(claudeConfigDir) : deriveEphemeralCwd())
+  const effectiveCwd = userCwd ?? (claudeConfigDir !== undefined ? path.dirname(claudeConfigDir) : deriveEphemeralCwd())
 
   // settingSources 启用条件:任一资产层需要文件加载
   //   - 用户传 cwd → 'project'(skills、项目 CLAUDE.md)
@@ -165,12 +164,18 @@ export function buildClaudeQueryOptions(
     )
   }
 
-
   // ── 决定是否启用 SDK 持久化 ──────────────────────────────────────
-  // 注入 sessionStore 时，SDK 强制要求 persistSession=true（dual-write 模式：
-  // 子进程仍写本地 JSONL，store 收到 mirror 副本）。
+  // SDK persistSession=false 会禁用 ~/.claude/projects/<cwd-hash>/ 目录创建,
+  // 连带 SDK auto-memory 写 MEMORY.md 也无处可去(SDK 文档:"Sessions will not
+  // be saved to ~/.claude/projects/ and cannot be resumed later")。
+  //
+  // 启用条件(任一即可):
+  //   1) sessionStore 注入(dual-write 模式 — SDK 强制 persistSession=true)
+  //   2) userMemory.enabled(SDK auto-memory 需要 projects/ 目录承载 MEMORY.md)
+  //   3) 默认走 SDK default(true)— OAK 历史上为了 isolation 强制关,但那导致
+  //      auto-memory 完全失效;现在仅当用户显式不需要任何持久化时由调用方关闭。
   const sessionStore = extractSessionStore(config)
-  const enablePersist = sessionStore !== null
+  const enablePersist = sessionStore !== null || syncEngine !== undefined
 
   // CLAUDE_CONFIG_DIR 单一来源(优先级):
   //   1) userMemory.enabled + userId → per-user 派生路径
