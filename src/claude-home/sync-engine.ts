@@ -102,9 +102,7 @@ export class ClaudeHomeSyncEngine {
       await fs.writeFile(settingsPath, JSON.stringify(current, null, 2) + '\n', 'utf8')
       if (process.env.OAK_DEBUG === '1') {
         // eslint-disable-next-line no-console
-        console.error(
-          `[oak/userMemory] wrote default settings.json (autoMemoryEnabled=true) at ${settingsPath}`,
-        )
+        console.error(`[oak/userMemory] wrote default settings.json (autoMemoryEnabled=true) at ${settingsPath}`)
       }
     }
   }
