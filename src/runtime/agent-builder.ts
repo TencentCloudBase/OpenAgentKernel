@@ -97,40 +97,26 @@ export function buildClaudeQueryOptions(
     resources: config.resources,
   })
 
-  // ── cwd / settingSources 派生(spec §4.1)─────────
-  // 1) 用户传 cwd:走"受控 settingSources"路径
-  // 2) 用户没传:用 ephemeral 目录,settingSources=[](等价 v0 isolation)
+  // ── cwd / settingSources / userMemory 派生(spec §4.1 + §4.2 + §4.6)─────
+  //
+  // settingSources 决定 SDK 是否扫描文件系统加载资产:
+  //   - 'project' → 扫 <cwd>/.claude/(skills、项目级 CLAUDE.md、rules 等)
+  //   - 'user'    → 扫 ~/.claude/(被 CLAUDE_CONFIG_DIR override)
+  //                 - <CLAUDE_CONFIG_DIR>/CLAUDE.md(用户级偏好)
+  //                 - <CLAUDE_CONFIG_DIR>/projects/<cwd-hash>/memory/(主会话 auto-memory)
+  //                 - <CLAUDE_CONFIG_DIR>/agent-memory/(用户级 subagent memory)
+  //                 这些都在 SYNC_INCLUDES 内(spec §3.4)— 同步到 COS。
+  //   - []        → 完全不读文件系统(v0 isolation)
+  //
+  // 安全:'user' 在我们的部署模型里**不指宿主机 ~/.claude**,因为我们在 userMemory
+  // 启用时把 CLAUDE_CONFIG_DIR 显式 redirect 到 per-user 派生目录。
   const userCwd = config.cwd
   if (userCwd) {
     assertSafeUserCwd(userCwd)
   }
-  const effectiveCwd = userCwd ?? deriveEphemeralCwd()
-  const settingSources: SettingSource[] = userCwd ? ['project'] : []
 
-  // ── Skills 启用前置校验(spec §4.1.2)──────────
-  // 启用 skills 但未传 cwd → SDK 找不到 SKILL.md(settingSources=[] 不发现)
-  // 静默无效易混淆 → 显式 warning(不抛错,不破坏向后兼容)
-  if (config.skills?.enabled !== undefined && !userCwd) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      '[oak/skills] skills configured but cwd not set — SKILL.md will not be discovered. ' +
-        'Pass `cwd` pointing to a directory containing `.claude/skills/`.',
-    )
-  }
-
-  // ── Skills 启用前置校验(spec §4.1.2)──────────
-  // 启用 skills 但未传 cwd → SDK 找不到 SKILL.md(settingSources=[] 不发现)
-  // 静默无效易混淆 → 显式 warning(不抛错,不破坏向后兼容)
-  if (config.skills?.enabled !== undefined && !userCwd) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      '[oak/skills] skills configured but cwd not set — SKILL.md will not be discovered. ' +
-        'Pass `cwd` pointing to a directory containing `.claude/skills/`.',
-    )
-  }
-
-  // ── userMemory 派生(spec §4.2 + §4.6)───────────
-  // spec §3.1: COS 不可达 / 凭证缺失 → graceful degrade(本次 send 不同步,但 send 仍可继续)
+  // userMemory 启用时,先派生 claudeConfigDir(per-user 稳定路径)。
+  // 也用作 effectiveCwd:让 SDK 的 projects/<cwd-hash>/memory/ 跨节点可复用。
   let claudeConfigDir: string | undefined
   let syncEngine: ClaudeHomeSyncEngine | undefined
   if (config.userMemory?.enabled && extra.userId) {
@@ -152,6 +138,33 @@ export function buildClaudeQueryOptions(
       syncEngine = undefined
     }
   }
+
+  // effectiveCwd 优先级:
+  //   1) 用户传 cwd → 用 userCwd(平台资产路径,如 /app/skills-bundle)
+  //   2) userMemory 启用 → 用 claudeConfigDir 上一级(确保 SDK projects/<cwd-hash>/ 跨节点稳定)
+  //   3) 都没有 → ephemeral 随机(v0 行为)
+  const effectiveCwd =
+    userCwd ?? (claudeConfigDir !== undefined ? path.dirname(claudeConfigDir) : deriveEphemeralCwd())
+
+  // settingSources 启用条件:任一资产层需要文件加载
+  //   - 用户传 cwd → 'project'(skills、项目 CLAUDE.md)
+  //   - userMemory 启用 → 'user'(SDK auto-memory / 用户级 CLAUDE.md / agent-memory)
+  // 'user' 安全性:CLAUDE_CONFIG_DIR override 让 'user' 指向 per-user 隔离目录,不是宿主机。
+  const settingSources: SettingSource[] = []
+  if (userCwd) settingSources.push('project')
+  if (claudeConfigDir) settingSources.push('user')
+
+  // ── Skills 启用前置校验(spec §4.1.2)──────────
+  // 启用 skills 但未传 cwd → SDK 找不到 SKILL.md(settingSources 没含 'project')
+  // 静默无效易混淆 → 显式 warning(不抛错,不破坏向后兼容)
+  if (config.skills?.enabled !== undefined && !userCwd) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[oak/skills] skills configured but cwd not set — SKILL.md will not be discovered. ' +
+        'Pass `cwd` pointing to a directory containing `.claude/skills/`.',
+    )
+  }
+
 
   // ── 决定是否启用 SDK 持久化 ──────────────────────────────────────
   // 注入 sessionStore 时，SDK 强制要求 persistSession=true（dual-write 模式：

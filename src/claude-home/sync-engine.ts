@@ -53,6 +53,17 @@ export class ClaudeHomeSyncEngine {
   async pullOnSendStart(): Promise<void> {
     await fs.mkdir(this.opts.localDir, { recursive: true })
     this.baseline = await this.opts.store.pull(this.opts.ctx, this.opts.localDir)
+    if (process.env.OAK_DEBUG === '1') {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[oak/userMemory] pull complete (envId=${this.opts.ctx.envId} userId=${this.opts.ctx.userId}): ` +
+          `${this.baseline.size} files in baseline, localDir=${this.opts.localDir}`,
+      )
+      for (const [relPath] of this.baseline) {
+        // eslint-disable-next-line no-console
+        console.error(`  baseline: ${relPath}`)
+      }
+    }
   }
 
   /**
@@ -67,6 +78,30 @@ export class ClaudeHomeSyncEngine {
   async pushOnSendEnd(): Promise<void> {
     const currentMap = await this.scanCurrent()
 
+    if (process.env.OAK_DEBUG === '1') {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[oak/userMemory] push scan: ${currentMap.size} files match SYNC_INCLUDES in localDir=${this.opts.localDir}`,
+      )
+      for (const [relPath] of currentMap) {
+        // eslint-disable-next-line no-console
+        console.error(`  current: ${relPath}`)
+      }
+      // 同时列出 localDir 下"所有"文件(不仅 SYNC_INCLUDES 命中的),帮诊断 SDK 是否真的在写
+      try {
+        const all = await listAllFilesRelative(this.opts.localDir)
+        // eslint-disable-next-line no-console
+        console.error(`[oak/userMemory] push scan: total files in localDir = ${all.length}`)
+        for (const relPath of all) {
+          // eslint-disable-next-line no-console
+          console.error(`  found: ${relPath}`)
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`[oak/userMemory] push scan: localDir walk failed:`, (err as Error)?.message)
+      }
+    }
+
     // 1. 计算待 upload(currentMap 有 + (baseline 没有 OR hash 变了))
     const toUpload: Array<RelativePath> = []
     for (const [relPath, hash] of currentMap) {
@@ -77,6 +112,11 @@ export class ClaudeHomeSyncEngine {
     const toDelete: Array<RelativePath> = []
     for (const relPath of this.baseline.keys()) {
       if (!currentMap.has(relPath)) toDelete.push(relPath)
+    }
+
+    if (process.env.OAK_DEBUG === '1') {
+      // eslint-disable-next-line no-console
+      console.error(`[oak/userMemory] push diff: ${toUpload.length} to upload, ${toDelete.length} to delete`)
     }
 
     // 3. upload 与 delete 独立处理,allSettled 兼容部分失败
@@ -174,6 +214,33 @@ export class ClaudeHomeSyncEngine {
         const buf = await fs.readFile(absPath)
         out.set(relPath, sha256OfBuffer(buf))
       }
+    }
+  }
+}
+
+/**
+ * 列出 dir 下所有文件(相对路径,不限白名单),仅 OAK_DEBUG 诊断用。
+ */
+async function listAllFilesRelative(dir: string): Promise<string[]> {
+  const out: string[] = []
+  await walkAllFiles(dir, '', out)
+  return out
+}
+
+async function walkAllFiles(absDir: string, relPrefix: string, out: string[]): Promise<void> {
+  let entries: import('node:fs').Dirent[]
+  try {
+    entries = await fs.readdir(absDir, { withFileTypes: true })
+  } catch {
+    return
+  }
+  for (const entry of entries) {
+    const relPath = relPrefix ? `${relPrefix}/${entry.name}` : entry.name
+    const absPath = path.join(absDir, entry.name)
+    if (entry.isDirectory()) {
+      await walkAllFiles(absPath, relPath, out)
+    } else if (entry.isFile()) {
+      out.push(relPath)
     }
   }
 }

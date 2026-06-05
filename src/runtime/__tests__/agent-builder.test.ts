@@ -142,6 +142,46 @@ describe('buildClaudeQueryOptions — userMemory', () => {
     expect(options.env?.CLAUDE_CONFIG_DIR?.startsWith(os.tmpdir())).toBe(true)
   })
 
+  // 关键修复:userMemory 启用时,settingSources 必须含 'user',
+  // 否则 SDK auto-memory 不会读写文件 → 同步引擎扫描永远空,记忆不持久化
+  it('userMemory.enabled + userId → settingSources includes "user"', () => {
+    const { options } = buildClaudeQueryOptions(
+      { ...baseConfig, userMemory: { enabled: true } },
+      { userId: 'alice' },
+    )
+    expect(options.settingSources).toContain('user')
+  })
+
+  // userMemory 启用且无 cwd → effectiveCwd 应该用 per-user 稳定路径
+  // (而非 ephemeral 随机),让 SDK projects/<cwd-hash>/ 跨节点稳定
+  it('userMemory.enabled + userId without cwd → effectiveCwd is stable per-user (not ephemeral)', () => {
+    const { options } = buildClaudeQueryOptions(
+      { ...baseConfig, userMemory: { enabled: true } },
+      { userId: 'alice' },
+    )
+    expect(options.cwd).not.toMatch(/oak-ephemeral-/)
+    expect(options.cwd).toContain('alice')
+    // cwd 应是 claudeConfigDir 的上一级(去掉末尾 .claude)
+    expect(options.cwd?.endsWith('/.claude')).toBe(false)
+    // 跨调用应稳定(同 envId+userId 永远一致)
+    const second = buildClaudeQueryOptions(
+      { ...baseConfig, userMemory: { enabled: true } },
+      { userId: 'alice' },
+    )
+    expect(second.options.cwd).toBe(options.cwd)
+  })
+
+  it('userMemory.enabled + cwd both → cwd wins for effectiveCwd, settingSources has both', () => {
+    const cwd = os.tmpdir()
+    const { options } = buildClaudeQueryOptions(
+      { ...baseConfig, cwd, userMemory: { enabled: true } },
+      { userId: 'alice' },
+    )
+    expect(options.cwd).toBe(cwd)
+    expect(options.settingSources).toContain('project')
+    expect(options.settingSources).toContain('user')
+  })
+
   it('userMemory.enabled but no userId → no syncEngine, no CLAUDE_CONFIG_DIR', () => {
     const { options, syncEngine } = buildClaudeQueryOptions(
       { ...baseConfig, userMemory: { enabled: true } },

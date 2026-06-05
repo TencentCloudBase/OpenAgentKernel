@@ -80,9 +80,7 @@ describe('CloudBaseCosClaudeHomeStore — getApp() module shape adaptation', () 
 
     await store.put(ctx, 'CLAUDE.md', Buffer.from('hello'))
 
-    expect(initFn).toHaveBeenCalledWith(
-      expect.objectContaining({ env: 'env-test', secretId: 'sid', secretKey: 'sk' }),
-    )
+    expect(initFn).toHaveBeenCalledWith(expect.objectContaining({ env: 'env-test', secretId: 'sid', secretKey: 'sk' }))
     expect(fakeApp.uploadFile).toHaveBeenCalledWith({
       cloudPath: 'oak/users/alice/claude-home/CLAUDE.md',
       fileContent: expect.any(Buffer),
@@ -111,10 +109,9 @@ describe('CloudBaseCosClaudeHomeStore — getApp() module shape adaptation', () 
   it('throws ResourceError when SDK loaded but init() missing', async () => {
     const store = new CloudBaseCosClaudeHomeStore()
     // 模块解析成功,但既没有 default.init 也没有 mod.init
-    vi.spyOn(
-      store as unknown as { requireCloudBase: () => Promise<unknown> },
-      'requireCloudBase',
-    ).mockResolvedValue({ somethingElse: () => {} })
+    vi.spyOn(store as unknown as { requireCloudBase: () => Promise<unknown> }, 'requireCloudBase').mockResolvedValue({
+      somethingElse: () => {},
+    })
 
     await expect(store.put(ctx, 'CLAUDE.md', Buffer.from('x'))).rejects.toThrow(/init.*not available/)
   })
@@ -127,10 +124,9 @@ describe('CloudBaseCosClaudeHomeStore — getApp() module shape adaptation', () 
       deleteFile: vi.fn().mockResolvedValue({ fileList: [{ fileID: '...', code: 'SUCCESS' }] }),
     }
     const initFn = vi.fn().mockReturnValue(fakeApp)
-    vi.spyOn(
-      store as unknown as { requireCloudBase: () => Promise<unknown> },
-      'requireCloudBase',
-    ).mockResolvedValue({ default: { init: initFn } })
+    vi.spyOn(store as unknown as { requireCloudBase: () => Promise<unknown> }, 'requireCloudBase').mockResolvedValue({
+      default: { init: initFn },
+    })
 
     await store.put(ctx, 'CLAUDE.md', Buffer.from('a'))
     await store.put(ctx, 'CLAUDE.md', Buffer.from('b'))
