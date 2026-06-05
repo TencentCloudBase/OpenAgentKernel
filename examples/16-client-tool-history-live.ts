@@ -66,7 +66,8 @@ console.log(`\nconversationId: ${conversationId}\n`)
 
 const session = await agent.startSession({ userId: 'test-user', conversationId })
 
-const prompt = 'You must call the get_weather tool immediately with input {"city":"Beijing"}. Do not say anything else first.'
+const prompt =
+  'You must call the get_weather tool immediately with input {"city":"Beijing"}. Do not say anything else first.'
 console.log(`👤 User: ${prompt}\n`)
 
 let toolUseId: string | undefined
