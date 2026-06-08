@@ -1,10 +1,17 @@
 # OAK Spec B — Sandbox Workspace Snapshot
 
-> **状态**:DRAFT v1.3(简化字段冗余)
+> **状态**:DRAFT v1.4(plan 起草时发现 init/health 契约修正)
 > **日期**:2026-06-08
-> **作者**:Luke + Claude(brainstorming → 调研 → 决策点对齐 → reviewer 自审 → v1.1 → scope 讨论 → v1.2 → 字段简化 → v1.3)
+> **作者**:Luke + Claude(brainstorming → 调研 → 决策点对齐 → reviewer 自审 → v1.1 → scope 讨论 → v1.2 → 字段简化 → v1.3 → plan 起草发现 init body 不含 restoreStatus → v1.4)
 > **关联前置**:Spec A(`2026-06-01-oak-cwd-skills-user-memory-design.md` v3.2 — `~/.claude/` COS 同步)
 > **关联后续**:无 — Spec B 是"非 AGS runtime 的 workspace 持久化"的 prerequisite,但本 spec 不实现该路径(留 Spec C)
+>
+> **v1.4 vs v1.3 主要修订**(plan 起草交叉验证 tcb-remote-workspace 源码后发现):
+> 1. **bootstrap 改为两步序列**(原 v1.3 只一步):`POST /api/workspace/init` → `GET /health` 解析 body.restoreStatus
+> 2. 真相:`POST /api/workspace/init` 200 body 只返 `{ workspace, git, env }`,**不含 restoreStatus**(`routes/api.ts:280-300` + `workspace.ts:699 getWorkspaceStatus()`)
+> 3. `restoreStatus` 唯一来源是 `GET /health` 的 body.restoreStatus(`routes/api.ts:200` 用 `readRestoreInStatus()` 读本地状态文件)
+> 4. 这意味着 OAK bootstrap 必须 init 后再读 /health 才能拿到 SyncStatus 决定"failed → throw"
+> 5. /health 的 restoreStatus 在 init/health 之间可能短暂为 null(状态文件写入跟 health 读取的微小 race),client 层小重试覆盖(默认 3 次,200ms 间隔)
 >
 > **v1.3 vs v1.2 主要修订**(字段冗余讨论后):
 > 1. **删除新引入的 `SandboxRuntime.kind` 字段** — 直接复用既有的 `backend` 字段(语义一样,值一样,平白引入 `kind` 是冗余)
@@ -18,7 +25,7 @@
 > 4. §9 自审 checklist 加 scope 兼容性约束
 >
 > **v1.1 vs v1 主要修订**(基于 reviewer 反馈与源码交叉验证):
-> 1. restore 流程修正 — 不是镜像 startup 自动,而是 `POST /api/workspace/init` 阻塞触发(init 200 = restore 完成)
+> 1. restore 流程修正 — 不是镜像 startup 自动,而是 `POST /api/workspace/init` 阻塞触发(init 200 = restore 完成 — v1.4 进一步澄清:还需 health 才知 SyncStatus)
 > 2. `SyncStatus` 真实结构修正(对象,含 `'partial'` 第五种状态)
 > 3. snapshot 返回外层 `{ success, result: { ms } }` wrapper
 > 4. SandboxRuntime 加 `kind` 字段以支持 `'auto'` 模式(v1.3 删除,改用 `backend`)
@@ -32,7 +39,7 @@
 
 - OAK SDK 在 `AgsStatefulSandbox` runtime 上**新增"工作区快照"能力**,使 cwd 跨 session、跨节点持久化到 CloudBase COS。
 - **不重新发明轮子** — 委托给 `tcb-remote-workspace` 沙箱业务镜像已有的 HTTP 接口;镜像内部跑 zstd tar + COS FUSE,OAK 只负责**触发与等待**。
-- **触发模型**:`session.startSession()` 时调 `POST /api/workspace/init`(阻塞,内部完成 COS restore);每次 `session.send()` 结束后调 `POST /api/workspace/snapshot`(阻塞,timeout 30s,失败 throw)。
+- **触发模型**:`session.startSession()` 时调 `POST /api/workspace/init`(阻塞,内部完成 COS restore)然后再 `GET /health` 解析 body.restoreStatus 拿 SyncStatus;每次 `session.send()` 结束后调 `POST /api/workspace/snapshot`(阻塞,timeout 30s,失败 yield warning event)。
 - **公共 API 变更极小**:`SandboxConfig.workspaceSnapshot: 'auto' | 'enabled' | 'disabled'`(默认 `auto`)+ `Session.snapshotWorkspace()` / `Session.getRestoreStatus()` 两个可选方法。`SandboxRuntime.backend` 字段语义升级(原本"诊断日志用",现作 `'auto'` 模式判定)。
 
 ---
@@ -54,7 +61,7 @@
 | 非 AGS sandbox runtime 的 workspace 持久化 | 留 Spec C(裸 cwd / 本地 docker / firecracker)|
 | 业务方自定义 workspace 路径 | tcb-remote-workspace 镜像约定 `/home/user`,OAK 不跨这个边界 |
 | 文件级 COS 同步(按 hash 推送) | 镜像已用 zstd tar + FUSE,OAK 不重复 |
-| 镜像 restore 流程的内部细节 | OAK 只调 `POST /api/workspace/init`,init 返回即 restore 完成。**OAK 不轮询、不重试 restore**(失败由 init 返回 5xx 透传) |
+| 镜像 restore 流程的内部细节 | OAK 只调 `POST /api/workspace/init` 触发,然后 `GET /health` 读 SyncStatus;**OAK 不重试 restore**(restore 是 expensive,失败应让业务方决定是否换 envId)|
 | `~/.claude/` 同步 | 那是 Spec A 的范围(已实施)|
 | Sandbox runtime 的 mutex / 队列 | 委托给镜像内的 `syncing` 互斥锁;OAK 仅在 retryable 错误下 backoff 重试 1 次 |
 | Workspace 在 OAK SDK 进程里 mount/读写 | OAK 只发 HTTP,数据不经 OAK 进程 |
@@ -141,23 +148,42 @@ OAK 当前 `src/sandbox/`(`feat/support-open-agent-kernel` HEAD):
 | `/api/workspace/snapshot` | POST | **是,send_end 时调用** | 同步阻塞,内部跑 tar + zstd + FUSE flush + verify |
 | `/api/workspace/restore` | POST | **否** | 镜像不接受 HTTP 触发 restore;必须由控制面创建新实例 |
 
-#### 2.2.1 关键事实:restore 是 `POST /api/workspace/init` 的同步副作用
+#### 2.2.1 关键事实:restore 是 `POST /api/workspace/init` 的同步副作用,但 SyncStatus 只能在 `/health` 读
 
-**这是 v1 → v1.1 最重要的修正**。reviewer 与源码挖掘揭示:
+**这是 v1 → v1.1 → v1.4 一直在澄清的最重要的事实**。reviewer 与源码挖掘揭示:
 
 ```
-ensureWorkspace()  (workspace.ts:108)
+ensureWorkspace()  (workspace.ts:108-200)
   ├─ canTryCosRestore = !hasRestoreStatus   ← 已 restore 过则 skip
   ├─ if canTryCosRestore:
   │    restored = await restoreFromCos(workspace)   ← 同步阻塞,可能耗时秒到分钟
   │    wsSteps.restoreFromCosMs = ...               ← 计时
   ├─ writeRestoreInStatus(workspace, { restored: 'full'|'fresh'|'partial'|'failed', ... })
+  │    ↑ 写到本地文件 .restore-in-status.json
   └─ return workspace
 ```
 
-也就是:**`POST /api/workspace/init` 200 OK 返回 = restore 已完成**(成功或失败,状态写入了 `RESTORE_IN_STATUS_FILE`)。OAK 不需要轮询 `/health` 等 restore 状态;init 返回时一切已知。
+`POST /api/workspace/init` 在 `routes/api.ts:240-310` 调 `ensureWorkspace()` 后**只返**:
 
-唯一需要轮询 `/health` 的场景是:**业务方主动调 `Session.getRestoreStatus()`**(详 §3.2),那时直接读 `/health` 解析 `restoreStatus` 字段即可。
+```ts
+{ success: true, result: { workspace: '/home/user', git: { ... }, env: { ... } } }
+```
+
+⚠ **init 200 body 不含 restoreStatus**(`getWorkspaceStatus()` `workspace.ts:699` 不返这个字段)。
+
+而 `GET /health`(`routes/api.ts:200`)body 里有:
+```ts
+{ ..., restoreStatus: readRestoreInStatus(workspaceDir()) }   // SyncStatus | null
+```
+
+**所以 OAK bootstrap 必须两步**:
+1. `POST /api/workspace/init` — 200 = restore 物理上已完成(或已 fail,状态写本地)
+2. `GET /health` — 解析 body.restoreStatus 拿 SyncStatus 决定后续动作:
+   - `'full'/'fresh'/'partial'` → session 可用
+   - `'failed'` → throw `SandboxRestoreFailed`,session 不能用
+   - `null` 或 health 5xx → graceful degrade,默认 session 可用但 OAK log warn
+
+**为什么 init/health 会有"短暂 null" race**:`writeRestoreInStatus()` 跟 `/health` 的 `readRestoreInStatus()` 在不同时间读写同一个本地文件。理论上 init 200 返回时 status 已写,但镜像内部时序不能完全保证;client 层做小重试(默认 3 次,每次 200ms)可消除这个边缘情况。
 
 #### 2.2.2 `SyncStatus` 类型(直接复制自源码)
 
@@ -240,12 +266,19 @@ OAK 解析时**必须**:
   │       └── 返回 SandboxInstance(健康检查 OK)       │
   │    if shouldEnableSnapshot(runtime, config):       │
   │      WorkspaceSnapshotEngine.bootstrap(inst)       │
-  │       └── PUT /api/workspace/env(已有)            │
-  │       └── POST /api/workspace/init                 │
-  │           ⚠ 同步阻塞 ≤ 60s                         │
-  │           ⚠ 内部触发 restoreFromCos(),返回时       │
-  │             restore 已完成或失败                   │
-  │           ⚠ 5xx → throw SandboxRestoreFailed      │
+  │       ├── PUT /api/workspace/env(已有逻辑)        │
+  │       ├── POST /api/workspace/init                 │
+  │       │     ⚠ 同步阻塞 ≤ 60s                       │
+  │       │     ⚠ 内部触发 restoreFromCos(),返回时     │
+  │       │       restore 已完成或失败,状态写本地文件 │
+  │       │       (init body 只返 workspace+git+env,  │
+  │       │        不含 restoreStatus!)              │
+  │       │     ⚠ 5xx → throw SandboxRestoreFailed    │
+  │       └── GET /health                              │
+  │             ├── body.restoreStatus 解析 SyncStatus │
+  │             ├── null → 小重试 3×200ms              │
+  │             ├── 'failed' → throw SandboxRestoreFailed│
+  │             └── 'full'/'fresh'/'partial' → ok      │
   │                                                    │
   │  ── session.send(prompt) ──                        │
   │    [model 调 Bash/Edit 改 cwd 内文件]              │
@@ -434,15 +467,17 @@ export class WorkspaceSnapshotEngine {
   constructor(options?: WorkspaceSnapshotEngineOptions)
 
   /**
-   * startSession 调用一次。包含两步:
-   * 1. PUT /api/workspace/env(注入凭证;沿用现有逻辑)
+   * startSession 调用一次。两步序列:
+   * 1. POST /api/workspace/env(注入凭证;沿用现有逻辑)— 可选,看 bootstrap 实现
    * 2. POST /api/workspace/init(同步阻塞,内部触发 restoreFromCos)
-   * init 返回的 SyncStatus.restored === 'failed' → throw SandboxRestoreFailed
-   * init timeout → throw SandboxRestoreTimeout
+   * 3. GET /health → body.restoreStatus 解析 SyncStatus
+   * SyncStatus.restored === 'failed' → throw SandboxRestoreFailed
+   * /health restoreStatus 一直为 null(健康但状态写入有 race)→ 返回 null 走 graceful degrade
+   * init / health timeout → throw SandboxRestoreTimeout
    *
    * shared scope 下,同实例第二次调用 init 是 fast no-op(镜像内 workspaceReady 标志)。
    */
-  bootstrap(inst: SandboxInstance, opts: { credentials: ... }): Promise<SyncStatus>
+  bootstrap(inst: SandboxInstance, opts: { credentials: ... }): Promise<SyncStatus | null>
 
   /** send finally 调用。retryable 错误 backoff 重试一次,最终失败 throw */
   snapshot(inst: SandboxInstance): Promise<{ ms: number }>
@@ -590,16 +625,22 @@ async function* send(prompt) {
 
 ## 5. 错误语义
 
-### 5.1 `bootstrap()`(startSession 时调 init)
+### 5.1 `bootstrap()`(startSession 时调 init + GET /health)
 
-| 后端响应 | OAK 行为 | 抛给业务方 |
+| 阶段 / 后端响应 | OAK 行为 | 抛给业务方 |
 |---|---|---|
-| 200 + body 中 `restoreStatus.restored === 'full'/'fresh'/'partial'` | 正常,session 可用;`partial` 时记 metric `oak_workspace_restore_partial_total` | — |
-| 200 + `restoreStatus.restored === 'failed'` | 视为 `failed` | `SandboxRestoreFailed`(含 `restoreStatus.note` 作 detail)|
-| 5xx | 不重试(restore 是 expensive,失败再来一次会让用户多等几十秒)| `SandboxRestoreFailed` |
-| HTTP timeout(超过 `workspaceInitTimeoutMs`)| — | `SandboxRestoreTimeout` |
+| init 200 + body 含 `{ workspace, git, env }` | 进入第二步读 /health | — |
+| init 5xx | 不重试 | `SandboxRestoreFailed` |
+| init schema mismatch(success=false / 缺字段) | 视为 failed | `SandboxRestoreFailed` |
+| init HTTP timeout(超过 `workspaceInitTimeoutMs`)| — | `SandboxRestoreTimeout` |
+| /health 200 + restoreStatus.restored ∈ {'full','fresh','partial'} | 返回 SyncStatus,session 可用;`partial` 时记 metric `oak_workspace_restore_partial_total` | — |
+| /health 200 + restoreStatus.restored === 'failed' | — | `SandboxRestoreFailed`(含 `restoreStatus.note` 作 detail)|
+| /health 200 + restoreStatus === null | 小重试(3 次 / 200ms 间隔)处理 init/health 写入 race;最终仍 null → graceful degrade,bootstrap 返 null | — |
+| /health 5xx | 同 null 路径,小重试后仍 5xx → graceful degrade,bootstrap 返 null | — |
 
-**`bootstrap()` 不重试**:init 内部已经包了 restore,timeout/失败应快速 fail 让业务方决定(可能要换 envId、换 sandbox)。
+**`bootstrap()` 不重试 init**:init 内部已经包了 restore,timeout/失败应快速 fail 让业务方决定(可能要换 envId、换 sandbox)。**只对 /health 短重试**(覆盖状态文件写入 race)。
+
+**graceful degrade 语义**:bootstrap 返回 `null` 表示 OAK 无法确认 restore 是否真完成,但镜像 init 已 200(物理上 workspace 应已可用)。OAK 此时**不阻断 startSession**,而是让 session 进入运行,业务方可以通过 `session.getRestoreStatus()` 后续查询。
 
 ### 5.2 `snapshot()`(send finally 时调)
 
@@ -657,8 +698,8 @@ export class SandboxUnavailableError extends Error { /* httpStatus: number */ }
 | 测试文件 | 覆盖 |
 |---|---|
 | `snapshot-client.test.ts` | mock fetch:成功(`{success,result:{ms}}`) / 500-retryable retries / 500-non-retryable / 502 不重试 / timeout 五种路径;还原 `application/problem+json` 解析 |
-| `init-client.test.ts` | mock fetch:成功 + restoreStatus 各值(full/fresh/partial/failed) / 5xx / timeout |
-| `health-client.test.ts` | mock fetch:`/health` 返回各种 SyncStatus 形态(含 `null` 字段缺失场景);zod schema 验证容错 |
+| `init-client.test.ts` | mock fetch:成功(返回 workspace+git+env)/ 5xx / schema mismatch / timeout(**不**测 restoreStatus,因为 init body 不含此字段)|
+| `health-client.test.ts` | mock fetch:**两个函数** — `fetchRestoreStatus`(bootstrap 路径,小重试 race) / `getHealthRestoreStatus`(事后查询);各种 SyncStatus 形态 / null / 5xx / schema 容错 |
 | `snapshot-engine.test.ts` | 整合 client + bootstrap + snapshot:`'auto'` 在 `backend === 'ags-stateful'` 上启用 / 其他 runtime 关闭;scope !== 'shared' 时抛 ConfigError |
 
 ### Examples(`packages/open-agent-kernel/examples/`)
@@ -775,8 +816,8 @@ export class SandboxUnavailableError extends Error { /* httpStatus: number */ }
 1. `workspace-snapshot/types.ts`(zod schema for `/health` 响应、`SyncStatus`)
 2. `workspace-snapshot/errors.ts`(4 个错误类)
 3. `workspace-snapshot/snapshot-client.ts`(POST /api/workspace/snapshot + 1 次 retry on retryable)
-4. `workspace-snapshot/init-client.ts`(POST /api/workspace/init,不重试)
-5. `workspace-snapshot/health-client.ts`(GET /health 解析 restoreStatus)
+4. `workspace-snapshot/init-client.ts`(POST /api/workspace/init,不重试,只返 init body 的 result 字段;不解析 restoreStatus)
+5. `workspace-snapshot/health-client.ts`(`fetchRestoreStatus` 用于 bootstrap 路径并小重试;`getHealthRestoreStatus` 用于事后查询)
 6. `workspace-snapshot/snapshot-engine.ts`(组装 bootstrap + snapshot + scope 校验)
 7. `SandboxRuntime.backend` 字段注释升级(语义从"诊断日志用"改为"业务判定";`AgsStatefulSandbox` 实现零改动)
 8. 公共 API:`SandboxConfig` + `Session` 加字段/方法
