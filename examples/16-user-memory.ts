@@ -1,39 +1,48 @@
 /**
- * Example 16: userMemory(用户级长期记忆 — auto-memory 验证)
+ * Example 16: userMemory 文件同步验证(单进程)
  *
- * 演示:
- *   1. 启用 userMemory.enabled = true
- *   2. 第一段对话:植入"项目工程上下文事实"(auto-memory 保存的设计目标类型)
- *      Claude 自动判断这些值得 remember,写入 ~/.claude/projects/<cwd-hash>/memory/MEMORY.md
- *   3. session abort 时 OAK 同步引擎把 MEMORY.md 推送到 COS
- *   4. 创建第二个 conversation(同 userId)→ pull 把 MEMORY.md 拉回本地 →
- *      SDK 在新会话启动时把 MEMORY.md 注入 prompt → 模型记得这些事实
+ * 验证目标:OAK 同步引擎能把 COS 上预置的 .claude/ 配置(CLAUDE.md 等)在 SDK
+ *          启动时 pull 到本地,SDK 读取后注入 prompt,模型据此回答。
  *
- * 关键(参考 https://code.claude.com/docs/en/memory#auto-memory):
- *   - auto-memory 是 Claude **自动判断**值不值得记的(不是用户敲 /memory 触发)
- *   - 设计目标类型:**build commands / debugging insights / architecture / code style /
- *     workflow habits**(都是工程上下文)
- *   - "我的猫叫咪咪" 这类用户私人事实 **不会触发 auto-memory** — 因为 Claude 评估
- *     "对未来 coding 任务有用吗?" → 几乎没用 → 不写
- *   - 触发 auto-memory 需要工程相关的事实陈述 + 强信号("记住这个,后续都按这个工作")
+ * 不依赖 SDK auto-memory 机制(已验证在 SDK query() 模式下不工作 — 见 v0.2.0
+ * 调试结论)。本 example 只验证"COS ↔ 本地 .claude/"双向同步链路。
+ *
+ * 流程:
+ *   1. 用 seedClaudeHome() 预先把 CLAUDE.md 写到 COS(模拟"用户之前累积的偏好")
+ *   2. createAgent({ userMemory: { enabled: true } }) → SDK 启动时 OAK pull,
+ *      把 CLAUDE.md 落到 <CLAUDE_CONFIG_DIR>/CLAUDE.md
+ *   3. SDK 把 CLAUDE.md 当作用户级偏好注入 prompt(SDK 文档:"CLAUDE.md files
+ *      are loaded into the context window at the start of every session")
+ *   4. 模型根据 CLAUDE.md 内容回答问题 → 验证同步真的把内容带进了 prompt
  *
  * 运行前提:
- *   - .env.local 配置 TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY + TENCENTCLOUD_TOKENHUB_API_KEY
- *   - 该 envId 对应的 CloudBase 已开通 COS
+ *   - .env.local 配置 TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY +
+ *     TENCENTCLOUD_TOKENHUB_API_KEY
+ *   - envId 对应的 CloudBase 已开通 COS
  *
  * Run:
  *   OAK_DEBUG=1 pnpm dlx tsx packages/open-agent-kernel/examples/16-user-memory.ts
- *
- * 验证 SDK 是否真的写了 MEMORY.md(看 OAK_DEBUG 输出):
- *   - push scan 阶段如果出现:
- *       found: projects/<cwd-hash>/memory/MEMORY.md
- *     → SDK auto-memory 工作了 + 同步引擎扫到了
- *   - 如果只看到 .claude.json / backups → SDK 没触发 auto-memory(可能 model 不支持)
  */
 
-import { loadEnv } from './_shared/env.js'
-
 import { createAgent } from '@cloudbase/open-agent-kernel'
+
+import { loadEnv } from './_shared/env.js'
+import { clearSeededClaudeHome, seedClaudeHome } from './_shared/seed-claude-home.js'
+
+// 预置到 COS 的 CLAUDE.md 内容 — 含可被验证的具体事实
+const SEEDED_CLAUDE_MD = `# 项目偏好(预置)
+
+这是用户已累积的工程上下文,SDK 启动时应自动加载到 prompt:
+
+- 项目代号:**Aurora**
+- 部署区域:**ap-shanghai**
+- 构建命令:\`pnpm build:dev\`(开发模式),不要用 npm
+- 测试命令:\`pnpm test\`
+- 入口文件:\`src/index.ts\`
+- API handlers 必须放在 \`src/api/handlers/\` 目录
+- 所有 API 入参必须用 zod 做 validation
+- 代码风格:2 空格缩进,单引号
+`
 
 async function runConversation(prompt: string, userId: string) {
   // 模型配置:支持环境变量自带 key + endpoint(测试方便),不传则走 CloudBase 网关默认。
@@ -52,12 +61,7 @@ async function runConversation(prompt: string, userId: string) {
   const agent = createAgent({
     envId: process.env.TCB_ENV_ID!,
     model,
-    systemPrompt:
-      'You are a coding assistant. ' +
-      'When the user shares project conventions (build commands, test commands, ' +
-      'architecture decisions, code style, workflow habits), record them as memory ' +
-      'so you can apply them in future sessions. ' +
-      'Acknowledge what you have remembered.',
+    systemPrompt: 'You are a coding assistant. Answer based on the project conventions you can see.',
     userMemory: { enabled: true },
   })
 
@@ -68,49 +72,44 @@ async function runConversation(prompt: string, userId: string) {
   for await (const event of session.send(prompt)) {
     if (event.type === 'message_delta') process.stdout.write(event.text)
   }
-  console.log('\n[example] aborting session (triggers final push)...')
+  console.log('\n[example] aborting session...')
   await session.abort()
 }
 
 async function main() {
   loadEnv()
+  const envId = process.env.TCB_ENV_ID!
   const userId = `demo-user-${Date.now()}`
 
-  // ── 第一段对话:植入"项目工程上下文事实" ─────────────────────────
-  // 这些是 auto-memory 设计文档(https://code.claude.com/docs/en/memory#auto-memory)
-  // 明确列出的"值得保存"的内容类型:build commands / test commands / architecture /
-  // code style / workflow habits — Claude 评估这类信息对未来 coding 任务有用 → 写 MEMORY.md。
-  await runConversation(
-    [
-      '请记住这个项目的关键约定,后续我都按这个工作:',
-      '',
-      '- 项目代号:Aurora',
-      '- 部署区域:ap-shanghai',
-      '- 构建命令:`pnpm build:dev`(开发模式),不要用 npm',
-      '- 测试命令:`pnpm test`',
-      '- 入口文件:`src/index.ts`',
-      '- API handlers 必须放在 `src/api/handlers/` 目录',
-      '- 所有 API 入参必须用 zod 做 validation',
-      '- 代码风格:2 空格缩进,单引号',
-      '',
-      '这些是项目规范,以后跟我对话时请基于这些约定回答。',
-    ].join('\n'),
+  // ── Step 1:预置 CLAUDE.md 到 COS ────────────────────────────────
+  console.log('[example] Step 1: seeding CLAUDE.md to COS...')
+  await seedClaudeHome({
+    envId,
     userId,
-  )
+    files: [{ relPath: 'CLAUDE.md', content: SEEDED_CLAUDE_MD }],
+  })
 
-  // 等 2 秒确保 COS 同步完成(send-end push 是 async)
-  await new Promise((r) => setTimeout(r, 2000))
+  try {
+    // ── Step 2:创建 agent — SDK 启动时 OAK pull,SDK 加载 CLAUDE.md 入 prompt ──
+    // 验证问题需要 CLAUDE.md 中的内容才能回答
+    await runConversation(
+      '请告诉我这个项目的:1) 构建命令 2) 测试命令 3) API handlers 放在哪个目录 4) 入参 validation 用什么库?',
+      userId,
+    )
 
-  // ── 第二段对话:测试 SDK 是否在新会话注入 MEMORY.md ──────────────
-  // 跨 conversation 同 userId,OAK 同步引擎应该 pull 把 MEMORY.md 拉回本地,
-  // SDK 启动时自动加载到 prompt(参考 auto-memory 文档:"loaded into every session")。
-  await runConversation(
-    '请告诉我这个项目的:1) 构建命令 2) 测试命令 3) API handlers 放在哪个目录 4) 入参 validation 用什么库?',
-    userId,
-  )
+    // 模型应该说出 pnpm build:dev / pnpm test / src/api/handlers/ / zod。
+    // 如果说"没有相关信息" → 同步链路有问题,看 OAK_DEBUG 日志:
+    //   - pull complete 应显示 baseline 含 CLAUDE.md
+    //   - 本地 CLAUDE.md 应在 found 列表里
+  } finally {
+    // ── Step 3:清理 COS,避免污染下次运行 ─────────────────────────
+    console.log('\n[example] Step 3: cleaning up seeded files from COS...')
+    await clearSeededClaudeHome({ envId, userId, relPaths: ['CLAUDE.md'] })
+  }
 }
 
 main().catch((err) => {
   console.error(err)
   process.exit(1)
 })
+
