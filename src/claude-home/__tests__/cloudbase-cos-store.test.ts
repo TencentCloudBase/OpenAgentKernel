@@ -31,18 +31,19 @@ afterEach(() => {
 })
 
 // ── 测试辅助:构造一个 fake CloudBaseManager 实例 ──────────────
-function makeFakeManager(overrides: Partial<{
-  uploadFile: ReturnType<typeof vi.fn>
-  walkCloudDir: ReturnType<typeof vi.fn>
-  getTemporaryUrl: ReturnType<typeof vi.fn>
-  deleteFile: ReturnType<typeof vi.fn>
-}> = {}) {
+function makeFakeManager(
+  overrides: Partial<{
+    uploadFile: ReturnType<typeof vi.fn>
+    walkCloudDir: ReturnType<typeof vi.fn>
+    getTemporaryUrl: ReturnType<typeof vi.fn>
+    deleteFile: ReturnType<typeof vi.fn>
+  }> = {},
+) {
   return {
     storage: {
       uploadFile: overrides.uploadFile ?? vi.fn().mockResolvedValue({}),
       walkCloudDir: overrides.walkCloudDir ?? vi.fn().mockResolvedValue([]),
-      getTemporaryUrl:
-        overrides.getTemporaryUrl ?? vi.fn().mockResolvedValue([{ fileId: '', url: '' }]),
+      getTemporaryUrl: overrides.getTemporaryUrl ?? vi.fn().mockResolvedValue([{ fileId: '', url: '' }]),
       deleteFile: overrides.deleteFile ?? vi.fn().mockResolvedValue({}),
     },
   }
@@ -53,10 +54,9 @@ function spyManagerCtor(store: CloudBaseCosClaudeHomeStore, instance: unknown, s
   // CJS shape: mod.default 是 ctor; ESM shape: mod 直接是 ctor(实际 manager-node 是 CJS,
   // 但我们的代码 fallback `mod.default ?? mod` 应同时支持)
   const mod = shape === 'cjs' ? { default: Ctor } : Ctor
-  vi.spyOn(
-    store as unknown as { requireManagerNode: () => Promise<unknown> },
-    'requireManagerNode',
-  ).mockResolvedValue(mod)
+  vi.spyOn(store as unknown as { requireManagerNode: () => Promise<unknown> }, 'requireManagerNode').mockResolvedValue(
+    mod,
+  )
   return Ctor as unknown as ReturnType<typeof vi.fn>
 }
 
@@ -101,9 +101,7 @@ describe('CloudBaseCosClaudeHomeStore — getManager() module shape adaptation',
 
     await store.put(ctx, 'CLAUDE.md', Buffer.from('hello'))
 
-    expect(Ctor).toHaveBeenCalledWith(
-      expect.objectContaining({ envId: 'env-test', secretId: 'sid', secretKey: 'sk' }),
-    )
+    expect(Ctor).toHaveBeenCalledWith(expect.objectContaining({ envId: 'env-test', secretId: 'sid', secretKey: 'sk' }))
     expect(fake.storage.uploadFile).toHaveBeenCalledTimes(1)
     expect(fake.storage.uploadFile.mock.calls[0]![0]).toEqual(
       expect.objectContaining({ cloudPath: PREFIX + 'CLAUDE.md' }),

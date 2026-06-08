@@ -51,7 +51,9 @@ interface ResolvedCredentials extends CloudBaseCosCredentials {
 interface ManagerStorage {
   uploadFile(args: { localPath: string; cloudPath: string }): Promise<unknown>
   walkCloudDir(prefix: string): Promise<Array<{ Key: string; Size: string | number }>>
-  getTemporaryUrl(fileList: Array<{ cloudPath: string; maxAge?: number }>): Promise<Array<{ fileId: string; url: string }>>
+  getTemporaryUrl(
+    fileList: Array<{ cloudPath: string; maxAge?: number }>,
+  ): Promise<Array<{ fileId: string; url: string }>>
   deleteFile(cloudPathList: string[]): Promise<unknown>
 }
 
