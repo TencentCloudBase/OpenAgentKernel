@@ -23,11 +23,7 @@ export interface SeedFile {
  *
  * 失败会抛 — 调用方负责处理(测试里通常希望失败立刻可见)。
  */
-export async function seedClaudeHome(args: {
-  envId: string
-  userId: string
-  files: SeedFile[]
-}): Promise<void> {
+export async function seedClaudeHome(args: { envId: string; userId: string; files: SeedFile[] }): Promise<void> {
   const store = new CloudBaseCosClaudeHomeStore()
   for (const file of args.files) {
     await store.put({ envId: args.envId, userId: args.userId }, file.relPath, Buffer.from(file.content, 'utf8'))

@@ -3,14 +3,24 @@
  *
  * COS key pattern: `oak/users/{userId}/claude-home/<relative-path>`
  *
+ * SDK 选型:`@cloudbase/manager-node`(而非 `@cloudbase/node-sdk`)。
+ *   - `@cloudbase/node-sdk`(服务端 SDK)**没有任何 list API** —— 顶层只有
+ *     uploadFile/downloadFile/getTempFileURL/deleteFile/getFileInfo/copyFile/callApis,
+ *     无法实现 pull 时的"枚举用户命名空间下的所有文件"。
+ *   - `@cloudbase/manager-node`(管理端 SDK)的 `storage` 模块提供完整的
+ *     `walkCloudDir / listDirectoryFiles / deleteFile / getTemporaryUrl` —— 是 OAK
+ *     这种"遍历 + 双向同步"场景的正确选择。Monorepo 的 packages/server 也是用它做
+ *     云存储管理的。
+ *
  * 凭证派生(与 CloudBaseStorage 一致):
  *   1. options.credentials(编程注入)
  *   2. process.env: TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY (+ TCB_TOKEN)
  *
- * `@cloudbase/node-sdk` 是 optional peer dep,按需懒加载。
+ * `@cloudbase/manager-node` 是 optional peer dep,按需懒加载。
  */
 
 import * as fs from 'node:fs/promises'
+import * as os from 'node:os'
 import * as path from 'node:path'
 import { ResourceError } from '../internal/errors.js'
 import { sha256OfBuffer } from './dedup.js'
@@ -34,17 +44,29 @@ interface ResolvedCredentials extends CloudBaseCosCredentials {
   region: string
 }
 
-interface CloudBaseApp {
-  uploadFile(args: { cloudPath: string; fileContent: Uint8Array | Buffer }): Promise<{ fileID: string }>
-  getTempFileURL(args: { fileList: Array<string> }): Promise<{
-    fileList: Array<{ fileID: string; tempFileURL: string; code?: string }>
-  }>
-  deleteFile(args: { fileList: Array<string> }): Promise<{
-    fileList: Array<{ fileID: string; code?: string }>
-  }>
-  getStorage?(): {
-    listDirectoryFiles(prefix: string): Promise<Array<{ Key: string; Size: number }>>
-  }
+/**
+ * 我们使用的 manager-node 子集(精简过的类型)。完整签名见
+ * @cloudbase/manager-node/types/storage/index.d.ts
+ */
+interface ManagerStorage {
+  uploadFile(args: { localPath: string; cloudPath: string }): Promise<unknown>
+  walkCloudDir(prefix: string): Promise<Array<{ Key: string; Size: string | number }>>
+  getTemporaryUrl(fileList: Array<{ cloudPath: string; maxAge?: number }>): Promise<Array<{ fileId: string; url: string }>>
+  deleteFile(cloudPathList: string[]): Promise<unknown>
+}
+
+interface CloudBaseManagerInstance {
+  storage: ManagerStorage
+}
+
+interface ManagerCtor {
+  new (opts: {
+    secretId: string
+    secretKey: string
+    envId: string
+    token?: string
+    region?: string
+  }): CloudBaseManagerInstance
 }
 
 function resolveCredentials(opts?: CloudBaseCosClaudeHomeStoreOptions): ResolvedCredentials {
@@ -75,73 +97,93 @@ function assertSafeKey(userId: string, fullKey: string): void {
   }
 }
 
+/**
+ * delete 视为成功的 COS 错误码集合。
+ * 不同 SDK 路径(node-sdk vs manager-node vs cos-nodejs-sdk-v5)对"文件不存在"返回的
+ * 错误名/code 不一致,统一在这里收口。
+ */
+const DELETE_NOT_EXIST_CODES = new Set(['STORAGE.FileNotFound', 'STORAGE_FILE_NONEXIST', 'NoSuchKey'])
+
+function isFileNotExistError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false
+  const e = err as { code?: string; name?: string; message?: string; statusCode?: number }
+  if (e.code && DELETE_NOT_EXIST_CODES.has(e.code)) return true
+  if (e.name && DELETE_NOT_EXIST_CODES.has(e.name)) return true
+  // COS HTTP 404 兜底
+  if (e.statusCode === 404) return true
+  // 文案兜底(部分版本只塞 message)
+  if (typeof e.message === 'string' && /no such key|file.*not.*exist|nonexist/i.test(e.message)) return true
+  return false
+}
+
 export class CloudBaseCosClaudeHomeStore implements ClaudeHomeSyncStore {
   private readonly creds: ResolvedCredentials
-  private app: CloudBaseApp | null = null
+  private manager: CloudBaseManagerInstance | null = null
 
   constructor(opts: CloudBaseCosClaudeHomeStoreOptions = {}) {
     this.creds = resolveCredentials(opts)
   }
 
-  private async getApp(): Promise<CloudBaseApp> {
-    if (this.app) return this.app
+  private async getManager(): Promise<CloudBaseManagerInstance> {
+    if (this.manager) return this.manager
+
     // 与 src/storage/cloudbase-storage.ts 一致的懒加载模式:
-    //   1) 用 new Function 绕过 tsup 静态打包(否则 ESM 入口找不到 @cloudbase/node-sdk)
-    //   2) `@cloudbase/node-sdk` 是 CommonJS,ESM import 后真实导出在 mod.default
-    const mod = await this.requireCloudBase()
-    const init = (mod.default ?? mod) as { init?: (opts: Record<string, unknown>) => CloudBaseApp }
-    if (typeof init.init !== 'function') {
+    //   1) 用 new Function 绕过 tsup 静态打包(否则 ESM 入口找不到 @cloudbase/manager-node)
+    //   2) `@cloudbase/manager-node` 是 CommonJS,ESM import 后真实导出在 mod.default
+    const mod = await this.requireManagerNode()
+    const Ctor = ((mod as { default?: unknown }).default ?? mod) as ManagerCtor
+    if (typeof Ctor !== 'function') {
       throw new ResourceError(
-        '@cloudbase/node-sdk loaded but `.init()` not available. Check the version (>= 3.0.0 required).',
+        '@cloudbase/manager-node loaded but default export is not a constructor. ' +
+          'Check the version (>= 4.0.0 required).',
       )
     }
-    this.app = init.init({
-      env: this.creds.envId,
-      region: this.creds.region,
+    this.manager = new Ctor({
       secretId: this.creds.secretId,
       secretKey: this.creds.secretKey,
-      ...(this.creds.sessionToken ? { sessionToken: this.creds.sessionToken } : {}),
+      envId: this.creds.envId,
+      ...(this.creds.sessionToken ? { token: this.creds.sessionToken } : {}),
+      region: this.creds.region,
     })
-    return this.app
+    return this.manager
   }
 
-  private async requireCloudBase(): Promise<{ default?: unknown; init?: unknown }> {
+  private async requireManagerNode(): Promise<unknown> {
     try {
-      // 必须用 new Function 包,避免 tsup 把 import('@cloudbase/node-sdk')
+      // 必须用 new Function 包,避免 tsup 把 import('@cloudbase/manager-node')
       // 静态展开成相对路径(运行时 ESM 解析失败)。
-      const dynamicImport = new Function('p', 'return import(p)') as (
-        p: string,
-      ) => Promise<{ default?: unknown; init?: unknown }>
-      return await dynamicImport('@cloudbase/node-sdk')
+      const dynamicImport = new Function('p', 'return import(p)') as (p: string) => Promise<unknown>
+      return await dynamicImport('@cloudbase/manager-node')
     } catch {
       throw new ResourceError(
-        'CloudBaseCosClaudeHomeStore requires @cloudbase/node-sdk. Install via:\n  pnpm add @cloudbase/node-sdk',
+        'CloudBaseCosClaudeHomeStore requires @cloudbase/manager-node. Install via:\n' +
+          '  pnpm add @cloudbase/manager-node',
       )
     }
   }
 
   async pull(ctx: ClaudeHomeContext, localDir: string): Promise<Map<RelativePath, string>> {
     const baseline = new Map<RelativePath, string>()
-    const app = await this.getApp()
+    const manager = await this.getManager()
     const prefix = KEY_PREFIX_TPL(ctx.userId)
 
-    const storage = app.getStorage?.()
-    if (!storage) {
-      // SDK 不暴露 listDirectoryFiles → 视为 namespace 空(graceful)
-      return baseline
-    }
-    const listed = await storage.listDirectoryFiles(prefix)
+    const listed = await manager.storage.walkCloudDir(prefix)
 
     await Promise.all(
       listed.map(async (item) => {
-        if (item.Size === 0) return // 目录占位文件
         const fileID = item.Key
+        if (!fileID) return
+        // walkCloudDir 会把"目录占位符"(以 / 结尾,Size=0)也列出来,跳过
+        if (fileID.endsWith('/')) return
+        const size = typeof item.Size === 'number' ? item.Size : Number(item.Size)
+        if (Number.isFinite(size) && size === 0) return
+
         assertSafeKey(ctx.userId, fileID)
         const relPath = fileID.substring(prefix.length)
         if (!relPath) return
 
-        const urlRes = await app.getTempFileURL({ fileList: [fileID] })
-        const url = urlRes.fileList?.[0]?.tempFileURL
+        const urlRes = await manager.storage.getTemporaryUrl([{ cloudPath: fileID, maxAge: 600 }])
+        const url = urlRes?.[0]?.url
         if (!url) return
         const resp = await fetch(url)
         if (!resp.ok) throw new Error(`pull failed for ${fileID}: ${resp.status}`)
@@ -158,20 +200,34 @@ export class CloudBaseCosClaudeHomeStore implements ClaudeHomeSyncStore {
   }
 
   async put(ctx: ClaudeHomeContext, relPath: RelativePath, content: Buffer): Promise<void> {
-    const app = await this.getApp()
+    const manager = await this.getManager()
     const fullKey = KEY_PREFIX_TPL(ctx.userId) + relPath
     assertSafeKey(ctx.userId, fullKey)
-    await app.uploadFile({ cloudPath: fullKey, fileContent: content })
+
+    // manager-node 的 uploadFile 只接 localPath(底层 fs.createReadStream),
+    // 我们要传 Buffer,所以走"临时文件桥接"。COS 上传后立即清理 tmp 文件。
+    // 这是标准做法,几 KB 文档的 IO 开销可以忽略;避免依赖 manager-node 的
+    // private getCos() 实现。
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oak-claude-home-put-'))
+    const tmpFile = path.join(tmpDir, 'payload')
+    try {
+      await fs.writeFile(tmpFile, content)
+      await manager.storage.uploadFile({ localPath: tmpFile, cloudPath: fullKey })
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+    }
   }
 
   async delete(ctx: ClaudeHomeContext, relPath: RelativePath): Promise<void> {
-    const app = await this.getApp()
+    const manager = await this.getManager()
     const fullKey = KEY_PREFIX_TPL(ctx.userId) + relPath
     assertSafeKey(ctx.userId, fullKey)
-    const result = await app.deleteFile({ fileList: [fullKey] })
-    const item = result.fileList?.[0]
-    if (item?.code && item.code !== 'SUCCESS' && item.code !== 'STORAGE.FileNotFound') {
-      throw new Error(`COS delete failed for ${fullKey}: ${item.code}`)
+    try {
+      await manager.storage.deleteFile([fullKey])
+    } catch (err) {
+      // 文件不存在视为成功(idempotent delete)
+      if (isFileNotExistError(err)) return
+      throw err
     }
   }
 }

@@ -1,20 +1,24 @@
 /**
  * cloudbase-cos-store.test.ts
  *
- * 锁住 getApp() 对 @cloudbase/node-sdk 的导出形态适配:
- *   - CJS 形态(ESM import 后真实导出在 mod.default)
- *   - ESM 形态(直接挂在顶层 mod.init)
- *   - SDK 不是 init.init function 时抛 ResourceError
+ * 锁住 CloudBaseCosClaudeHomeStore 的关键 invariant:
  *   - 凭证缺失时构造抛 ResourceError
+ *   - getManager() 对 @cloudbase/manager-node 的 CJS / ESM 导出形态都能适配
+ *   - manager 实例缓存(只 init 一次)
+ *   - pull 把 walkCloudDir 列举结果走 getTemporaryUrl + fetch 落到本地 + 返回 baseline
+ *   - put 把 Buffer 经过 tmp 文件桥接传给 storage.uploadFile,事后清理
+ *   - delete 对"文件不存在"幂等(STORAGE.FileNotFound / STORAGE_FILE_NONEXIST / NoSuchKey / 404)
  *
- * 这是为了防止再发生 v0.2.0-alpha.0 那个 "tcb.init is not a function" 的 regression。
- * 不测真实 COS — pull/put/delete 只验到调 store 的 init 那层即可。
+ * 不测真实 COS — 模块加载层用 vi.spyOn(store, 'requireManagerNode') 替换。
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as fs from 'node:fs/promises'
+import * as path from 'node:path'
 import { CloudBaseCosClaudeHomeStore } from '../cloudbase-cos-store.js'
 
 const ctx = { envId: 'env-test', userId: 'alice' }
+const PREFIX = 'oak/users/alice/claude-home/'
 
 beforeEach(() => {
   process.env.TCB_ENV_ID = 'env-test'
@@ -26,6 +30,37 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+// ── 测试辅助:构造一个 fake CloudBaseManager 实例 ──────────────
+function makeFakeManager(overrides: Partial<{
+  uploadFile: ReturnType<typeof vi.fn>
+  walkCloudDir: ReturnType<typeof vi.fn>
+  getTemporaryUrl: ReturnType<typeof vi.fn>
+  deleteFile: ReturnType<typeof vi.fn>
+}> = {}) {
+  return {
+    storage: {
+      uploadFile: overrides.uploadFile ?? vi.fn().mockResolvedValue({}),
+      walkCloudDir: overrides.walkCloudDir ?? vi.fn().mockResolvedValue([]),
+      getTemporaryUrl:
+        overrides.getTemporaryUrl ?? vi.fn().mockResolvedValue([{ fileId: '', url: '' }]),
+      deleteFile: overrides.deleteFile ?? vi.fn().mockResolvedValue({}),
+    },
+  }
+}
+
+function spyManagerCtor(store: CloudBaseCosClaudeHomeStore, instance: unknown, shape: 'cjs' | 'esm' = 'cjs') {
+  const Ctor = vi.fn().mockReturnValue(instance) as unknown as new (...args: unknown[]) => unknown
+  // CJS shape: mod.default 是 ctor; ESM shape: mod 直接是 ctor(实际 manager-node 是 CJS,
+  // 但我们的代码 fallback `mod.default ?? mod` 应同时支持)
+  const mod = shape === 'cjs' ? { default: Ctor } : Ctor
+  vi.spyOn(
+    store as unknown as { requireManagerNode: () => Promise<unknown> },
+    'requireManagerNode',
+  ).mockResolvedValue(mod)
+  return Ctor as unknown as ReturnType<typeof vi.fn>
+}
+
+// ── 凭证 ───────────────────────────────────────────────────────
 describe('CloudBaseCosClaudeHomeStore — credential validation', () => {
   it('throws ResourceError when credentials missing', () => {
     delete process.env.TCB_ENV_ID
@@ -44,107 +79,231 @@ describe('CloudBaseCosClaudeHomeStore — credential validation', () => {
   })
 })
 
-describe('CloudBaseCosClaudeHomeStore — getApp() module shape adaptation', () => {
-  // 我们通过让 dynamic import 失败,迫使 getApp 走"模块加载失败"分支,
-  // 验证它能给出正确的错误而不是 silent crash。
-  it('throws ResourceError when @cloudbase/node-sdk is not installed', async () => {
+// ── 模块加载形态 ───────────────────────────────────────────────
+describe('CloudBaseCosClaudeHomeStore — getManager() module shape adaptation', () => {
+  it('propagates the failure when @cloudbase/manager-node is not installed', async () => {
     const store = new CloudBaseCosClaudeHomeStore()
-    // 让 dynamic import 失败:把 globalThis.Function 替换为始终抛错的版本
-    // 不动用 vi.mock(它对 new Function('p', 'return import(p)') 路径无效)
-    // 改用让 require 失败的方式。
-    //
-    // 简化:我们把 store["requireCloudBase"] 直接 spy 让它抛错(模拟 SDK 不存在),
-    // 验证错误类型 + 包装文案。
-    const requireSpy = vi
-      .spyOn(store as unknown as { requireCloudBase: () => Promise<unknown> }, 'requireCloudBase')
-      .mockRejectedValueOnce(new Error('module not found'))
+    // 在 requireManagerNode 这一层拦截 = 模拟"包加载失败被业务层捕获后包装的 ResourceError"
+    // (生产代码 try/catch 会把任何 dynamicImport 失败包成 ResourceError;这里直接 mock
+    // 抛 ResourceError 文案,验证其能向上传播)
+    vi.spyOn(
+      store as unknown as { requireManagerNode: () => Promise<unknown> },
+      'requireManagerNode',
+    ).mockRejectedValueOnce(new Error('CloudBaseCosClaudeHomeStore requires @cloudbase/manager-node'))
 
-    // 让 store 内部走到 getApp:put 任何文件都会触发
-    await expect(store.put(ctx, 'CLAUDE.md', Buffer.from('x'))).rejects.toThrow()
-    expect(requireSpy).toHaveBeenCalled()
+    await expect(store.put(ctx, 'CLAUDE.md', Buffer.from('x'))).rejects.toThrow(/manager-node/)
   })
 
-  it('uses mod.default.init when SDK exports CJS shape (default-wrapped)', async () => {
+  it('uses mod.default when SDK exports CJS shape (default-wrapped)', async () => {
     const store = new CloudBaseCosClaudeHomeStore()
-    const fakeApp = {
-      uploadFile: vi.fn().mockResolvedValue({ fileID: 'cloud://oak/users/alice/claude-home/CLAUDE.md' }),
-      getTempFileURL: vi.fn(),
-      deleteFile: vi.fn(),
-    }
-    const initFn = vi.fn().mockReturnValue(fakeApp)
-    // CJS shape:`mod.default.init`(ESM import 后真实导出在 default 上)
-    vi.spyOn(
-      store as unknown as { requireCloudBase: () => Promise<{ default?: unknown }> },
-      'requireCloudBase',
-    ).mockResolvedValue({ default: { init: initFn } })
+    const fake = makeFakeManager()
+    const Ctor = spyManagerCtor(store, fake, 'cjs')
 
     await store.put(ctx, 'CLAUDE.md', Buffer.from('hello'))
 
-    expect(initFn).toHaveBeenCalledWith(expect.objectContaining({ env: 'env-test', secretId: 'sid', secretKey: 'sk' }))
-    expect(fakeApp.uploadFile).toHaveBeenCalledWith({
-      cloudPath: 'oak/users/alice/claude-home/CLAUDE.md',
-      fileContent: expect.any(Buffer),
-    })
+    expect(Ctor).toHaveBeenCalledWith(
+      expect.objectContaining({ envId: 'env-test', secretId: 'sid', secretKey: 'sk' }),
+    )
+    expect(fake.storage.uploadFile).toHaveBeenCalledTimes(1)
+    expect(fake.storage.uploadFile.mock.calls[0]![0]).toEqual(
+      expect.objectContaining({ cloudPath: PREFIX + 'CLAUDE.md' }),
+    )
   })
 
-  it('uses mod.init when SDK exports ESM shape (init at top level)', async () => {
+  it('uses mod directly when SDK exports ESM shape (no default wrapper)', async () => {
     const store = new CloudBaseCosClaudeHomeStore()
-    const fakeApp = {
-      uploadFile: vi.fn().mockResolvedValue({ fileID: '...' }),
-      getTempFileURL: vi.fn(),
-      deleteFile: vi.fn(),
-    }
-    const initFn = vi.fn().mockReturnValue(fakeApp)
-    // ESM shape:`mod.init` 直接挂顶层(没有 default 包装)
-    vi.spyOn(
-      store as unknown as { requireCloudBase: () => Promise<{ init?: unknown }> },
-      'requireCloudBase',
-    ).mockResolvedValue({ init: initFn })
+    const fake = makeFakeManager()
+    const Ctor = spyManagerCtor(store, fake, 'esm')
 
     await store.put(ctx, 'CLAUDE.md', Buffer.from('hi'))
-
-    expect(initFn).toHaveBeenCalled()
+    expect(Ctor).toHaveBeenCalled()
   })
 
-  it('throws ResourceError when SDK loaded but init() missing', async () => {
+  it('throws ResourceError when SDK loaded but default is not a constructor', async () => {
     const store = new CloudBaseCosClaudeHomeStore()
-    // 模块解析成功,但既没有 default.init 也没有 mod.init
-    vi.spyOn(store as unknown as { requireCloudBase: () => Promise<unknown> }, 'requireCloudBase').mockResolvedValue({
-      somethingElse: () => {},
-    })
+    vi.spyOn(
+      store as unknown as { requireManagerNode: () => Promise<unknown> },
+      'requireManagerNode',
+    ).mockResolvedValue({ somethingElse: () => {} })
 
-    await expect(store.put(ctx, 'CLAUDE.md', Buffer.from('x'))).rejects.toThrow(/init.*not available/)
+    await expect(store.put(ctx, 'CLAUDE.md', Buffer.from('x'))).rejects.toThrow(/not a constructor/)
   })
 
-  it('caches app between calls (init only invoked once)', async () => {
+  it('caches manager between calls (constructor only invoked once)', async () => {
     const store = new CloudBaseCosClaudeHomeStore()
-    const fakeApp = {
-      uploadFile: vi.fn().mockResolvedValue({ fileID: '...' }),
-      getTempFileURL: vi.fn(),
-      deleteFile: vi.fn().mockResolvedValue({ fileList: [{ fileID: '...', code: 'SUCCESS' }] }),
-    }
-    const initFn = vi.fn().mockReturnValue(fakeApp)
-    vi.spyOn(store as unknown as { requireCloudBase: () => Promise<unknown> }, 'requireCloudBase').mockResolvedValue({
-      default: { init: initFn },
-    })
+    const fake = makeFakeManager({ deleteFile: vi.fn().mockResolvedValue({}) })
+    const Ctor = spyManagerCtor(store, fake, 'cjs')
 
     await store.put(ctx, 'CLAUDE.md', Buffer.from('a'))
     await store.put(ctx, 'CLAUDE.md', Buffer.from('b'))
     await store.delete(ctx, 'CLAUDE.md')
 
-    expect(initFn).toHaveBeenCalledTimes(1)
+    expect(Ctor).toHaveBeenCalledTimes(1)
   })
 })
 
-describe('CloudBaseCosClaudeHomeStore — assertSafeKey防越权', () => {
-  it('rejects keys not matching oak/users/{userId}/claude-home/ prefix', async () => {
-    // 这个不容易直接测(KEY_PREFIX_TPL 是 module-private),通过 putBadCtx 间接验证:
-    // 如果传一个 userId 含 / 的恶意 ctx,COS key 还是会以正确的 prefix 开头
-    // (因为 KEY_PREFIX_TPL 直接拼,不 sanitize) → 这里的 assertSafeKey 不是
-    // user-input 净化,而是防止 KEY_PREFIX_TPL 派生出问题的 invariant。
-    //
-    // 直接的越权测试需要 monkey-patch KEY_PREFIX_TPL,过度复杂。
-    // 留 V2 评估,本测试文件不覆盖。
-    expect(true).toBe(true)
+// ── pull(): walkCloudDir → getTemporaryUrl → fetch → 写本地 ──────
+describe('CloudBaseCosClaudeHomeStore — pull()', () => {
+  let tmpRoot: string
+  beforeEach(async () => {
+    tmpRoot = await fs.mkdtemp(path.join((await import('node:os')).tmpdir(), 'oak-pull-test-'))
+  })
+  afterEach(async () => {
+    await fs.rm(tmpRoot, { recursive: true, force: true }).catch(() => {})
+  })
+
+  it('returns empty baseline when COS namespace is empty', async () => {
+    const store = new CloudBaseCosClaudeHomeStore()
+    const fake = makeFakeManager({ walkCloudDir: vi.fn().mockResolvedValue([]) })
+    spyManagerCtor(store, fake, 'cjs')
+
+    const baseline = await store.pull(ctx, tmpRoot)
+
+    expect(baseline.size).toBe(0)
+    expect(fake.storage.walkCloudDir).toHaveBeenCalledWith(PREFIX)
+  })
+
+  it('downloads files via temporary URL and returns hashed baseline', async () => {
+    const store = new CloudBaseCosClaudeHomeStore()
+    const fileKey = PREFIX + 'CLAUDE.md'
+    const fake = makeFakeManager({
+      walkCloudDir: vi.fn().mockResolvedValue([{ Key: fileKey, Size: '13' }]),
+      getTemporaryUrl: vi.fn().mockResolvedValue([{ fileId: fileKey, url: 'https://signed/CLAUDE.md' }]),
+    })
+    spyManagerCtor(store, fake, 'cjs')
+
+    const fetchMock = vi.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      // 用 Uint8Array.buffer 而不是 Buffer.from(...).buffer:Node 的 Buffer 共享一个内部
+      // pool ArrayBuffer,直接拿 .buffer 会带上整个 pool 的脏数据。
+      arrayBuffer: async () => new TextEncoder().encode('hello, world!').buffer,
+    } as Response)
+
+    const baseline = await store.pull(ctx, tmpRoot)
+
+    expect(fetchMock).toHaveBeenCalledWith('https://signed/CLAUDE.md')
+    expect(baseline.size).toBe(1)
+    expect(baseline.has('CLAUDE.md')).toBe(true)
+    const written = await fs.readFile(path.join(tmpRoot, 'CLAUDE.md'), 'utf-8')
+    expect(written).toBe('hello, world!')
+  })
+
+  it('skips directory placeholders (key ending with /) and zero-size entries', async () => {
+    const store = new CloudBaseCosClaudeHomeStore()
+    const fake = makeFakeManager({
+      walkCloudDir: vi.fn().mockResolvedValue([
+        { Key: PREFIX + 'memory/', Size: 0 },
+        { Key: PREFIX + 'placeholder.md', Size: '0' },
+      ]),
+    })
+    spyManagerCtor(store, fake, 'cjs')
+
+    const baseline = await store.pull(ctx, tmpRoot)
+
+    expect(baseline.size).toBe(0)
+    expect(fake.storage.getTemporaryUrl).not.toHaveBeenCalled()
+  })
+
+  it('throws when temp URL fetch fails (so caller can decide retry vs fail-open)', async () => {
+    const store = new CloudBaseCosClaudeHomeStore()
+    const fileKey = PREFIX + 'CLAUDE.md'
+    const fake = makeFakeManager({
+      walkCloudDir: vi.fn().mockResolvedValue([{ Key: fileKey, Size: '5' }]),
+      getTemporaryUrl: vi.fn().mockResolvedValue([{ fileId: fileKey, url: 'https://signed' }]),
+    })
+    spyManagerCtor(store, fake, 'cjs')
+
+    vi.spyOn(global, 'fetch').mockResolvedValue({ ok: false, status: 500 } as Response)
+
+    await expect(store.pull(ctx, tmpRoot)).rejects.toThrow(/pull failed/)
+  })
+})
+
+// ── put(): Buffer → tmp file → uploadFile → cleanup ────────────
+describe('CloudBaseCosClaudeHomeStore — put()', () => {
+  it('writes buffer to a tmp file, uploads it, then cleans up the tmp dir', async () => {
+    const store = new CloudBaseCosClaudeHomeStore()
+    let capturedLocalPath: string | undefined
+    const fake = makeFakeManager({
+      uploadFile: vi.fn().mockImplementation(async (args: { localPath: string; cloudPath: string }) => {
+        capturedLocalPath = args.localPath
+        // 在 cleanup 之前确认文件确实存在并且内容正确
+        const buf = await fs.readFile(args.localPath)
+        expect(buf.toString()).toBe('the-content')
+      }),
+    })
+    spyManagerCtor(store, fake, 'cjs')
+
+    await store.put(ctx, 'CLAUDE.md', Buffer.from('the-content'))
+
+    expect(fake.storage.uploadFile).toHaveBeenCalledWith(
+      expect.objectContaining({ cloudPath: PREFIX + 'CLAUDE.md', localPath: expect.any(String) }),
+    )
+    // tmp 目录应该被清理
+    expect(capturedLocalPath).toBeDefined()
+    await expect(fs.access(capturedLocalPath!)).rejects.toThrow()
+  })
+
+  it('still cleans up tmp dir if uploadFile throws', async () => {
+    const store = new CloudBaseCosClaudeHomeStore()
+    let capturedLocalPath: string | undefined
+    const fake = makeFakeManager({
+      uploadFile: vi.fn().mockImplementation(async (args: { localPath: string }) => {
+        capturedLocalPath = args.localPath
+        throw new Error('upload boom')
+      }),
+    })
+    spyManagerCtor(store, fake, 'cjs')
+
+    await expect(store.put(ctx, 'CLAUDE.md', Buffer.from('x'))).rejects.toThrow(/upload boom/)
+    expect(capturedLocalPath).toBeDefined()
+    await expect(fs.access(capturedLocalPath!)).rejects.toThrow()
+  })
+})
+
+// ── delete(): 幂等(文件不存在视为成功)─────────────────────────
+describe('CloudBaseCosClaudeHomeStore — delete()', () => {
+  it('calls deleteFile with full COS key', async () => {
+    const store = new CloudBaseCosClaudeHomeStore()
+    const fake = makeFakeManager()
+    spyManagerCtor(store, fake, 'cjs')
+
+    await store.delete(ctx, 'CLAUDE.md')
+
+    expect(fake.storage.deleteFile).toHaveBeenCalledWith([PREFIX + 'CLAUDE.md'])
+  })
+
+  for (const code of ['STORAGE.FileNotFound', 'STORAGE_FILE_NONEXIST', 'NoSuchKey']) {
+    it(`treats ${code} as success (idempotent delete)`, async () => {
+      const store = new CloudBaseCosClaudeHomeStore()
+      const fake = makeFakeManager({
+        deleteFile: vi.fn().mockRejectedValue(Object.assign(new Error('not found'), { code })),
+      })
+      spyManagerCtor(store, fake, 'cjs')
+
+      await expect(store.delete(ctx, 'CLAUDE.md')).resolves.toBeUndefined()
+    })
+  }
+
+  it('treats HTTP 404 as success', async () => {
+    const store = new CloudBaseCosClaudeHomeStore()
+    const fake = makeFakeManager({
+      deleteFile: vi.fn().mockRejectedValue(Object.assign(new Error('not found'), { statusCode: 404 })),
+    })
+    spyManagerCtor(store, fake, 'cjs')
+
+    await expect(store.delete(ctx, 'CLAUDE.md')).resolves.toBeUndefined()
+  })
+
+  it('rethrows on real errors (e.g. permission)', async () => {
+    const store = new CloudBaseCosClaudeHomeStore()
+    const fake = makeFakeManager({
+      deleteFile: vi
+        .fn()
+        .mockRejectedValue(Object.assign(new Error('AccessDenied'), { code: 'AccessDenied', statusCode: 403 })),
+    })
+    spyManagerCtor(store, fake, 'cjs')
+
+    await expect(store.delete(ctx, 'CLAUDE.md')).rejects.toThrow(/AccessDenied/)
   })
 })
