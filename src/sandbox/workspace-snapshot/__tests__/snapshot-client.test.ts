@@ -43,40 +43,38 @@ describe('callWorkspaceSnapshot', () => {
   it('does not retry on retryable=false', async () => {
     const inst = mockInst([
       () =>
-        new Response(
-          JSON.stringify({ errorCode: 'workspace_snapshot_failed', retryable: false, detail: 'fatal' }),
-          { status: 500, headers: PROBLEM_HEADERS },
-        ),
+        new Response(JSON.stringify({ errorCode: 'workspace_snapshot_failed', retryable: false, detail: 'fatal' }), {
+          status: 500,
+          headers: PROBLEM_HEADERS,
+        }),
     ])
-    await expect(
-      callWorkspaceSnapshot(inst as any, { timeoutMs: 30_000, retryBackoffMs: 0 }),
-    ).rejects.toThrow(WorkspaceSnapshotError)
+    await expect(callWorkspaceSnapshot(inst as any, { timeoutMs: 30_000, retryBackoffMs: 0 })).rejects.toThrow(
+      WorkspaceSnapshotError,
+    )
     expect(inst.request).toHaveBeenCalledTimes(1)
   })
 
   it('does not retry on 502/503', async () => {
     const inst = mockInst([() => new Response('upstream gone', { status: 502 })])
-    await expect(
-      callWorkspaceSnapshot(inst as any, { timeoutMs: 30_000, retryBackoffMs: 0 }),
-    ).rejects.toThrow(SandboxUnavailableError)
+    await expect(callWorkspaceSnapshot(inst as any, { timeoutMs: 30_000, retryBackoffMs: 0 })).rejects.toThrow(
+      SandboxUnavailableError,
+    )
     expect(inst.request).toHaveBeenCalledTimes(1)
   })
 
   it('throws on timeout', async () => {
     const inst = {
       id: 'x',
-      request: vi.fn().mockImplementation(
-        async (_p: string, init?: RequestInit) =>
-          new Promise((_, rej) =>
-            init?.signal?.addEventListener('abort', () =>
-              rej(new DOMException('aborted', 'AbortError')),
+      request: vi
+        .fn()
+        .mockImplementation(
+          async (_p: string, init?: RequestInit) =>
+            new Promise((_, rej) =>
+              init?.signal?.addEventListener('abort', () => rej(new DOMException('aborted', 'AbortError'))),
             ),
-          ),
-      ),
+        ),
       release: vi.fn(),
     }
-    await expect(
-      callWorkspaceSnapshot(inst as any, { timeoutMs: 50, retryBackoffMs: 0 }),
-    ).rejects.toThrow(/timeout/)
+    await expect(callWorkspaceSnapshot(inst as any, { timeoutMs: 50, retryBackoffMs: 0 })).rejects.toThrow(/timeout/)
   })
 })

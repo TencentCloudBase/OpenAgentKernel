@@ -29,8 +29,7 @@ async function attempt(inst: SandboxInstance, timeoutMs: number): Promise<{ ms: 
       }
       // 500: 解析 problem+json
       const body = (await res.json().catch(() => ({}))) as ProblemBody
-      const retryable =
-        body.retryable === true && body.errorCode != null && RETRYABLE_ERROR_CODES.has(body.errorCode)
+      const retryable = body.retryable === true && body.errorCode != null && RETRYABLE_ERROR_CODES.has(body.errorCode)
       throw new WorkspaceSnapshotError(
         `snapshot failed: ${body.errorCode ?? 'unknown'}: ${body.detail ?? ''}`,
         retryable,
