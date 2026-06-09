@@ -76,9 +76,7 @@ describe('getHealthRestoreStatus(事后查询路径,不重试)', () => {
   })
 
   it('returns null when restoreStatus is null', async () => {
-    const inst = mockInst([
-      () => new Response(JSON.stringify({ ok: true, restoreStatus: null }), { status: 200 }),
-    ])
+    const inst = mockInst([() => new Response(JSON.stringify({ ok: true, restoreStatus: null }), { status: 200 })])
     expect(await getHealthRestoreStatus(inst as any)).toBeNull()
   })
 
@@ -88,9 +86,7 @@ describe('getHealthRestoreStatus(事后查询路径,不重试)', () => {
   })
 
   it('returns null on schema mismatch (graceful, never throws)', async () => {
-    const inst = mockInst([
-      () => new Response(JSON.stringify({ unexpected: true }), { status: 200 }),
-    ])
+    const inst = mockInst([() => new Response(JSON.stringify({ unexpected: true }), { status: 200 })])
     expect(await getHealthRestoreStatus(inst as any)).toBeNull()
   })
 })
