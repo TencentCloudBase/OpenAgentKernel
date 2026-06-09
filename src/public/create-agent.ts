@@ -8,6 +8,7 @@ import { createTranslatorState, translateSdkMessage } from '../runtime/event-tra
 import { buildPromptAsync } from '../runtime/prompt-builder.js'
 import { createCloudBaseMcpServer, type CloudBaseUserCredentials } from '../sandbox/cloudbase-mcp.js'
 import type { SandboxInstance, SandboxRuntime } from '../sandbox/types.js'
+import type { WorkspaceSnapshotEngine } from '../sandbox/workspace-snapshot/index.js'
 import type { StorageProvider } from '../storage/types.js'
 import type {
   Agent,
@@ -123,6 +124,13 @@ function createSession(deps: SessionDeps): Session {
   let cloudbaseMcpServer: SdkMcpServerConfig | undefined
   let cloudbaseMcpPromise: Promise<SdkMcpServerConfig | undefined> | undefined
 
+  // Spec B(Task 8):workspace snapshot engine 由 buildClaudeQueryOptions 在
+  // 第一次 send 时构造并通过本闭包变量记录。bootstrap 仅执行一次(首次 acquire 之后)。
+  // 注意:engine 本身是无状态构造,跨 send 持有同一个实例没有副作用。
+  let sessionSnapshotEngine: WorkspaceSnapshotEngine | undefined
+  let snapshotBootstrapped = false
+  let snapshotBootstrapPromise: Promise<void> | undefined
+
   // PR #7.0：审批 store（默认 InMemoryPermissionStore，进程内单例）。
   // 仅在用户配了 requireApproval 时启用；不配则 hook 整体不注入。
   const permissionStore: PermissionStore | undefined =
@@ -182,6 +190,48 @@ function createSession(deps: SessionDeps): Session {
     return cloudbaseMcpServer
   }
 
+  /**
+   * Spec B(Task 8):workspace snapshot 首次 bootstrap。
+   *
+   * - 仅当 buildClaudeQueryOptions 返回了 snapshotEngine(spec resolves to enabled)时执行
+   * - 仅在首次 send 触发(snapshotBootstrapped flag),后续 send 跳过
+   * - 凭证形态对齐 cloudbase-mcp.ts 的 PUT /api/workspace/env(Spec B 镜像端把这份 env
+   *   持久化为 .workspace-env.json,init body 的 env 必须跟它语义一致)
+   *
+   * 失败处理:bootstrap 抛出(SandboxRestoreFailed / 网络错误)时让异常向上冒,
+   * 由 runClaudeQuery 的 catch 块翻译为 'error' 事件 + session_idle('error')。
+   * 这是 spec §6.2"restore failed → 视为致命"行为。
+   */
+  async function ensureSnapshotBootstrap(engine: WorkspaceSnapshotEngine, sandbox: SandboxInstance): Promise<void> {
+    if (snapshotBootstrapped) return
+    if (!snapshotBootstrapPromise) {
+      snapshotBootstrapPromise = (async () => {
+        const creds = await resolveUserCredentials(config)
+        const envBag: Record<string, string> = {
+          CLOUDBASE_ENV_ID: creds.envId,
+          TENCENTCLOUD_SECRETID: creds.secretId,
+          TENCENTCLOUD_SECRETKEY: creds.secretKey,
+          TENCENTCLOUD_SESSIONTOKEN: creds.sessionToken ?? '',
+        }
+        await engine.bootstrap(sandbox, { credentials: envBag })
+        snapshotBootstrapped = true
+      })()
+    }
+    try {
+      await snapshotBootstrapPromise
+    } catch (err) {
+      // 失败一次后清理 promise,允许下次 send 重试(graceful)
+      snapshotBootstrapPromise = undefined
+      throw err
+    }
+  }
+
+  function onSnapshotEngine(engine: WorkspaceSnapshotEngine | undefined): void {
+    if (engine && !sessionSnapshotEngine) {
+      sessionSnapshotEngine = engine
+    }
+  }
+
   const session: Session = {
     id: conversationId,
     userId,
@@ -200,6 +250,8 @@ function createSession(deps: SessionDeps): Session {
         isContinuation,
         ensureSandbox,
         ensureCloudbaseMcp,
+        ensureSnapshotBootstrap,
+        onSnapshotEngine,
         permissionStore,
       })
     },
@@ -225,6 +277,8 @@ function createSession(deps: SessionDeps): Session {
         abortController,
         ensureSandbox,
         ensureCloudbaseMcp,
+        ensureSnapshotBootstrap,
+        onSnapshotEngine,
         permissionStore,
       })
     },
@@ -317,6 +371,33 @@ function createSession(deps: SessionDeps): Session {
         sandboxInstance = undefined
         sandboxAcquirePromise = undefined
       }
+    },
+
+    /**
+     * Spec B 新增。手动触发一次 workspace snapshot。
+     *
+     * - workspaceSnapshot 未启用 / 沙箱尚未 acquire → 返回 { ms: 0, skipped: true }
+     * - 启用且沙箱已就绪 → 转发到 WorkspaceSnapshotEngine.snapshot(inst)
+     *
+     * 失败一律向上抛(业务方主动调用,理应感知错误);自动 send-end snapshot 失败
+     * 则在 generator 内 yield warning(见 runClaudeQuery finally 块)。
+     */
+    async snapshotWorkspace(): Promise<{ ms: number; skipped?: boolean }> {
+      if (!sessionSnapshotEngine || !sandboxInstance) {
+        return { ms: 0, skipped: true }
+      }
+      return sessionSnapshotEngine.snapshot(sandboxInstance)
+    },
+
+    /**
+     * Spec B 新增。查询本 session 启动时的 restore 状态。
+     *
+     * - workspaceSnapshot 未启用 / 沙箱未就绪 → null
+     * - /health 暂不可用或 restoreStatus 字段为空 → null(graceful)
+     */
+    async getRestoreStatus(): Promise<'full' | 'fresh' | 'partial' | 'failed' | null> {
+      if (!sessionSnapshotEngine || !sandboxInstance) return null
+      return sessionSnapshotEngine.getRestoreStatus(sandboxInstance)
     },
   }
 
@@ -562,6 +643,10 @@ interface RunClaudeQueryArgs {
   isContinuation: boolean
   ensureSandbox: () => Promise<SandboxInstance | undefined>
   ensureCloudbaseMcp: (sandbox: SandboxInstance) => Promise<SdkMcpServerConfig | undefined>
+  /** Spec B(Task 8):首次 send 时执行 snapshot bootstrap(restore)*/
+  ensureSnapshotBootstrap: (engine: WorkspaceSnapshotEngine, sandbox: SandboxInstance) => Promise<void>
+  /** Spec B(Task 8):把 buildClaudeQueryOptions 拿到的 engine 上抛给 session 闭包 */
+  onSnapshotEngine: (engine: WorkspaceSnapshotEngine | undefined) => void
   permissionStore?: PermissionStore
 }
 
@@ -576,13 +661,17 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
     isContinuation,
     ensureSandbox,
     ensureCloudbaseMcp,
+    ensureSnapshotBootstrap,
+    onSnapshotEngine,
     permissionStore,
   } = args
 
   let q: ReturnType<typeof claudeQuery> | undefined
   let syncEngine: ReturnType<typeof buildClaudeQueryOptions>['syncEngine']
+  let snapshotEngine: ReturnType<typeof buildClaudeQueryOptions>['snapshotEngine']
+  let sandbox: SandboxInstance | undefined
   try {
-    const sandbox = await ensureSandbox()
+    sandbox = await ensureSandbox()
     const cloudbaseMcp = sandbox ? await ensureCloudbaseMcp(sandbox) : undefined
 
     // PR #7.0：构造一轮的 hook 本地状态（同 query 内闭包共享）
@@ -601,6 +690,15 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
     })
     const options = built.options
     syncEngine = built.syncEngine
+    snapshotEngine = built.snapshotEngine
+    onSnapshotEngine(snapshotEngine)
+
+    // ── Spec B(Task 8):workspace snapshot bootstrap(首次 send + 启用时)───
+    // 必须在 claudeQuery() 之前执行,否则模型可能在 restore 完成前就读到空 cwd。
+    // 失败(SandboxRestoreFailed / 网络错误)向上冒,被外层 catch 翻成 error 事件。
+    if (snapshotEngine && sandbox) {
+      await ensureSnapshotBootstrap(snapshotEngine, sandbox)
+    }
 
     // ── userMemory: send-start pull(失败不抛,记 warning)───
     if (syncEngine) {
@@ -649,6 +747,27 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
         console.warn('[oak/userMemory] pushOnSendEnd failed:', (err as Error)?.message)
       }
     }
+
+    // ── Spec B(Task 8):send-end workspace snapshot(失败 yield warning,不抹答案)──
+    // Spec §6.1 提到 oak_workspace_snapshot_duration_ms metric;OAK 当前还没 metrics
+    // 框架,留 TODO 等专门 PR 接入(写到 console.error 用于诊断)。
+    if (snapshotEngine && sandbox) {
+      try {
+        const result = await snapshotEngine.snapshot(sandbox)
+        if (process.env.OAK_DEBUG === '1') {
+          // eslint-disable-next-line no-console
+          console.error(`[oak][workspace-snapshot] ms=${result.ms}`)
+        }
+        // TODO(metrics):emit oak_workspace_snapshot_duration_ms histogram(spec §6.1)
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err)
+        // OAK SessionEvent union 暂无独立 'warning' 成员;复用 'error' 事件传递,
+        // 用确定性错误名让上层(协议适配 / 业务 logger)能识别为非致命快照警告。
+        const warning = new Error(`workspace_snapshot_failed: ${reason}`)
+        warning.name = 'WorkspaceSnapshotFailedWarning'
+        yield { type: 'error', error: warning }
+      }
+    }
   }
 }
 
@@ -665,6 +784,8 @@ interface RunApprovalResumeArgs {
   abortController: AbortController
   ensureSandbox: () => Promise<SandboxInstance | undefined>
   ensureCloudbaseMcp: (sandbox: SandboxInstance) => Promise<SdkMcpServerConfig | undefined>
+  ensureSnapshotBootstrap: (engine: WorkspaceSnapshotEngine, sandbox: SandboxInstance) => Promise<void>
+  onSnapshotEngine: (engine: WorkspaceSnapshotEngine | undefined) => void
   permissionStore?: PermissionStore
 }
 
@@ -678,6 +799,8 @@ async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<S
     abortController,
     ensureSandbox,
     ensureCloudbaseMcp,
+    ensureSnapshotBootstrap,
+    onSnapshotEngine,
     permissionStore,
   } = args
 
@@ -730,6 +853,8 @@ async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<S
     isContinuation: true,
     ensureSandbox,
     ensureCloudbaseMcp,
+    ensureSnapshotBootstrap,
+    onSnapshotEngine,
     permissionStore,
   })
 }
