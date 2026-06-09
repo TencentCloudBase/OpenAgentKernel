@@ -670,6 +670,10 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
   let syncEngine: ReturnType<typeof buildClaudeQueryOptions>['syncEngine']
   let snapshotEngine: ReturnType<typeof buildClaudeQueryOptions>['snapshotEngine']
   let sandbox: SandboxInstance | undefined
+  // Spec B(Task 8):仅当 snapshot bootstrap 成功完成(或无需 bootstrap)时才置 true。
+  // 若 bootstrap 抛错(SandboxRestoreFailed / 网络),finally 必须跳过 send-end snapshot,
+  // 否则会在 broken state 上再花 30s timeout 做 snapshot,可能把不完整状态推上 COS。
+  let bootstrapOk = false
   try {
     sandbox = await ensureSandbox()
     const cloudbaseMcp = sandbox ? await ensureCloudbaseMcp(sandbox) : undefined
@@ -695,9 +699,15 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
 
     // ── Spec B(Task 8):workspace snapshot bootstrap(首次 send + 启用时)───
     // 必须在 claudeQuery() 之前执行,否则模型可能在 restore 完成前就读到空 cwd。
-    // 失败(SandboxRestoreFailed / 网络错误)向上冒,被外层 catch 翻成 error 事件。
+    // 失败(SandboxRestoreFailed / 网络错误)向上冒,被外层 catch 翻成 error 事件;
+    // bootstrapOk 保持 false,finally 跳过 send-end snapshot。
     if (snapshotEngine && sandbox) {
       await ensureSnapshotBootstrap(snapshotEngine, sandbox)
+      bootstrapOk = true
+    } else {
+      // 没有 engine 或没有 sandbox = 没有 bootstrap 要做,后续 finally 的
+      // snapshot 分支条件本身也会被跳过,这里置 true 仅为语义自洽。
+      bootstrapOk = true
     }
 
     // ── userMemory: send-start pull(失败不抛,记 warning)───
@@ -751,7 +761,9 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
     // ── Spec B(Task 8):send-end workspace snapshot(失败 yield warning,不抹答案)──
     // Spec §6.1 提到 oak_workspace_snapshot_duration_ms metric;OAK 当前还没 metrics
     // 框架,留 TODO 等专门 PR 接入(写到 console.error 用于诊断)。
-    if (snapshotEngine && sandbox) {
+    // bootstrapOk 守门:若 bootstrap 抛了错,沙箱状态可能不完整,继续 snapshot 会把
+    // 残缺状态推上 COS,且白白花 30s 网络 timeout。
+    if (snapshotEngine && sandbox && bootstrapOk) {
       try {
         const result = await snapshotEngine.snapshot(sandbox)
         if (process.env.OAK_DEBUG === '1') {
