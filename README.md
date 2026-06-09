@@ -129,6 +129,9 @@ for await (const e of resumed.send('还记得我的名字吗？')) { /* ... */ }
 | `cwd` | `string` | | 平台资产层根目录(skills + 项目级 CLAUDE.md 加载根) |
 | `skills` | `{ enabled?: 'all' \| string[] }` | | 启用 SDK skills 能力(需配合 `cwd`) |
 | `userMemory` | `{ enabled?: boolean }` | | 用户级长期记忆(SDK auto-memory 同步到 envId 对应 COS) |
+| `sandbox.workspaceSnapshot` | `'auto' \| 'on' \| 'off'` | | sandbox cwd 自动持久化(ags-stateful 默认 `'auto'`,需 `scope: 'shared'`) |
+| `sandbox.workspaceSnapshotTimeoutMs` | `number` | | snapshot RPC 超时,默认 `30_000`(镜像内部上限 600_000) |
+| `sandbox.workspaceInitTimeoutMs` | `number` | | bootstrap restore 超时,默认 `60_000`(镜像内部上限 1_200_000) |
 
 <details>
 <summary>配置类型定义展开</summary>
@@ -433,6 +436,38 @@ OAK 把 Claude SDK 文件系统资产分两类:
 - **项目级 subagent memory 不同步** — 仅同步 `<CLAUDE_CONFIG_DIR>/agent-memory/`(用户级)。子 agent 用 `memory: 'project'` 时不持久化,改用 `memory: 'user'`。
 
 用户级偏好(`CLAUDE.md`)与用户级 subagent memory 跨节点正常工作。
+
+## Workspace Snapshot(sandbox cwd 持久化)
+
+启用 sandbox cwd 自动持久化(适用 AGS stateful sandbox):每次 `session.send()` 结束后把工作目录打包上传 COS,下次 `startSession` 时由镜像内部 bootstrap 自动 restore,model 能读到上一轮写入的文件 — 跨进程 / 跨节点都生效。
+
+```typescript
+import { createAgent, AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
+
+const agent = createAgent({
+  envId: process.env.TCB_ENV_ID!,
+  model: 'claude-opus-4-8',
+  sandbox: {
+    runtime: new AgsStatefulSandbox(),
+    scope: 'shared',         // 必须为 'shared',否则 startSession 抛 ConfigError
+    // workspaceSnapshot 默认 'auto',ags-stateful 自动启用
+  },
+})
+```
+
+**关键约束**:`scope: 'shared'`(同 envId 共享容器,跨 session 接续工作目录)。`workspaceSnapshot: 'auto'` 时,只有 ags-stateful 沙箱会启用 — 其他 runtime 自动跳过。`'on'` 表示强制启用(非 ags-stateful 会抛 ConfigError),`'off'` 关闭。
+
+**触发**:每次 `session.send()` 结束自动 snapshot;失败 yield 一个 warning event(不抹掉 final answer,bootstrap 失败下次启动时 restore 状态可观测,见下文)。
+
+**配置**:
+- `sandbox.workspaceSnapshotTimeoutMs`(默认 `30_000`,镜像内部上限 600_000)
+- `sandbox.workspaceInitTimeoutMs`(默认 `60_000`,镜像内部上限 1_200_000)
+
+**手动 API**(可选):
+- `session.snapshotWorkspace()`:手动触发一次 snapshot(超出 send 周期时使用)
+- `session.getRestoreStatus()`:查询启动 restore 状态(`'full' | 'fresh' | 'partial' | 'failed' | null`)
+
+详见 `examples/18-workspace-snapshot.ts`(单进程)和 `examples/19-workspace-snapshot-distributed.ts`(跨节点)。
 
 ## 架构
 
