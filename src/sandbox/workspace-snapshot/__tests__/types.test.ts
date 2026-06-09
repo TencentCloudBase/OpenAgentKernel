@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { syncStatusSchema, healthResponseSchema, workspaceInitResponseSchema } from '../types.js'
+import {
+  syncStatusSchema,
+  healthResponseSchema,
+  workspaceInitResponseSchema,
+  snapshotSuccessSchema,
+  RETRYABLE_ERROR_CODES,
+} from '../types.js'
 
 describe('syncStatusSchema', () => {
   it('parses minimal valid SyncStatus', () => {
@@ -11,9 +17,10 @@ describe('syncStatusSchema', () => {
     expect(s.restored).toBe('full')
   })
 
-  it('accepts all 4 restored values', () => {
-    for (const r of ['full', 'partial', 'fresh', 'failed']) {
-      expect(() => syncStatusSchema.parse({ restored: r, restoredAt: 'x', source: 'cos' })).not.toThrow()
+  it('accepts all 4 restored values and preserves them', () => {
+    for (const r of ['full', 'partial', 'fresh', 'failed'] as const) {
+      const s = syncStatusSchema.parse({ restored: r, restoredAt: 'x', source: 'cos' })
+      expect(s.restored).toBe(r)
     }
   })
 
@@ -51,7 +58,7 @@ describe('healthResponseSchema', () => {
     expect(r.restoreStatus?.restored).toBe('full')
   })
 
-  it('extra fields are stripped (forward compat)', () => {
+  it('tolerates unknown fields (forward compat)', () => {
     const r = healthResponseSchema.parse({
       ok: true,
       restoreStatus: null,
@@ -59,6 +66,8 @@ describe('healthResponseSchema', () => {
       futureField: 123,
     })
     expect(r.ok).toBe(true)
+    // .passthrough() 保留 unknown 字段(forward-compat 关键行为)
+    expect((r as Record<string, unknown>).futureField).toBe(123)
   })
 })
 
@@ -90,7 +99,7 @@ describe('workspaceInitResponseSchema', () => {
     expect(r.result.set).toEqual(['TCB_ENV_ID'])
   })
 
-  it('extra fields are stripped (forward compat)', () => {
+  it('tolerates unknown fields in nested result (forward compat)', () => {
     const r = workspaceInitResponseSchema.parse({
       success: true,
       result: {
@@ -102,5 +111,32 @@ describe('workspaceInitResponseSchema', () => {
       },
     })
     expect(r.success).toBe(true)
+    // result 内层 .passthrough() 保留 unknown
+    expect((r.result as Record<string, unknown>).futureField).toBe('whatever')
+  })
+})
+
+describe('snapshotSuccessSchema', () => {
+  it('parses { success: true, result: { ms } }', () => {
+    const r = snapshotSuccessSchema.parse({ success: true, result: { ms: 1234 } })
+    expect(r.result.ms).toBe(1234)
+  })
+
+  it('rejects { success: false }', () => {
+    expect(() => snapshotSuccessSchema.parse({ success: false, result: { ms: 1 } })).toThrow()
+  })
+
+  it('rejects missing result.ms', () => {
+    expect(() => snapshotSuccessSchema.parse({ success: true, result: {} })).toThrow()
+  })
+})
+
+describe('RETRYABLE_ERROR_CODES', () => {
+  it('contains workspace_snapshot_failed', () => {
+    expect(RETRYABLE_ERROR_CODES.has('workspace_snapshot_failed')).toBe(true)
+  })
+
+  it('does not contain other random codes', () => {
+    expect(RETRYABLE_ERROR_CODES.has('workspace_init_failed')).toBe(false)
   })
 })
