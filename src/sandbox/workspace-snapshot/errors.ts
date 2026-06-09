@@ -1,5 +1,9 @@
 export class WorkspaceSnapshotError extends Error {
-  constructor(message: string, public readonly retryable: boolean, public readonly cause?: unknown) {
+  constructor(
+    message: string,
+    public readonly retryable: boolean,
+    public readonly cause?: unknown,
+  ) {
     super(message)
     this.name = 'WorkspaceSnapshotError'
   }
@@ -15,14 +19,20 @@ export class SandboxRestoreFailed extends Error {
 }
 
 export class SandboxRestoreTimeout extends Error {
-  constructor(message: string, public readonly timeoutMs: number) {
+  constructor(
+    message: string,
+    public readonly timeoutMs: number,
+  ) {
     super(message)
     this.name = 'SandboxRestoreTimeout'
   }
 }
 
 export class SandboxUnavailableError extends Error {
-  constructor(message: string, public readonly httpStatus: number) {
+  constructor(
+    message: string,
+    public readonly httpStatus: number,
+  ) {
     super(message)
     this.name = 'SandboxUnavailableError'
   }
