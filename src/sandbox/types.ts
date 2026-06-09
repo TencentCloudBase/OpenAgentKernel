@@ -38,7 +38,15 @@ export interface SandboxInstance {
  * - 内部负责 ensureTool（template）+ StartInstance + warmup readiness probe
  */
 export interface SandboxRuntime {
-  /** 后端标识（用于诊断日志，不参与逻辑） */
+  /**
+   * Runtime 类型标识。诊断日志 + 业务逻辑判定(如 `workspaceSnapshot: 'auto'` 模式)。
+   *
+   * 当前可识别值:
+   * - 'ags-stateful'  → AGS 沙箱 stateful 模式(支持 /api/workspace/snapshot)
+   * - 其他            → workspaceSnapshot='auto' 不启用快照
+   *
+   * 未来扩展:'ags-stateless' / 'docker-local' / 'firecracker' / 'e2b' 等。
+   */
   readonly backend: string
 
   /**

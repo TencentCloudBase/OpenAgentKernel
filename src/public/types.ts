@@ -109,6 +109,22 @@ export interface SandboxConfig {
    * 缺凭证时 cloudbase 工具会 degrade（agent 仍能用文件系统 / shell 工具）。
    */
   userCredentials?: SandboxUserCredentials | (() => Promise<SandboxUserCredentials>)
+
+  /**
+   * Spec B 新增。控制 cwd 是否在 send 边界自动快照到 COS。
+   * - 'auto'(默认):runtime.backend === 'ags-stateful' 时启用,其他 runtime 关闭
+   * - 'enabled':强制启用 — 若 runtime 不支持则 startSession 抛 ConfigError
+   * - 'disabled':显式关闭
+   * @default 'auto'
+   * @注意 启用时要求 sandbox.scope === 'shared'(详 Spec B §1.3)
+   */
+  workspaceSnapshot?: 'auto' | 'enabled' | 'disabled'
+
+  /** snapshot HTTP timeout(ms)。默认 30_000。必须 < 600_000(镜像内部限制)*/
+  workspaceSnapshotTimeoutMs?: number
+
+  /** init(含 restore)HTTP timeout(ms)。默认 60_000。必须 < 1_200_000 */
+  workspaceInitTimeoutMs?: number
 }
 
 /**
@@ -558,6 +574,12 @@ export interface Session {
 
   /** 中止当前运行 */
   abort(): Promise<void>
+
+  /** Spec B 新增。手动触发一次 workspace snapshot;workspaceSnapshot 未启用时返回 { skipped: true } */
+  snapshotWorkspace?(): Promise<{ ms: number; skipped?: boolean }>
+
+  /** Spec B 新增。查询启动 restore 的状态。null = 未启用或仍在进行中 */
+  getRestoreStatus?(): Promise<'full' | 'fresh' | 'partial' | 'failed' | null>
 }
 
 export interface SessionManagement {
