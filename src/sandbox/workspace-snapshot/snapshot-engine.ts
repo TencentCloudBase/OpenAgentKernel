@@ -39,10 +39,7 @@ export class WorkspaceSnapshotEngine {
    * - SyncStatus 拿不到(/health 5xx 或 restoreStatus 一直 null)→ 返回 null,session 继续,
    *   但 OAK 应在调用方 log 提示"无法确认 restore 状态,假装 fresh"
    */
-  async bootstrap(
-    inst: SandboxInstance,
-    args: { credentials: Record<string, string> },
-  ): Promise<SyncStatus | null> {
+  async bootstrap(inst: SandboxInstance, args: { credentials: Record<string, string> }): Promise<SyncStatus | null> {
     // 1. 触发 init(内部已等到 restoreFromCos 完成)
     await callWorkspaceInit(inst, {
       credentials: args.credentials,

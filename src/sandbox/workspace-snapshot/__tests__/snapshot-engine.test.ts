@@ -25,9 +25,7 @@ function mockInst(handlers: Record<string, () => Response>) {
     id: 'x',
     request: vi
       .fn()
-      .mockImplementation(
-        async (path: string) => handlers[path]?.() ?? new Response('not handled', { status: 404 }),
-      ),
+      .mockImplementation(async (path: string) => handlers[path]?.() ?? new Response('not handled', { status: 404 })),
     release: vi.fn(),
   }
 }
@@ -63,8 +61,7 @@ describe('WorkspaceSnapshotEngine', () => {
   it('bootstrap returns null when /health restoreStatus stays null after retries (graceful degrade)', async () => {
     const inst = mockInst({
       '/api/workspace/init': () => new Response(JSON.stringify(goodInit), { status: 200 }),
-      '/health': () =>
-        new Response(JSON.stringify({ ok: true, restoreStatus: null }), { status: 200 }),
+      '/health': () => new Response(JSON.stringify({ ok: true, restoreStatus: null }), { status: 200 }),
     })
     const e = new WorkspaceSnapshotEngine({ healthMaxAttempts: 2, healthRetryDelayMs: 0 })
     const status = await e.bootstrap(inst as any, { credentials: {} })
