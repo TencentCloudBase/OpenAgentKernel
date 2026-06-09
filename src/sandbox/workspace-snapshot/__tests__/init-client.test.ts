@@ -34,31 +34,43 @@ describe('callWorkspaceInit', () => {
 
   it('throws SandboxRestoreFailed on 5xx', async () => {
     const inst = mockInst(async () => new Response('boom', { status: 500 }))
-    await expect(callWorkspaceInit(inst as any, { credentials: {}, timeoutMs: 60_000 })).rejects.toThrow(SandboxRestoreFailed)
+    await expect(callWorkspaceInit(inst as any, { credentials: {}, timeoutMs: 60_000 })).rejects.toThrow(
+      SandboxRestoreFailed,
+    )
   })
 
   it('throws SandboxRestoreFailed when body schema mismatch', async () => {
-    const inst = mockInst(async () =>
-      new Response(JSON.stringify({ success: false, msg: 'unexpected shape' }), { status: 200 }))
-    await expect(callWorkspaceInit(inst as any, { credentials: {}, timeoutMs: 60_000 })).rejects.toThrow(SandboxRestoreFailed)
+    const inst = mockInst(
+      async () => new Response(JSON.stringify({ success: false, msg: 'unexpected shape' }), { status: 200 }),
+    )
+    await expect(callWorkspaceInit(inst as any, { credentials: {}, timeoutMs: 60_000 })).rejects.toThrow(
+      SandboxRestoreFailed,
+    )
   })
 
   it('throws SandboxRestoreTimeout when timeout exceeded', async () => {
-    const inst = mockInst(async (_p, init) =>
-      new Promise((_, reject) => {
-        init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
-      }))
-    await expect(callWorkspaceInit(inst as any, { credentials: {}, timeoutMs: 100 })).rejects.toThrow(SandboxRestoreTimeout)
+    const inst = mockInst(
+      async (_p, init) =>
+        new Promise((_, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+        }),
+    )
+    await expect(callWorkspaceInit(inst as any, { credentials: {}, timeoutMs: 100 })).rejects.toThrow(
+      SandboxRestoreTimeout,
+    )
   })
 
   it('sends credentials in body.env', async () => {
     let capturedBody: any
     const inst = mockInst(async (_p, init) => {
       capturedBody = JSON.parse(init?.body as string)
-      return new Response(JSON.stringify({
-        success: true,
-        result: { workspace: '/home/user', git: { enabled: false, hasGit: false }, env: {} },
-      }), { status: 200 })
+      return new Response(
+        JSON.stringify({
+          success: true,
+          result: { workspace: '/home/user', git: { enabled: false, hasGit: false }, env: {} },
+        }),
+        { status: 200 },
+      )
     })
     await callWorkspaceInit(inst as any, {
       credentials: { TCB_ENV_ID: 'env-1', TCB_SECRET_ID: 's' },
