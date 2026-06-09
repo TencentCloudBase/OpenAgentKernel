@@ -15,6 +15,7 @@ import * as path from 'node:path'
 import { existsSync } from 'node:fs'
 import { buildClaudeQueryOptions } from '../agent-builder.js'
 import type { AgentConfig } from '../../public/types.js'
+import type { SandboxRuntime } from '../../sandbox/types.js'
 
 const baseConfig: AgentConfig = {
   envId: 'env-test',
@@ -232,5 +233,85 @@ describe('buildClaudeQueryOptions — userMemory', () => {
       // CLAUDE_CONFIG_DIR 也跟着清空(graceful degrade 全套不留半截状态)
       expect(options.env?.CLAUDE_CONFIG_DIR).toBeUndefined()
     }).not.toThrow()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────
+// Spec B(workspace snapshot)
+// ─────────────────────────────────────────────────────────────────
+
+describe('buildClaudeQueryOptions — workspaceSnapshot', () => {
+  const goodRuntime: SandboxRuntime = {
+    backend: 'ags-stateful',
+    acquire: vi.fn(),
+  }
+  const otherRuntime: SandboxRuntime = {
+    backend: 'docker-local',
+    acquire: vi.fn(),
+  }
+
+  it('returns snapshotEngine when sandbox.runtime is ags-stateful and scope=shared (auto)', () => {
+    const result = buildClaudeQueryOptions({
+      ...baseConfig,
+      sandbox: { runtime: goodRuntime, scope: 'shared', workspaceSnapshot: 'auto' },
+    })
+    expect(result.snapshotEngine).toBeDefined()
+  })
+
+  it('returns no snapshotEngine when workspaceSnapshot=disabled', () => {
+    const result = buildClaudeQueryOptions({
+      ...baseConfig,
+      sandbox: { runtime: goodRuntime, scope: 'shared', workspaceSnapshot: 'disabled' },
+    })
+    expect(result.snapshotEngine).toBeUndefined()
+  })
+
+  it('returns no snapshotEngine when runtime backend != ags-stateful and mode=auto', () => {
+    const result = buildClaudeQueryOptions({
+      ...baseConfig,
+      sandbox: { runtime: otherRuntime, scope: 'shared', workspaceSnapshot: 'auto' },
+    })
+    expect(result.snapshotEngine).toBeUndefined()
+  })
+
+  it('throws ConfigError when mode=enabled but runtime backend not supported', () => {
+    expect(() =>
+      buildClaudeQueryOptions({
+        ...baseConfig,
+        sandbox: { runtime: otherRuntime, scope: 'shared', workspaceSnapshot: 'enabled' },
+      }),
+    ).toThrow(/does not support snapshot/)
+  })
+
+  it('throws ConfigError when snapshot enabled but scope=session', () => {
+    expect(() =>
+      buildClaudeQueryOptions({
+        ...baseConfig,
+        sandbox: { runtime: goodRuntime, scope: 'session', workspaceSnapshot: 'auto' },
+      }),
+    ).toThrow(/scope='shared'/)
+  })
+
+  it('throws ConfigError when snapshot enabled but scope undefined (defaults to session)', () => {
+    expect(() =>
+      buildClaudeQueryOptions({
+        ...baseConfig,
+        sandbox: { runtime: goodRuntime, workspaceSnapshot: 'auto' },
+      }),
+    ).toThrow(/scope='shared'/)
+  })
+
+  it('passes timeouts to engine constructor (does not throw)', () => {
+    const result = buildClaudeQueryOptions({
+      ...baseConfig,
+      sandbox: {
+        runtime: goodRuntime,
+        scope: 'shared',
+        workspaceSnapshot: 'enabled',
+        workspaceSnapshotTimeoutMs: 5_000,
+        workspaceInitTimeoutMs: 10_000,
+      },
+    })
+    expect(result.snapshotEngine).toBeDefined()
   })
 })

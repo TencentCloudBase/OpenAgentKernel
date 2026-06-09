@@ -29,11 +29,12 @@ import type {
   SettingSource,
 } from '@anthropic-ai/claude-agent-sdk'
 import { ClaudeHomeSyncEngine, CloudBaseCosClaudeHomeStore, deriveClaudeConfigDir } from '../claude-home/index.js'
-import { InvalidConfigError } from '../internal/errors.js'
+import { ConfigError, InvalidConfigError } from '../internal/errors.js'
 import { createPreToolUsePermissionHook, type PreToolUseHookLocalState } from '../permissions/hooks.js'
-import type { AgentConfig } from '../public/types.js'
+import type { AgentConfig, SandboxConfig } from '../public/types.js'
 import { createSandboxMcpServer } from '../sandbox/sandbox-tools.js'
-import type { SandboxInstance } from '../sandbox/types.js'
+import type { SandboxInstance, SandboxRuntime } from '../sandbox/types.js'
+import { WorkspaceSnapshotEngine } from '../sandbox/workspace-snapshot/index.js'
 import { resolveCredential, type ResolvedCredential } from './credential-factory.js'
 
 /**
@@ -64,6 +65,14 @@ export interface BuiltClaudeQueryParams {
    *   send-end (含 abort) → syncEngine.pushOnSendEnd()
    */
   syncEngine?: ClaudeHomeSyncEngine
+  /**
+   * Spec B 新增。当 sandbox.workspaceSnapshot 解析为启用时返回。
+   * 调用方(create-agent.ts Task 8)负责:
+   *   - startSession 时调用 engine.bootstrap(inst, { credentials })
+   *   - send-end 后调用 engine.snapshot(inst)
+   *   - session.snapshotWorkspace() / getRestoreStatus() 转发到 engine
+   */
+  snapshotEngine?: WorkspaceSnapshotEngine
 }
 
 /**
@@ -255,6 +264,18 @@ export function buildClaudeQueryOptions(
     }
   })()
 
+  // ── Spec B:workspace snapshot 引擎装配 ──
+  // resolveSnapshotMode 决定是否启用、做 scope 校验,失败抛 ConfigError。
+  // 启用时构造 WorkspaceSnapshotEngine,实际触发(bootstrap / snapshot)由 create-agent
+  // 在 startSession / send-end 时挂载(Task 8)。
+  const snapshotEnabled = resolveSnapshotMode(config.sandbox)
+  const snapshotEngine = snapshotEnabled
+    ? new WorkspaceSnapshotEngine({
+        snapshotTimeoutMs: config.sandbox?.workspaceSnapshotTimeoutMs,
+        initTimeoutMs: config.sandbox?.workspaceInitTimeoutMs,
+      })
+    : undefined
+
   const options: ClaudeOptions = {
     model: credential.modelId,
     env,
@@ -290,10 +311,56 @@ export function buildClaudeQueryOptions(
     tools: config.skills?.enabled !== undefined ? ['Skill'] : [],
   }
 
-  return { options, credential, syncEngine }
+  return { options, credential, syncEngine, snapshotEngine }
 }
 
 // ─── 辅助 ────────────────────────────────────────────────────────
+
+/**
+ * Spec B:解析 workspaceSnapshot 模式 + 校验 scope。
+ *
+ * 决策表(spec §1.3 / §2.4):
+ *   workspaceSnapshot   runtime.backend       结果
+ *   ──────────────────  ────────────────────  ──────────────────────
+ *   'disabled'          *                     不启用
+ *   'auto' / undefined  'ags-stateful'        启用(校验 scope)
+ *   'auto' / undefined  其他                   不启用(silent)
+ *   'enabled'           'ags-stateful'        启用(校验 scope)
+ *   'enabled'           其他                   throw ConfigError
+ *
+ * 启用后 scope 必须是 'shared'(同 envId 共享容器,跨 session 接续 cwd),
+ * 否则 throw ConfigError(包括 scope='session' 和 scope undefined 默认场景)。
+ */
+function resolveSnapshotMode(sandboxConfig: SandboxConfig | undefined): boolean {
+  const mode = sandboxConfig?.workspaceSnapshot ?? 'auto'
+  const scope = sandboxConfig?.scope ?? 'session'
+  const runtime = sandboxConfig?.runtime as SandboxRuntime | undefined
+  const backend = runtime?.backend
+  const supportsSnapshot = backend === 'ags-stateful'
+
+  if (mode === 'disabled') return false
+
+  // mode='enabled' but runtime can't snapshot → 显式抛错(用户主动要求,但能力不匹配)
+  if (mode === 'enabled' && !supportsSnapshot) {
+    throw new ConfigError(
+      `workspaceSnapshot='enabled' but runtime.backend='${backend}' does not support snapshot. ` +
+        `Use AgsStatefulSandbox or set workspaceSnapshot='disabled'.`,
+    )
+  }
+
+  // mode='auto' + 不支持 snapshot 的 runtime → 静默不启用
+  if (mode === 'auto' && !supportsSnapshot) return false
+
+  // 到这里 mode 是 'enabled' 或 'auto',且 backend 支持 snapshot → 必须 scope='shared'
+  if (scope !== 'shared') {
+    throw new ConfigError(
+      `workspaceSnapshot 要求 sandbox.scope='shared'(同 envId 共享容器,跨 session 接续 cwd),` +
+        `当前 scope='${scope}'。改为 createAgent({ sandbox: { scope: 'shared', ... } })。` +
+        `详见 Spec B §1.3。`,
+    )
+  }
+  return true
+}
 
 /**
  * 校验 mcpServers：在交给 SDK 前做一些显而易见的预检，
