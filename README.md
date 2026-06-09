@@ -129,7 +129,7 @@ for await (const e of resumed.send('还记得我的名字吗？')) { /* ... */ }
 | `cwd` | `string` | | 平台资产层根目录(skills + 项目级 CLAUDE.md 加载根) |
 | `skills` | `{ enabled?: 'all' \| string[] }` | | 启用 SDK skills 能力(需配合 `cwd`) |
 | `userMemory` | `{ enabled?: boolean }` | | 用户级长期记忆(SDK auto-memory 同步到 envId 对应 COS) |
-| `sandbox.workspaceSnapshot` | `'auto' \| 'on' \| 'off'` | | sandbox cwd 自动持久化(ags-stateful 默认 `'auto'`,需 `scope: 'shared'`) |
+| `sandbox.workspaceSnapshot` | `'auto' \| 'enabled' \| 'disabled'` | | sandbox cwd 自动持久化(ags-stateful 默认 `'auto'`,需 `scope: 'shared'`) |
 | `sandbox.workspaceSnapshotTimeoutMs` | `number` | | snapshot RPC 超时,默认 `30_000`(镜像内部上限 600_000) |
 | `sandbox.workspaceInitTimeoutMs` | `number` | | bootstrap restore 超时,默认 `60_000`(镜像内部上限 1_200_000) |
 
@@ -455,7 +455,7 @@ const agent = createAgent({
 })
 ```
 
-**关键约束**:`scope: 'shared'`(同 envId 共享容器,跨 session 接续工作目录)。`workspaceSnapshot: 'auto'` 时,只有 ags-stateful 沙箱会启用 — 其他 runtime 自动跳过。`'on'` 表示强制启用(非 ags-stateful 会抛 ConfigError),`'off'` 关闭。
+**关键约束**:`scope: 'shared'`(同 envId 共享容器,跨 session 接续工作目录)。`workspaceSnapshot: 'auto'` 时,只有 ags-stateful 沙箱会启用 — 其他 runtime 自动跳过。`'enabled'` 表示强制启用(非 ags-stateful 会抛 ConfigError),`'disabled'` 关闭。
 
 **触发**:每次 `session.send()` 结束自动 snapshot;失败 yield 一个 warning event(不抹掉 final answer,bootstrap 失败下次启动时 restore 状态可观测,见下文)。
 
