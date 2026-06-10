@@ -479,6 +479,16 @@ async function createTool(envId: string, cred: ResolvedCredentials, cos: Resolve
     ]
   }
 
+  if (process.env.OAK_DEBUG === '1') {
+    // eslint-disable-next-line no-console
+    console.error(`[ags][CreateSandboxTool] payload=${JSON.stringify(payload, null, 2)}`)
+  }
+
+  if (process.env.OAK_DEBUG === '1') {
+    // eslint-disable-next-line no-console
+    console.error(`[ags][CreateSandboxTool] payload=${JSON.stringify(payload, null, 2)}`)
+  }
+
   const resp = await callAgsApi('CreateSandboxTool', payload, cred, envId)
 
   const toolId =
@@ -517,6 +527,18 @@ async function startInstance(args: {
     const masterKey = process.env.OAK_SECRET_MASTER_KEY
     if (masterKey) env.push({ Name: 'SECRET_MASTER_KEY', Value: masterKey })
     payload.CustomConfiguration = { Env: env }
+  }
+
+  // OAK_DEBUG=1 时把完整 payload 打 stderr,便于跟 AGS 一条龙 §5 例子对照排查
+  if (process.env.OAK_DEBUG === '1') {
+    // eslint-disable-next-line no-console
+    console.error(`[ags][StartSandboxInstance] payload=${JSON.stringify(payload, null, 2)}`)
+  }
+
+  // OAK_DEBUG=1 时把完整 payload 打 stderr,便于跟 AGS 一条龙 §5 例子对照排查
+  if (process.env.OAK_DEBUG === '1') {
+    // eslint-disable-next-line no-console
+    console.error(`[ags][StartSandboxInstance] payload=${JSON.stringify(payload, null, 2)}`)
   }
 
   const resp = await callAgsApi('StartSandboxInstance', payload, cred, envId)
