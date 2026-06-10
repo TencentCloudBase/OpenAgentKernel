@@ -196,7 +196,7 @@ describe('AgsStatefulSandbox cosMount = "auto" with discovered bucket', () => {
         Name: 'oak-cos-workspace',
         StorageSource: {
           Cos: {
-            Endpoint: 'cos.ap-shanghai.myqcloud.com',
+            Endpoint: 'oak-test-1234567890.cos.ap-shanghai.myqcloud.com',
             BucketName: 'oak-test-1234567890',
             BucketPath: '/oak-workspaces',
           },
@@ -228,10 +228,7 @@ describe('AgsStatefulSandbox cosMount = "auto" with discovered bucket', () => {
 
     expect(uploadFileMock).toHaveBeenCalledTimes(2)
     // 第一次:BucketPath/.keep(在 CreateSandboxTool 之前)
-    expect(uploadFileMock).toHaveBeenNthCalledWith(
-      1,
-      expect.objectContaining({ cloudPath: 'oak-workspaces/.keep' }),
-    )
+    expect(uploadFileMock).toHaveBeenNthCalledWith(1, expect.objectContaining({ cloudPath: 'oak-workspaces/.keep' }))
     // 第二次:SubPath/.keep(在 StartSandboxInstance 之前)
     expect(uploadFileMock).toHaveBeenNthCalledWith(
       2,
@@ -246,9 +243,7 @@ describe('AgsStatefulSandbox cosMount = "auto" with discovered bucket', () => {
 
     // 复用已有 tool,只建 SubPath/.keep,不重建 BucketPath/.keep
     expect(uploadFileMock).toHaveBeenCalledTimes(1)
-    expect(uploadFileMock).toHaveBeenCalledWith(
-      expect.objectContaining({ cloudPath: 'oak-workspaces/alice/.keep' }),
-    )
+    expect(uploadFileMock).toHaveBeenCalledWith(expect.objectContaining({ cloudPath: 'oak-workspaces/alice/.keep' }))
   })
 
   it('falls back to SubPath="default" when ctx.userId is undefined', async () => {
@@ -321,6 +316,136 @@ describe('AgsStatefulSandbox cosMount = "auto" with NO storage', () => {
     await expect(
       runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' }),
     ).rejects.toThrow(/no default storage bucket/)
+  })
+})
+
+describe('AgsStatefulSandbox cosMountOverride', () => {
+  it('uses cosMountOverride and skips env.getEnvInfo discovery', async () => {
+    const { records } = setupMocks({ toolFound: false })
+    const runtime = new AgsStatefulSandbox({
+      cosMountOverride: {
+        bucketName: 'ags-trw-shanghai-1253192607',
+        region: 'ap-shanghai',
+        bucketPath: '/test-sync-out',
+      },
+    })
+    await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
+
+    // 不调 env.getEnvInfo(走 override 短路)
+    expect(getEnvInfoMock).not.toHaveBeenCalled()
+
+    const create = findRequest(records, 'CreateSandboxTool')
+    expect(create!.StorageMounts).toEqual([
+      {
+        Name: 'oak-cos-workspace',
+        StorageSource: {
+          Cos: {
+            Endpoint: 'ags-trw-shanghai-1253192607.cos.ap-shanghai.myqcloud.com',
+            BucketName: 'ags-trw-shanghai-1253192607',
+            BucketPath: '/test-sync-out',
+          },
+        },
+        MountPath: '/mnt/workspace',
+        ReadOnly: false,
+      },
+    ])
+  })
+
+  it('cosMountOverride defaults bucketPath to /oak-workspaces when not provided', async () => {
+    const { records } = setupMocks({ toolFound: false })
+    const runtime = new AgsStatefulSandbox({
+      cosMountOverride: {
+        bucketName: 'my-bucket-1253192607',
+        region: 'ap-guangzhou',
+      },
+    })
+    await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
+
+    const create = findRequest(records, 'CreateSandboxTool')
+    const cos = (create!.StorageMounts as Array<Record<string, Record<string, Record<string, unknown>>>>)[0]
+      .StorageSource.Cos
+    expect(cos.BucketPath).toBe('/oak-workspaces')
+    expect(cos.Endpoint).toBe('my-bucket-1253192607.cos.ap-guangzhou.myqcloud.com')
+  })
+
+  it('cosMountOverride respects cosMount="disabled" (override ignored)', async () => {
+    const { records } = setupMocks({ toolFound: false })
+    const runtime = new AgsStatefulSandbox({
+      cosMount: 'disabled',
+      cosMountOverride: {
+        bucketName: 'should-be-ignored',
+        region: 'ap-shanghai',
+      },
+    })
+    await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
+
+    const create = findRequest(records, 'CreateSandboxTool')
+    expect(create!.StorageMounts).toBeUndefined()
+  })
+})
+
+describe('AgsStatefulSandbox cosMountOverride', () => {
+  it('uses cosMountOverride and skips env.getEnvInfo discovery', async () => {
+    const { records } = setupMocks({ toolFound: false })
+    const runtime = new AgsStatefulSandbox({
+      cosMountOverride: {
+        bucketName: 'ags-trw-shanghai-1253192607',
+        region: 'ap-shanghai',
+        bucketPath: '/test-sync-out',
+      },
+    })
+    await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
+
+    // 不调 env.getEnvInfo(走 override 短路)
+    expect(getEnvInfoMock).not.toHaveBeenCalled()
+
+    const create = findRequest(records, 'CreateSandboxTool')
+    expect(create!.StorageMounts).toEqual([
+      {
+        Name: 'oak-cos-workspace',
+        StorageSource: {
+          Cos: {
+            Endpoint: 'ags-trw-shanghai-1253192607.cos.ap-shanghai.myqcloud.com',
+            BucketName: 'ags-trw-shanghai-1253192607',
+            BucketPath: '/test-sync-out',
+          },
+        },
+        MountPath: '/mnt/workspace',
+        ReadOnly: false,
+      },
+    ])
+  })
+
+  it('cosMountOverride defaults bucketPath to /oak-workspaces when not provided', async () => {
+    const { records } = setupMocks({ toolFound: false })
+    const runtime = new AgsStatefulSandbox({
+      cosMountOverride: {
+        bucketName: 'my-bucket-1253192607',
+        region: 'ap-guangzhou',
+      },
+    })
+    await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
+
+    const create = findRequest(records, 'CreateSandboxTool')
+    const cos = (create!.StorageMounts as Array<Record<string, Record<string, Record<string, unknown>>>>)[0]
+      .StorageSource.Cos
+    expect(cos.BucketPath).toBe('/oak-workspaces')
+    expect(cos.Endpoint).toBe('my-bucket-1253192607.cos.ap-guangzhou.myqcloud.com')
+  })
+
+  it('cosMountOverride respects cosMount="disabled" (override ignored)', async () => {
+    const { records } = setupMocks({ toolFound: false })
+    const runtime = new AgsStatefulSandbox({
+      cosMount: 'disabled',
+      cosMountOverride: {
+        bucketName: 'should-be-ignored',
+        region: 'ap-shanghai',
+      },
+    })
+    await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
+
+    const create = findRequest(records, 'CreateSandboxTool')
+    expect(create!.StorageMounts).toBeUndefined()
   })
 })
 

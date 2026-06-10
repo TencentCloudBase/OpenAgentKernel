@@ -107,6 +107,29 @@ export interface AgsStatefulSandboxOptions {
    * 详见 Spec B §1.3 和 cosMount addendum。
    */
   cosMount?: 'auto' | 'enabled' | 'disabled'
+
+  /**
+   * 高级:显式覆盖 COS 挂载配置(不使用 envId 默认 storage)。
+   *
+   * 默认 OAK 用 manager-node `env.getEnvInfo` 自动发现 envId 关联的云开发 storage bucket。
+   * 这个 bucket 是云开发(TCB)环境产物,跟"独立 COS 桶"在权限/网络/账号归属上可能有
+   * 区别。若发现自动发现的桶不能 mount(eg 报 `storage mount failed`),可以用本字段
+   * 显式指向一个**手工授权过的独立 COS 桶**,绕过云开发 storage 的复杂性。
+   *
+   * 提供时 OAK **跳过自动发现**,直接用这个值。`bucketPath` 默认 `/oak-workspaces`。
+   *
+   * 例:
+   *   cosMountOverride: {
+   *     bucketName: 'ags-trw-shanghai-1253192607',
+   *     region: 'ap-shanghai',
+   *     bucketPath: '/test-sync-out',  // optional,默认 /oak-workspaces
+   *   }
+   */
+  cosMountOverride?: {
+    bucketName: string
+    region: string
+    bucketPath?: string
+  }
 }
 
 /** 解析后的 COS 挂载配置(per-acquire,因为依赖 envId) */
@@ -238,7 +261,11 @@ async function discoverCosBucket(cred: ResolvedCredentials, envId: string): Prom
     const region = String(cos.Region ?? '')
     if (!bucketName || !region) return null
     return {
-      endpoint: `cos.${region}.myqcloud.com`,
+      // Endpoint 必须带桶名前缀:`{BucketName}.cos.{Region}.myqcloud.com`
+      // (对照 AGS 平台已工作的 ags-cos-trw 配置:
+      //   ags-trw-shanghai-1253192607.cos.ap-shanghai.myqcloud.com)
+      // 不带桶名 mount 时 hostname 解析失败 → "storage mount failed"
+      endpoint: `${bucketName}.cos.${region}.myqcloud.com`,
       bucketName,
       bucketPath: COS_BUCKET_PATH,
     }
@@ -887,23 +914,39 @@ export class AgsStatefulSandbox implements SandboxRuntime {
 
     // ── Spec B / cosMount addendum:解析 COS 配置 ──────────────────
     // - 'disabled' → 跳过发现,cos = null,不传 StorageMounts/MountOptions
+    // - cosMountOverride 提供 → 跳过自动发现,直接用业务方指定的桶
+    //   (用于"云开发默认 storage 不能 mount"等场景,绕到独立 COS 桶)
     // - 'auto' / 'enabled' → 用 manager-node 自动发现 envId 默认 storage bucket
     // - 'enabled' 且发现失败 → ConfigError(早 fail)
     let cos: ResolvedCosMount | null = null
     if (cosMode !== 'disabled') {
-      ctx.onProgress?.({ phase: 'cos_lookup', message: 'discovering envId default storage bucket...' })
-      cos = await discoverCosBucket(cred, ctx.envId)
-      if (!cos && cosMode === 'enabled') {
-        throw new ConfigError(
-          `cosMount='enabled' but envId='${ctx.envId}' has no default storage bucket. ` +
-            `Either enable CloudBase storage for this envId, or set cosMount: 'disabled' / 'auto'.`,
-        )
-      }
-      if (cos) {
+      const override = this.options.cosMountOverride
+      if (override) {
+        cos = {
+          endpoint: `${override.bucketName}.cos.${override.region}.myqcloud.com`,
+          bucketName: override.bucketName,
+          bucketPath: override.bucketPath ?? COS_BUCKET_PATH,
+        }
         ctx.onProgress?.({
           phase: 'cos_resolved',
-          message: `cos bucket=${cos.bucketName} bucketPath=${cos.bucketPath}`,
+          message: `cos override bucket=${cos.bucketName} bucketPath=${cos.bucketPath}`,
         })
+      } else {
+        ctx.onProgress?.({ phase: 'cos_lookup', message: 'discovering envId default storage bucket...' })
+        cos = await discoverCosBucket(cred, ctx.envId)
+        if (!cos && cosMode === 'enabled') {
+          throw new ConfigError(
+            `cosMount='enabled' but envId='${ctx.envId}' has no default storage bucket. ` +
+              `Either enable CloudBase storage for this envId, or set cosMount: 'disabled' / 'auto', ` +
+              `or pass cosMountOverride: { bucketName, region } to use a specific COS bucket.`,
+          )
+        }
+        if (cos) {
+          ctx.onProgress?.({
+            phase: 'cos_resolved',
+            message: `cos bucket=${cos.bucketName} bucketPath=${cos.bucketPath}`,
+          })
+        }
       }
     }
 
