@@ -463,6 +463,12 @@ const agent = createAgent({
 - `sandbox.workspaceSnapshotTimeoutMs`(默认 `30_000`,镜像内部上限 600_000)
 - `sandbox.workspaceInitTimeoutMs`(默认 `60_000`,镜像内部上限 1_200_000)
 
+**镜像选型(重要)**:`workspaceSnapshot` 启用时,沙箱镜像必须用 trw **minimal** preset,**不能**用 vibecoding preset。
+
+- vibecoding 镜像在 `/home/user` 下预装 41MB `node_modules.tar.gz` + 349 个 node_modules 子目录(由 `seedCodingTemplate` 在首次 boot 时拷入),snapshot 时 trw `runZstdList` 读取 tar/zstd stderr 撞 1MB 上限抛 `ENOBUFS` → 500。trw 主线 COS 验收只覆盖 minimal preset(参 trw `AGS一条龙.md` §4 Tool 分工 + `infra/vibecoding-sync.md` §72)。
+- 配置方式:`OAK_SANDBOX_IMAGE` 环境变量,或 `new AgsStatefulSandbox({ image })`。OAK 默认 fallback 已是 minimal preset 镜像,但业务下游若覆盖了该值,需自检不要回退到 vibecoding tag。
+- 标识方法:tag 末尾后缀 `-minimal` / `-magent` / `-vibecoding` / `-full` 表明 preset(参 trw 一条龙 §3 命名规则 `YYMMDD-HHMM-随机-<preset>`)。
+
 **手动 API**(可选):
 - `session.snapshotWorkspace()`:手动触发一次 snapshot(超出 send 周期时使用)
 - `session.getRestoreStatus()`:查询启动 restore 状态(`'full' | 'fresh' | 'partial' | 'failed' | null`)
