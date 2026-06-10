@@ -91,4 +91,25 @@ describe('WorkspaceSnapshotEngine', () => {
     const e = new WorkspaceSnapshotEngine()
     expect(await e.getRestoreStatus(inst as any)).toBe('partial')
   })
+
+  // 回归:undefined 字段不能覆盖默认值 —— `{ ...DEFAULT, ...opts }` 模式会让显式
+  // undefined 覆盖默认值,导致 setTimeout(undefined) 立即触发 → init 抛
+  // "init timeout after undefinedms"。constructor 现在用 `??` 逐字段 fallback。
+  it('explicit undefined options fall back to defaults (not coerce to undefined)', async () => {
+    const inst = mockInst({
+      '/api/workspace/init': () => new Response(JSON.stringify(goodInit), { status: 200 }),
+      '/health': () => new Response(JSON.stringify(fullHealth), { status: 200 }),
+    })
+    // 模拟调用方写 `{ initTimeoutMs: config?.workspaceInitTimeoutMs }` 但 config 没设
+    const e = new WorkspaceSnapshotEngine({
+      initTimeoutMs: undefined,
+      snapshotTimeoutMs: undefined,
+      retryBackoffMs: undefined,
+      healthMaxAttempts: undefined,
+      healthRetryDelayMs: 0, // 唯一显式给的值,避免实际等
+    })
+    // 必须正常 bootstrap;若 undefined 透到 init-client,setTimeout 会立即触发 → reject
+    const status = await e.bootstrap(inst as any, { credentials: {} })
+    expect(status?.restored).toBe('full')
+  })
 })

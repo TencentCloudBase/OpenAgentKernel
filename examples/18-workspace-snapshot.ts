@@ -4,17 +4,12 @@
  * 验证目标:让 model 在 sandbox cwd 写文件,session.send 结束自动 snapshot 到 COS;
  *          重新 startSession 时自动 restore,model 能读到上次写的内容。
  *
- * 流程:
- *   1. 第一轮 createAgent → startSession(同 userId)→ 让模型写 hello.txt
- *      → send 结束触发 send-end snapshot(via WorkspaceSnapshotEngine.snapshot)
- *      → abort 释放 sandbox
- *   2. 第二轮 createAgent → startSession(同 userId)→ bootstrap 期间从 COS restore
- *      → 模型 cat hello.txt 读到上一轮写入的内容
- *
- * 运行前提:
- *   - .env.local 配置 TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY
- *   - envId 对应的 CloudBase 已开通 AGS sandbox tool(workspace snapshot 依赖
- *     sandbox runtime /api/workspace/init + /api/workspace/snapshot)
+ * 注意 — 单进程 reuse 限制:
+ *   AgsStatefulSandbox 在同 envId + scope=shared 下,第二轮 startSession 会
+ *   reuse 同一物理 AGS 容器(ensureSharedInstance 检查 RUNNING 实例就直接复用)。
+ *   也就是说 hello.txt 在第二轮**物理上还在**容器 /home/user 里,
+ *   "模型读到内容"只能证明 send-end snapshot 没破坏 workspace,
+ *   **不能**证明 COS restore 链路。要验真 restore 请跑 example 19(跨进程)。
  *
  * Run:
  *   OAK_DEBUG=1 pnpm dlx tsx packages/open-agent-kernel/examples/18-workspace-snapshot.ts
@@ -37,33 +32,80 @@ function buildModel() {
     : (customModelId ?? 'claude-opus-4-8')
 }
 
-async function runOne(userId: string, prompt: string) {
+/**
+ * 把任意 event 简短打印 — 展示 SessionEvent 全貌而不只 message_delta。
+ * 这是 debug 用,生产代码请按 type 分支处理。
+ */
+function fmtEvent(ev: unknown): string {
+  if (typeof ev !== 'object' || ev === null) return String(ev)
+  const e = ev as Record<string, unknown>
+  const type = String(e.type ?? '<no-type>')
+  switch (type) {
+    case 'message_delta':
+      return `Δ ${JSON.stringify(e.text)}`
+    case 'message_complete':
+      return `▣ message_complete len=${(e.text as string | undefined)?.length ?? 0}`
+    case 'tool_call': {
+      const inputStr = JSON.stringify(e.input)
+      const trim = inputStr.length > 200 ? `${inputStr.slice(0, 200)}…` : inputStr
+      return `→ tool_call ${e.toolName} ${trim}`
+    }
+    case 'tool_result': {
+      const out = JSON.stringify(e.output)
+      const trim = out.length > 300 ? `${out.slice(0, 300)}…` : out
+      return `← tool_result ${e.toolName} isError=${e.isError} ${trim}`
+    }
+    case 'error': {
+      const err = e.error as { name?: string; message?: string } | undefined
+      return `✗ error ${err?.name}: ${err?.message}`
+    }
+    default:
+      return `· ${type} ${JSON.stringify(e).slice(0, 200)}`
+  }
+}
+
+async function runOne(label: string, userId: string, prompt: string, opts: { manualSnapshotAfter?: boolean } = {}) {
+  console.log(`\n══════ ${label} ══════`)
   const agent = createAgent({
     envId: process.env.TCB_ENV_ID!,
     model: buildModel(),
     systemPrompt: 'You are a coding assistant with shell + filesystem tools. 请用工具完成任务,不要编造。',
     sandbox: {
       runtime: new AgsStatefulSandbox(),
-      // workspaceSnapshot 要求 scope=shared(spec B §1.3);'session' 会让 OAK 拒绝启用。
       scope: 'shared',
-      // workspaceSnapshot 默认 'auto' — ags-stateful runtime 自动启用,这里不必显式传。
     },
   })
 
+  const t0 = Date.now()
   const session = await agent.startSession({ userId })
   const restoreStatus = (await session.getRestoreStatus?.()) ?? null
-  console.log(`\n[user=${userId}] restoreStatus=${restoreStatus}`)
-  console.log(`[user=${userId}] sending: ${prompt}`)
-  process.stdout.write(`[user=${userId}] assistant: `)
+  console.log(`[${label}] startSession ms=${Date.now() - t0}  restoreStatus=${restoreStatus}`)
+  console.log(`[${label}] >> prompt: ${prompt}`)
+
+  const tSend = Date.now()
+  let eventCount = 0
+  let assistantText = ''
   for await (const event of session.send(prompt)) {
-    if (event.type === 'message_delta') process.stdout.write(event.text)
-    // workspace snapshot 失败以 'error' 事件 + name='WorkspaceSnapshotFailedWarning' 透出
-    // (见 src/public/create-agent.ts send-end snapshot 分支),非致命,只 log 不抛。
-    if (event.type === 'error' && event.error?.name === 'WorkspaceSnapshotFailedWarning') {
-      console.warn(`\n[warning] workspace snapshot failed: ${event.error.message}`)
+    eventCount += 1
+    console.log(`[${label}][evt#${eventCount}] ${fmtEvent(event)}`)
+    if (event.type === 'message_delta') assistantText += event.text
+    if (event.type === 'message_complete') assistantText = event.text // 完整版覆盖
+  }
+  console.log(
+    `[${label}] send-end ms=${Date.now() - tSend}  events=${eventCount}  finalText=${JSON.stringify(assistantText.slice(0, 300))}`,
+  )
+
+  if (opts.manualSnapshotAfter && session.snapshotWorkspace) {
+    try {
+      const t = Date.now()
+      const r = await session.snapshotWorkspace()
+      console.log(`[${label}] manual snapshot OK ms=${Date.now() - t}  result=${JSON.stringify(r)}`)
+    } catch (err) {
+      console.warn(`[${label}] manual snapshot failed: ${(err as Error).message}`)
     }
   }
-  console.log(`\n[user=${userId}] aborting (final snapshot 已在 send finally 完成)...`)
+
+  console.log(`[${label}] aborting...`)
   await session.abort()
 }
 
@@ -71,16 +113,30 @@ async function main() {
   loadEnv()
   const userId = `ws-demo-${Date.now()}`
 
-  // 第一轮:写文件 → send 结束 → 自动 snapshot
-  await runOne(userId, '请在工作区根目录创建一个 hello.txt,内容是 "OAK Spec B works!"。完成后用 ls 确认。')
+  // 第一轮:让模型用 Write 工具创建 hello.txt
+  await runOne(
+    'round-1 (write)',
+    userId,
+    '请使用 Write 工具在工作区根目录(也就是当前 cwd /home/user)创建一个名为 hello.txt 的文件,文件内容是字符串 OAK Spec B works!,然后用 ls -la 查看确认。完成后简短报告。',
+    { manualSnapshotAfter: true },
+  )
 
-  // 等几秒让 sandbox 端 periodic sync 也跑一轮(非必须,只为更稳)
+  console.log('\n[main] sleeping 3s 让 sandbox 端 periodic sync / cosfs flush 充分进行...')
   await new Promise((r) => setTimeout(r, 3_000))
 
-  // 第二轮:全新 startSession → bootstrap restore → 读上一轮的 hello.txt
-  await runOne(userId, '请用 cat 读取工作区根目录的 hello.txt,把内容原样告诉我。')
+  // 第二轮:同 userId,新 startSession;**期望** restoreStatus 仍是 null —
+  // 因为 OAK shared scope 在单进程内 reuse 同一 AGS instance,workspace
+  // 物理上还在,根本没经历 restore。这一轮真正验证的是:
+  //   - send-end snapshot 没破坏 workspace
+  //   - 模型 cat 能读到第一轮写入的内容
+  await runOne(
+    'round-2 (read)',
+    userId,
+    '请使用 Read 工具(或 cat)读取工作区根目录的 hello.txt,把内容原样告诉我。',
+  )
 
-  // 第二轮模型应该输出 "OAK Spec B works!" — 证明 workspace snapshot restore 链路通了。
+  console.log('\n[main] DONE.')
+  console.log('[main] 想验证真正的 COS restore 跨进程闭环,请运行 example 19(它会模拟"换节点").')
 }
 
 main().catch((err) => {

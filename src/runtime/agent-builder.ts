@@ -268,11 +268,19 @@ export function buildClaudeQueryOptions(
   // resolveSnapshotMode 决定是否启用、做 scope 校验,失败抛 ConfigError。
   // 启用时构造 WorkspaceSnapshotEngine,实际触发(bootstrap / snapshot)由 create-agent
   // 在 startSession / send-end 时挂载(Task 8)。
+  //
+  // 注意:必须用条件展开避免把 undefined 透到 engine —— `{ ...DEFAULT, ...opts }`
+  // 模式下,显式赋 undefined 会覆盖默认值,导致 setTimeout(undefined) 立即触发,
+  // bootstrap 会以 SandboxRestoreTimeout: init timeout after undefinedms 失败。
   const snapshotEnabled = resolveSnapshotMode(config.sandbox)
   const snapshotEngine = snapshotEnabled
     ? new WorkspaceSnapshotEngine({
-        snapshotTimeoutMs: config.sandbox?.workspaceSnapshotTimeoutMs,
-        initTimeoutMs: config.sandbox?.workspaceInitTimeoutMs,
+        ...(config.sandbox?.workspaceSnapshotTimeoutMs !== undefined && {
+          snapshotTimeoutMs: config.sandbox.workspaceSnapshotTimeoutMs,
+        }),
+        ...(config.sandbox?.workspaceInitTimeoutMs !== undefined && {
+          initTimeoutMs: config.sandbox.workspaceInitTimeoutMs,
+        }),
       })
     : undefined
 

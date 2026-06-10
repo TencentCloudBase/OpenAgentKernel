@@ -27,7 +27,18 @@ export class WorkspaceSnapshotEngine {
   private readonly opts: ResolvedOpts
 
   constructor(opts: WorkspaceSnapshotEngineOptions = {}) {
-    this.opts = { ...DEFAULT, ...opts }
+    // 不能直接 `{ ...DEFAULT, ...opts }`:JS spread 不跳过显式 undefined,
+    // 调用方写 `new WorkspaceSnapshotEngine({ initTimeoutMs: undefined })` 时
+    // 会覆盖默认值,导致 setTimeout(undefined) 立即触发 → init 立刻抛
+    // "SandboxRestoreTimeout: init timeout after undefinedms"。
+    // 用 `??` 逐字段 fallback 才是正确的"未提供则用默认"语义。
+    this.opts = {
+      snapshotTimeoutMs: opts.snapshotTimeoutMs ?? DEFAULT.snapshotTimeoutMs,
+      initTimeoutMs: opts.initTimeoutMs ?? DEFAULT.initTimeoutMs,
+      retryBackoffMs: opts.retryBackoffMs ?? DEFAULT.retryBackoffMs,
+      healthMaxAttempts: opts.healthMaxAttempts ?? DEFAULT.healthMaxAttempts,
+      healthRetryDelayMs: opts.healthRetryDelayMs ?? DEFAULT.healthRetryDelayMs,
+    }
   }
 
   /**
