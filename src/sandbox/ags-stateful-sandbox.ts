@@ -62,11 +62,18 @@ const HEALTH_TIMEOUT_MS = 5000
  * 原因：examples / SDK 调用方常先 import 本模块再 dotenv.config()，
  * 模块加载期固化会让 OAK_SANDBOX_IMAGE 永远拿不到 .env.local 的值。
  * 与 getToolWarmupPollMs() 同一模式。
+ *
+ * 镜像选型须知（cosMount 启用时尤其重要）：
+ *   - vibecoding preset 镜像（自带 41MB node_modules.tar.gz + 349 个预装 node_modules）
+ *     在 cosMount 模式下会让 trw runZstdList 撞 ENOBUFS（详见 docs/workspace-snapshot.md）。
+ *   - 必须用 minimal preset 镜像。trw 一条龙 §3 命名规则：YYMMDD-HHMM-随机-<preset>。
+ *   - TODO: 当前 fallback 临时指向 trw dev 仓库 (royhuang-test-cbe88d)，
+ *           待公共仓库 (tcb-sandbox-public-cbe88d) 推出 minimal tag 后切换。
  */
 function getDefaultSandboxImage(): string {
   return (
     process.env.OAK_SANDBOX_IMAGE ??
-    'ccr.ccs.tencentyun.com/tcb-sandbox-public-cbe88d/tcb-sandbox-public-cbe88d:260521-1705-vibecoding'
+    'ccr.ccs.tencentyun.com/royhuang-test-cbe88d/tcb-sandbox-ags:260608-1044-b13842-minimal'
   )
 }
 
