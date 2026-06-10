@@ -486,3 +486,63 @@ describe('AgsStatefulSandbox existing tool BucketPath mismatch', () => {
     expect(records.find((r) => r.action === 'CreateSandboxTool')).toBeUndefined()
   })
 })
+
+describe('AgsStatefulSandbox env-driven defaults (deferred read)', () => {
+  // 回归测试:DEFAULT_SANDBOX_IMAGE / DEFAULT_TOOL_ROLE_ARN 必须保持函数式,
+  // 不能退化回模块加载期 const —— examples / SDK 调用方常 import 后再 dotenv.config(),
+  // 模块加载期固化会让 .env.local 永远拿不到。
+
+  it('reads OAK_SANDBOX_IMAGE set AFTER module import', async () => {
+    const lateValue = 'ccr.example.com/some-org/late-bound:test-tag'
+    process.env.OAK_SANDBOX_IMAGE = lateValue
+
+    try {
+      const { records } = setupMocks({ toolFound: false })
+      const runtime = new AgsStatefulSandbox({ cosMount: 'disabled' })
+      await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
+
+      const create = findRequest(records, 'CreateSandboxTool')
+      expect(create).toBeDefined()
+      const customConfig = create!.CustomConfiguration as { Image?: string }
+      expect(customConfig.Image).toBe(lateValue)
+    } finally {
+      delete process.env.OAK_SANDBOX_IMAGE
+    }
+  })
+
+  it('reads OAK_SANDBOX_TOOL_ROLE_ARN set AFTER module import', async () => {
+    const lateRole = 'qcs::cam::uin/999999999:roleName/late-bound-role'
+    process.env.OAK_SANDBOX_TOOL_ROLE_ARN = lateRole
+
+    try {
+      const { records } = setupMocks({ toolFound: false })
+      const runtime = new AgsStatefulSandbox({ cosMount: 'disabled' })
+      await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
+
+      const create = findRequest(records, 'CreateSandboxTool')
+      expect(create).toBeDefined()
+      expect(create!.RoleArn).toBe(lateRole)
+    } finally {
+      delete process.env.OAK_SANDBOX_TOOL_ROLE_ARN
+    }
+  })
+
+  it('opts.image overrides OAK_SANDBOX_IMAGE env', async () => {
+    process.env.OAK_SANDBOX_IMAGE = 'ccr.example.com/env/value:tag'
+
+    try {
+      const { records } = setupMocks({ toolFound: false })
+      const runtime = new AgsStatefulSandbox({
+        cosMount: 'disabled',
+        image: 'ccr.example.com/explicit/option:tag',
+      })
+      await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
+
+      const create = findRequest(records, 'CreateSandboxTool')
+      const customConfig = create!.CustomConfiguration as { Image?: string }
+      expect(customConfig.Image).toBe('ccr.example.com/explicit/option:tag')
+    } finally {
+      delete process.env.OAK_SANDBOX_IMAGE
+    }
+  })
+})
