@@ -120,7 +120,8 @@ async function main() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        command: 'ls -la /home/user; echo "---"; mount | grep -i cos || echo "no cos mount"; echo "---"; env | grep -iE "cos|workspace" || echo "no cos env"',
+        command:
+          'ls -la /home/user; echo "---"; mount | grep -i cos || echo "no cos mount"; echo "---"; env | grep -iE "cos|workspace" || echo "no cos env"',
       }),
     })
     console.log(`status=${r.status}`)

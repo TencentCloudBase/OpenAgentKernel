@@ -55,12 +55,25 @@ function getToolWarmupPollMax(): number {
 }
 const HEALTH_TIMEOUT_MS = 5000
 
-/** 默认沙箱镜像（OpenVibeCoding 团队公开 TCR） */
-const DEFAULT_SANDBOX_IMAGE =
-  process.env.OAK_SANDBOX_IMAGE ??
-  'ccr.ccs.tencentyun.com/tcb-sandbox-public-cbe88d/tcb-sandbox-public-cbe88d:260521-1705-vibecoding'
+/**
+ * 默认沙箱镜像（OpenVibeCoding 团队公开 TCR）。
+ *
+ * 注意：函数式读取 env，不在模块加载期固化。
+ * 原因：examples / SDK 调用方常先 import 本模块再 dotenv.config()，
+ * 模块加载期固化会让 OAK_SANDBOX_IMAGE 永远拿不到 .env.local 的值。
+ * 与 getToolWarmupPollMs() 同一模式。
+ */
+function getDefaultSandboxImage(): string {
+  return (
+    process.env.OAK_SANDBOX_IMAGE ??
+    'ccr.ccs.tencentyun.com/tcb-sandbox-public-cbe88d/tcb-sandbox-public-cbe88d:260521-1705-vibecoding'
+  )
+}
 
-const DEFAULT_TOOL_ROLE_ARN = process.env.OAK_SANDBOX_TOOL_ROLE_ARN ?? 'qcs::cam::uin/691612481:roleName/agent-sandbox'
+/** 默认 Tool 角色 ARN —— 同样函数式读取，理由同上。 */
+function getDefaultToolRoleArn(): string {
+  return process.env.OAK_SANDBOX_TOOL_ROLE_ARN ?? 'qcs::cam::uin/691612481:roleName/agent-sandbox'
+}
 
 // ─── Configuration / Credentials ────────────────────────────────────────
 
@@ -184,8 +197,8 @@ function resolveCredentials(opts: AgsStatefulSandboxOptions): ResolvedCredential
     secretId,
     secretKey,
     sessionToken,
-    image: opts.image ?? DEFAULT_SANDBOX_IMAGE,
-    toolRoleArn: opts.toolRoleArn ?? DEFAULT_TOOL_ROLE_ARN,
+    image: opts.image ?? getDefaultSandboxImage(),
+    toolRoleArn: opts.toolRoleArn ?? getDefaultToolRoleArn(),
     defaultTimeout: opts.defaultTimeout ?? '30m',
     gatewayBaseUrl: opts.gatewayBaseUrl,
   }
