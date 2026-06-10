@@ -61,10 +61,7 @@ beforeEach(() => {
   cloudServiceRequestMock.mockReset()
 
   // 默认让 fetch 永远走 200(模拟 /health 立即就绪)
-  vi.stubGlobal(
-    'fetch',
-    vi.fn().mockResolvedValue(new Response('ok', { status: 200 })),
-  )
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('ok', { status: 200 })))
 })
 
 afterEach(() => {
@@ -210,16 +207,47 @@ describe('AgsStatefulSandbox cosMount = "auto" with discovered bucket', () => {
     ])
   })
 
-  it('pre-creates SubPath/.keep with userId', async () => {
+  it('pre-creates SubPath/.keep with userId (alongside BucketPath/.keep)', async () => {
     setupMocks({ toolFound: false })
     const runtime = new AgsStatefulSandbox({ cosMount: 'auto' })
     await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
 
-    expect(uploadFileMock).toHaveBeenCalledTimes(1)
+    // tool create 路径:两次 upload(bucket-level + user-level)
+    expect(uploadFileMock).toHaveBeenCalledTimes(2)
     expect(uploadFileMock).toHaveBeenCalledWith(
       expect.objectContaining({
         cloudPath: 'oak-workspaces/alice/.keep',
       }),
+    )
+  })
+
+  it('pre-creates BOTH BucketPath/.keep (tool prerequisite) AND SubPath/.keep (instance prerequisite)', async () => {
+    setupMocks({ toolFound: false })
+    const runtime = new AgsStatefulSandbox({ cosMount: 'auto' })
+    await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
+
+    expect(uploadFileMock).toHaveBeenCalledTimes(2)
+    // 第一次:BucketPath/.keep(在 CreateSandboxTool 之前)
+    expect(uploadFileMock).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ cloudPath: 'oak-workspaces/.keep' }),
+    )
+    // 第二次:SubPath/.keep(在 StartSandboxInstance 之前)
+    expect(uploadFileMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ cloudPath: 'oak-workspaces/alice/.keep' }),
+    )
+  })
+
+  it('skips BucketPath/.keep when reusing existing tool (only SubPath needed)', async () => {
+    setupMocks({ toolFound: true, toolStorageBucketPath: '/oak-workspaces' })
+    const runtime = new AgsStatefulSandbox({ cosMount: 'auto' })
+    await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
+
+    // 复用已有 tool,只建 SubPath/.keep,不重建 BucketPath/.keep
+    expect(uploadFileMock).toHaveBeenCalledTimes(1)
+    expect(uploadFileMock).toHaveBeenCalledWith(
+      expect.objectContaining({ cloudPath: 'oak-workspaces/alice/.keep' }),
     )
   })
 
@@ -228,9 +256,7 @@ describe('AgsStatefulSandbox cosMount = "auto" with discovered bucket', () => {
     const runtime = new AgsStatefulSandbox({ cosMount: 'auto' })
     await runtime.acquire({ envId: 'test-env', conversationId: 'c', scope: 'session' })
 
-    expect(uploadFileMock).toHaveBeenCalledWith(
-      expect.objectContaining({ cloudPath: 'oak-workspaces/default/.keep' }),
-    )
+    expect(uploadFileMock).toHaveBeenCalledWith(expect.objectContaining({ cloudPath: 'oak-workspaces/default/.keep' }))
   })
 
   it('injects MountOptions.SubPath=userId on StartSandboxInstance', async () => {

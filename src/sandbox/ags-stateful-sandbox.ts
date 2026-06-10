@@ -248,18 +248,25 @@ async function discoverCosBucket(cred: ResolvedCredentials, envId: string): Prom
 }
 
 /**
- * 预创建 cos://${bucket}${bucketPath}/${userId}/.keep。
+ * 预创建 COS 上的 .keep 占位文件,保证 AGS mount 时路径已存在。
  *
- * AGS 平台 mount 时不自建目录,缺失这层会导致 PortBindingFailed 446。
- * 用 manager-node storage.uploadFile 写一个空的 .keep,幂等(重复上传安全)。
+ * AGS 平台**两层都不自建目录**:
+ *   - tool 级:CreateSandboxTool 时校验 BucketPath 真实存在,缺失报
+ *     ResourceNotFound.StorageMount("COS path does not exist: ...")
+ *   - instance 级:StartSandboxInstance 时 mount 失败导致 PortBindingFailed 446
  *
- * 失败时 throw — 这是 instance start 的硬前置,失败应阻断流程。
+ * 调用约定:
+ *   - userId 为 undefined → 建 cos://${bucket}${bucketPath}/.keep(tool 级,CreateSandboxTool 前调)
+ *   - userId 给定 → 建 cos://${bucket}${bucketPath}/${userId}/.keep(instance 级,StartSandboxInstance 前调)
+ *
+ * 用 manager-node storage.uploadFile,幂等(重复上传安全)。
+ * 失败时 throw — 这是硬前置,失败应阻断流程。
  */
-async function ensureSubPathKeep(
+async function ensureCosPathKeep(
   cred: ResolvedCredentials,
   cos: ResolvedCosMount,
   envId: string,
-  userId: string,
+  userId?: string,
 ): Promise<void> {
   const fs = await import('node:fs/promises')
   const os = await import('node:os')
@@ -269,7 +276,7 @@ async function ensureSubPathKeep(
   try {
     mod = (await import('@cloudbase/manager-node')) as { default?: unknown } & Record<string, unknown>
   } catch (err) {
-    throw new SandboxError('ensureSubPathKeep requires @cloudbase/manager-node', err)
+    throw new SandboxError('ensureCosPathKeep requires @cloudbase/manager-node', err)
   }
   type CloudBaseCtor = new (config: Record<string, unknown>) => {
     storage: {
@@ -279,7 +286,8 @@ async function ensureSubPathKeep(
   const CloudBase = (mod.default ?? mod) as unknown as CloudBaseCtor
 
   // BucketPath 是 '/oak-workspaces' 这种带前导 /,COS cloudPath 不要前导 / → slice(1)
-  const cloudPath = `${cos.bucketPath.replace(/^\//, '')}/${userId}/.keep`
+  const bucketPathBare = cos.bucketPath.replace(/^\//, '')
+  const cloudPath = userId ? `${bucketPathBare}/${userId}/.keep` : `${bucketPathBare}/.keep`
 
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oak-keep-'))
   const tmpFile = path.join(tmpDir, 'empty')
@@ -421,11 +429,7 @@ function pickToolByName(tools: Array<Record<string, unknown>>, toolName: string)
   }
 }
 
-async function createTool(
-  envId: string,
-  cred: ResolvedCredentials,
-  cos: ResolvedCosMount | null,
-): Promise<string> {
+async function createTool(envId: string, cred: ResolvedCredentials, cos: ResolvedCosMount | null): Promise<string> {
   const payload: Record<string, unknown> = {
     ToolName: statefulToolNameForEnv(envId),
     ToolType: 'custom',
@@ -748,6 +752,27 @@ async function ensureTool(args: {
     phase: 'tool_create',
     message: `creating sandbox tool ${toolName} (first run, ~30s)`,
   })
+
+  // AGS 平台 CreateSandboxTool 校验 BucketPath 真实存在,缺失报
+  // ResourceNotFound.StorageMount("COS path does not exist: ...")。
+  // 必须在 CreateSandboxTool 之前预建 BucketPath/.keep(SubPath/.keep 由 acquire flow
+  // 在 instance start 前建,不重叠)。
+  if (cos) {
+    onProgress?.({
+      phase: 'cos_keep_bucket',
+      message: `pre-creating cos://${cos.bucketName}${cos.bucketPath}/.keep (tool create prerequisite)`,
+    })
+    try {
+      await ensureCosPathKeep(cred, cos, envId)
+    } catch (err) {
+      throw new SandboxError(
+        `Failed to pre-create cos://${cos.bucketName}${cos.bucketPath}/.keep — ` +
+          `AGS CreateSandboxTool requires this path to exist. Original: ${(err as Error).message}`,
+        err,
+      )
+    }
+  }
+
   const toolId = await createTool(envId, cred, cos)
   toolIdCache.set(cacheKey, toolId)
   return { toolId, justCreated: true }
@@ -885,7 +910,7 @@ export class AgsStatefulSandbox implements SandboxRuntime {
         message: `pre-creating cos://${cos.bucketName}${cos.bucketPath}/${userIdForSubPath}/.keep`,
       })
       try {
-        await ensureSubPathKeep(cred, cos, ctx.envId, userIdForSubPath)
+        await ensureCosPathKeep(cred, cos, ctx.envId, userIdForSubPath)
       } catch (err) {
         throw new SandboxError(
           `Failed to pre-create cos://${cos.bucketName}${cos.bucketPath}/${userIdForSubPath}/.keep — ` +
