@@ -20,7 +20,7 @@
  *       E2b-Sandbox-Port: 9000  (TRW 默认端口)
  */
 
-import { SandboxError } from '../internal/errors.js'
+import { ConfigError, SandboxError } from '../internal/errors.js'
 import type { SandboxAcquireContext, SandboxInstance, SandboxRuntime } from './types.js'
 
 // ─── Constants ──────────────────────────────────────────────────────────
@@ -30,12 +30,29 @@ const READY_TIMEOUT_MS = 120_000
 const READY_POLL_INTERVAL_MS = 3000
 
 /**
+ * Workspace cosMount(Spec B + cosMount addendum)关键约定。
+ *
+ * 镜像内 cos-sync.ts 用 COS_MOUNT_DIR env 找 mount 点;AGS 平台把 COS 上 BucketPath
+ * + SubPath 那段路径挂到容器的 MountPath。两者必须一致。
+ */
+const COS_MOUNT_NAME = 'oak-cos-workspace'
+const COS_MOUNT_PATH = '/mnt/workspace'
+const COS_BUCKET_PATH = '/oak-workspaces' // tool 级共享前缀,SubPath 在 instance 级追加
+
+/**
  * CreateSandboxTool 之后的镜像 warmup 等待（参考 stateful-infra 一条龙 #24）。
  * 平台需要拉镜像，这段时间内立即 StartSandboxInstance 会拿到 InternalError /
  * "tool is CREATING" 等错误。死等一段时间再 start 是最稳的做法。
  */
-const TOOL_WARMUP_POLL_MS = 10_000
-const TOOL_WARMUP_POLL_MAX = 6 // 总共 ~60s
+/**
+ * Tool warmup 轮询配置。函数式读取 env,方便单测覆盖(测试设短到 1ms × 1 round)。
+ */
+function getToolWarmupPollMs(): number {
+  return Number.parseInt(process.env.OAK_AGS_TOOL_WARMUP_POLL_MS ?? '', 10) || 10_000
+}
+function getToolWarmupPollMax(): number {
+  return Number.parseInt(process.env.OAK_AGS_TOOL_WARMUP_POLL_MAX ?? '', 10) || 6 // 总共 ~60s
+}
 const HEALTH_TIMEOUT_MS = 5000
 
 /** 默认沙箱镜像（OpenVibeCoding 团队公开 TCR） */
@@ -71,8 +88,32 @@ export interface AgsStatefulSandboxOptions {
   toolRoleArn?: string
   /** 实例默认超时（AGS Timeout 字段，例 '30m'） */
   defaultTimeout?: string
-  /** 数据面 gateway URL（不传按 envId 派生） */
+  /** 数据面 gateway URL(不传按 envId 派生) */
   gatewayBaseUrl?: string
+  /**
+   * Spec B 新增。控制 sandbox cwd 是否通过 COS 持久化(workspace snapshot 前置条件)。
+   *
+   * - 'auto'(默认):用 manager-node 自动发现 envId 默认 storage bucket。
+   *   发现成功 → 启用 COS 挂载;发现失败(env 没开通 storage)→ silent 不启用,
+   *   workspace snapshot 调用会从镜像得到 'COS not configured' 错误。
+   * - 'enabled':强制启用 — 自动发现失败抛 ConfigError(早 fail 优于运行时调 snapshot 才报错)。
+   * - 'disabled':显式关闭 — 不自动发现、不传 StorageMounts/MountOptions。
+   *
+   * 启用时,OAK:
+   *   1. CreateSandboxTool 时声明 StorageMount(BucketPath=`/oak-workspaces`,MountPath=`/mnt/workspace`)
+   *   2. acquire 时预创建 cos://${bucket}/oak-workspaces/${userId}/.keep(AGS 平台不自建)
+   *   3. StartSandboxInstance 时传 MountOption(SubPath=${userId})+ CustomConfiguration.Env.COS_MOUNT_DIR
+   *
+   * 详见 Spec B §1.3 和 cosMount addendum。
+   */
+  cosMount?: 'auto' | 'enabled' | 'disabled'
+}
+
+/** 解析后的 COS 挂载配置(per-acquire,因为依赖 envId) */
+interface ResolvedCosMount {
+  endpoint: string // 'cos.ap-shanghai.myqcloud.com'
+  bucketName: string // 'xxx-1234567890'
+  bucketPath: string // '/oak-workspaces',必须以 / 起始
 }
 
 interface ResolvedCredentials {
@@ -157,6 +198,105 @@ function statefulToolNameForEnv(envId: string): string {
   return `oak-${slug || 'default'}`
 }
 
+// ─── COS bucket discovery + .keep 预创建 ──────────────────────────────
+//
+// AGS 平台的硬要求:tool 必须声明 StorageMount.Cos.BucketPath,instance start
+// 时引用 + 加 SubPath。同时 ${BucketPath}/${SubPath}/.keep 必须预创建,否则
+// AGS 平台 mount 失败(PortBindingFailed 446)。
+
+/**
+ * 用 manager-node 自动发现 envId 对应的默认 COS storage bucket。
+ *
+ * - 成功 → 返回 ResolvedCosMount(endpoint/bucketName/bucketPath)
+ * - 失败(env 没开通 storage / 网络错 / API 报错)→ 返回 null,让 caller 决定 graceful
+ *   还是 ConfigError(由 cosMount mode 决定)
+ */
+async function discoverCosBucket(cred: ResolvedCredentials, envId: string): Promise<ResolvedCosMount | null> {
+  let mod: { default?: unknown } & Record<string, unknown>
+  try {
+    mod = (await import('@cloudbase/manager-node')) as { default?: unknown } & Record<string, unknown>
+  } catch {
+    return null
+  }
+  type CloudBaseCtor = new (config: Record<string, unknown>) => {
+    env: { getEnvInfo(): Promise<Record<string, unknown>> }
+  }
+  const CloudBase = (mod.default ?? mod) as unknown as CloudBaseCtor
+  try {
+    const app = new CloudBase({
+      secretId: cred.secretId,
+      secretKey: cred.secretKey,
+      token: cred.sessionToken,
+      envId,
+    })
+    const result = await app.env.getEnvInfo()
+    const envInfo = result?.EnvInfo as Record<string, unknown> | undefined
+    const storages = envInfo?.Storages as Array<Record<string, unknown>> | undefined
+    const cos = storages?.[0]
+    if (!cos) return null
+    const bucketName = String(cos.Bucket ?? '')
+    const region = String(cos.Region ?? '')
+    if (!bucketName || !region) return null
+    return {
+      endpoint: `cos.${region}.myqcloud.com`,
+      bucketName,
+      bucketPath: COS_BUCKET_PATH,
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 预创建 cos://${bucket}${bucketPath}/${userId}/.keep。
+ *
+ * AGS 平台 mount 时不自建目录,缺失这层会导致 PortBindingFailed 446。
+ * 用 manager-node storage.uploadFile 写一个空的 .keep,幂等(重复上传安全)。
+ *
+ * 失败时 throw — 这是 instance start 的硬前置,失败应阻断流程。
+ */
+async function ensureSubPathKeep(
+  cred: ResolvedCredentials,
+  cos: ResolvedCosMount,
+  envId: string,
+  userId: string,
+): Promise<void> {
+  const fs = await import('node:fs/promises')
+  const os = await import('node:os')
+  const path = await import('node:path')
+
+  let mod: { default?: unknown } & Record<string, unknown>
+  try {
+    mod = (await import('@cloudbase/manager-node')) as { default?: unknown } & Record<string, unknown>
+  } catch (err) {
+    throw new SandboxError('ensureSubPathKeep requires @cloudbase/manager-node', err)
+  }
+  type CloudBaseCtor = new (config: Record<string, unknown>) => {
+    storage: {
+      uploadFile(opts: { localPath: string; cloudPath: string }): Promise<unknown>
+    }
+  }
+  const CloudBase = (mod.default ?? mod) as unknown as CloudBaseCtor
+
+  // BucketPath 是 '/oak-workspaces' 这种带前导 /,COS cloudPath 不要前导 / → slice(1)
+  const cloudPath = `${cos.bucketPath.replace(/^\//, '')}/${userId}/.keep`
+
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oak-keep-'))
+  const tmpFile = path.join(tmpDir, 'empty')
+  try {
+    await fs.writeFile(tmpFile, '')
+    const app = new CloudBase({
+      secretId: cred.secretId,
+      secretKey: cred.secretKey,
+      token: cred.sessionToken,
+      envId,
+    })
+    await app.storage.uploadFile({ localPath: tmpFile, cloudPath })
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
 // ─── AGS Manager API（控制面）─────────────────────────────────────────
 
 /**
@@ -215,6 +355,12 @@ interface AgsToolInfo {
   toolId: string
   toolName: string
   status: string
+  /**
+   * Tool 已声明的 COS BucketPath(读自 StorageMounts[0].StorageSource.Cos.BucketPath)。
+   * 用于跟当前 cosMount 期望比对,不一致 → ConfigError(decision Q3=C)。
+   * null = tool 没有声明 storage。
+   */
+  bucketPath: string | null
 }
 
 function extractToolSet(resp: Record<string, unknown>): Array<Record<string, unknown>> {
@@ -258,47 +404,78 @@ function pickToolByName(tools: Array<Record<string, unknown>>, toolName: string)
   const matches = tools.filter((t) => t.ToolName === toolName && typeof t.ToolId === 'string')
   if (!matches.length) return null
   const active = matches.find((t) => t.Status === 'ACTIVE') ?? matches[0]
+  // 解析 StorageMounts[0].StorageSource.Cos.BucketPath — 用于不一致检测
+  let bucketPath: string | null = null
+  const mounts = active.StorageMounts as Array<Record<string, unknown>> | undefined
+  if (Array.isArray(mounts) && mounts.length > 0) {
+    const source = mounts[0]?.StorageSource as Record<string, unknown> | undefined
+    const cos = source?.Cos as Record<string, unknown> | undefined
+    const bp = cos?.BucketPath
+    if (typeof bp === 'string') bucketPath = bp
+  }
   return {
     toolId: active.ToolId as string,
     toolName: toolName,
     status: String(active.Status ?? ''),
+    bucketPath,
   }
 }
 
-async function createTool(envId: string, cred: ResolvedCredentials): Promise<string> {
-  const resp = await callAgsApi(
-    'CreateSandboxTool',
-    {
-      ToolName: statefulToolNameForEnv(envId),
-      ToolType: 'custom',
-      RoleArn: cred.toolRoleArn,
-      CustomConfiguration: {
-        Image: cred.image,
-        ImageRegistryType: resolveImageRegistryType(cred.image),
-        Command: ['/init'],
-        Resources: { CPU: '2', Memory: '2Gi' },
-        Ports: [
-          { Name: 'trw', Protocol: 'TCP', Port: TRW_SERVICE_PORT },
-          { Name: 'envd', Protocol: 'TCP', Port: 49983 },
-          { Name: 'vite', Protocol: 'TCP', Port: 5173 },
-          { Name: 'ttyd', Protocol: 'TCP', Port: 7681 },
-        ],
-        Probe: {
-          HttpGet: { Path: '/health', Port: TRW_SERVICE_PORT, Scheme: 'HTTP' },
-          ReadyTimeoutMs: 25_000,
-          ProbeTimeoutMs: 5000,
-          ProbePeriodMs: 3000,
-          SuccessThreshold: 1,
-          FailureThreshold: 7,
-        },
+async function createTool(
+  envId: string,
+  cred: ResolvedCredentials,
+  cos: ResolvedCosMount | null,
+): Promise<string> {
+  const payload: Record<string, unknown> = {
+    ToolName: statefulToolNameForEnv(envId),
+    ToolType: 'custom',
+    RoleArn: cred.toolRoleArn,
+    CustomConfiguration: {
+      Image: cred.image,
+      ImageRegistryType: resolveImageRegistryType(cred.image),
+      Command: ['/init'],
+      Resources: { CPU: '2', Memory: '2Gi' },
+      Ports: [
+        { Name: 'trw', Protocol: 'TCP', Port: TRW_SERVICE_PORT },
+        { Name: 'envd', Protocol: 'TCP', Port: 49983 },
+        { Name: 'vite', Protocol: 'TCP', Port: 5173 },
+        { Name: 'ttyd', Protocol: 'TCP', Port: 7681 },
+      ],
+      Probe: {
+        HttpGet: { Path: '/health', Port: TRW_SERVICE_PORT, Scheme: 'HTTP' },
+        ReadyTimeoutMs: 25_000,
+        ProbeTimeoutMs: 5000,
+        ProbePeriodMs: 3000,
+        SuccessThreshold: 1,
+        FailureThreshold: 7,
       },
-      NetworkConfiguration: { NetworkMode: 'PUBLIC' },
-      DefaultTimeout: cred.defaultTimeout,
-      Description: `open-agent-kernel sandbox for env ${envId}`,
     },
-    cred,
-    envId,
-  )
+    NetworkConfiguration: { NetworkMode: 'PUBLIC' },
+    DefaultTimeout: cred.defaultTimeout,
+    Description: `open-agent-kernel sandbox for env ${envId}`,
+  }
+
+  // Spec B / cosMount addendum:声明 COS storage mount。
+  // 之后 instance start 时 MountOption.Name 引用 'oak-cos-workspace';
+  // SubPath 在 instance 级追加(不在 tool 级,以便同 tool 多 user 隔离)。
+  if (cos) {
+    payload.StorageMounts = [
+      {
+        Name: COS_MOUNT_NAME,
+        StorageSource: {
+          Cos: {
+            Endpoint: cos.endpoint,
+            BucketName: cos.bucketName,
+            BucketPath: cos.bucketPath,
+          },
+        },
+        MountPath: COS_MOUNT_PATH,
+        ReadOnly: false,
+      },
+    ]
+  }
+
+  const resp = await callAgsApi('CreateSandboxTool', payload, cred, envId)
 
   const toolId =
     (resp?.ToolId as string) || ((resp?.data as Record<string, unknown> | undefined)?.ToolId as string) || ''
@@ -308,22 +485,37 @@ async function createTool(envId: string, cred: ResolvedCredentials): Promise<str
   return toolId
 }
 
-async function startInstance(
-  toolId: string,
-  cred: ResolvedCredentials,
-  envId: string,
-  defaultTimeout: string,
-): Promise<string> {
-  const resp = await callAgsApi(
-    'StartSandboxInstance',
-    {
-      ToolId: toolId,
-      Timeout: defaultTimeout,
-      AuthMode: 'NONE',
-    },
-    cred,
-    envId,
-  )
+async function startInstance(args: {
+  toolId: string
+  cred: ResolvedCredentials
+  envId: string
+  defaultTimeout: string
+  cos: ResolvedCosMount | null
+  userId: string
+}): Promise<string> {
+  const { toolId, cred, envId, defaultTimeout, cos, userId } = args
+
+  const payload: Record<string, unknown> = {
+    ToolId: toolId,
+    Timeout: defaultTimeout,
+    AuthMode: 'NONE',
+  }
+
+  // Spec B / cosMount addendum:
+  // - MountOption.Name 引用 tool 的 StorageMount.Name(必须一致)
+  // - SubPath = userId(decision Q3=A,user 级隔离)
+  // - CustomConfiguration.Env.COS_MOUNT_DIR 必须等于 tool 的 StorageMount.MountPath
+  // - SECRET_MASTER_KEY 由 process.env.OAK_SECRET_MASTER_KEY 透传(decision Q6=A);
+  //   未设则不注入,镜像 secrets API 自动 graceful 关闭
+  if (cos) {
+    payload.MountOptions = [{ Name: COS_MOUNT_NAME, SubPath: userId }]
+    const env: Array<{ Name: string; Value: string }> = [{ Name: 'COS_MOUNT_DIR', Value: COS_MOUNT_PATH }]
+    const masterKey = process.env.OAK_SECRET_MASTER_KEY
+    if (masterKey) env.push({ Name: 'SECRET_MASTER_KEY', Value: masterKey })
+    payload.CustomConfiguration = { Env: env }
+  }
+
+  const resp = await callAgsApi('StartSandboxInstance', payload, cred, envId)
   const data = resp?.data as Record<string, unknown> | undefined
   const inst = resp?.Instance as Record<string, unknown> | undefined
   const instanceId = String(resp?.InstanceId || inst?.InstanceId || data?.InstanceId || '') || ''
@@ -396,12 +588,15 @@ function pickPrimaryInstance(candidates: AgsInstanceStatus[]): AgsInstanceStatus
  * 注意：调用方在 release 时**不要 pause**——其他 session 可能还在用同一实例。
  *      AGS 会按 DefaultTimeout 自动回收。
  */
-async function ensureSharedInstance(
-  toolId: string,
-  cred: ResolvedCredentials,
-  envId: string,
-  onProgress?: (msg: { phase: string; message: string }) => void,
-): Promise<{ instanceId: string; reused: boolean }> {
+async function ensureSharedInstance(args: {
+  toolId: string
+  cred: ResolvedCredentials
+  envId: string
+  cos: ResolvedCosMount | null
+  userId: string
+  onProgress?: (msg: { phase: string; message: string }) => void
+}): Promise<{ instanceId: string; reused: boolean }> {
+  const { toolId, cred, envId, cos, userId, onProgress } = args
   const all = await describeInstances(cred, envId, { toolId })
   const active = all.filter((it) => ['RUNNING', 'PAUSED', 'RESUME_FAILED'].includes(it.status))
   const primary = pickPrimaryInstance(active)
@@ -416,6 +611,8 @@ async function ensureSharedInstance(
       cred,
       envId,
       defaultTimeout: cred.defaultTimeout,
+      cos,
+      userId,
       onProgress,
     })
     return { instanceId, reused: false }
@@ -497,15 +694,34 @@ async function waitForReady(args: {
 // ─── ToolId cache（进程内）────────────────────────────────────────────
 // PR #6A：内存 cache，避免每次 acquire 都调一遍 DescribeSandboxToolList。
 // PR #6B 起可考虑外部持久化（比如复用 SessionStore driver 写入 DB）。
+//
+// cosMount addendum:cache key 含 expectedBucketPath('null' | path),保证
+// cosMount 模式从 disabled→enabled 切换时,旧 cache 失效。
 
 const toolIdCache = new Map<string, string>()
 
-async function ensureTool(
-  envId: string,
-  cred: ResolvedCredentials,
-  onProgress?: (msg: { phase: string; message: string }) => void,
-): Promise<{ toolId: string; justCreated: boolean }> {
-  const cached = toolIdCache.get(envId)
+/**
+ * @internal — 仅供单元测试使用,清空 process-wide tool cache。
+ * 业务代码不应依赖此函数。
+ */
+export function __clearToolIdCacheForTests(): void {
+  toolIdCache.clear()
+}
+
+function buildToolCacheKey(envId: string, expectedBucketPath: string | null): string {
+  return `${envId}::${expectedBucketPath ?? 'null'}`
+}
+
+async function ensureTool(args: {
+  envId: string
+  cred: ResolvedCredentials
+  cos: ResolvedCosMount | null
+  onProgress?: (msg: { phase: string; message: string }) => void
+}): Promise<{ toolId: string; justCreated: boolean }> {
+  const { envId, cred, cos, onProgress } = args
+  const expectedBucketPath = cos?.bucketPath ?? null
+  const cacheKey = buildToolCacheKey(envId, expectedBucketPath)
+  const cached = toolIdCache.get(cacheKey)
   if (cached) return { toolId: cached, justCreated: false }
 
   const toolName = statefulToolNameForEnv(envId)
@@ -513,7 +729,18 @@ async function ensureTool(
 
   const existing = await findToolByName(toolName, cred, envId)
   if (existing) {
-    toolIdCache.set(envId, existing.toolId)
+    // cosMount addendum:不一致检测(decision Q3=C 抛 ConfigError)
+    if (existing.bucketPath !== expectedBucketPath) {
+      throw new ConfigError(
+        `existing sandbox tool ${existing.toolId} (ToolName=${toolName}) has BucketPath=` +
+          `${existing.bucketPath ?? '(none)'} but cosMount resolves to ${expectedBucketPath ?? '(none)'}. ` +
+          `Resolve by either:\n` +
+          `  1. Delete the existing tool: tcb sandbox tool delete ${existing.toolId}\n` +
+          `  2. Or set cosMount: 'disabled' in AgsStatefulSandbox options to keep current behavior.\n` +
+          `See Spec B cosMount addendum.`,
+      )
+    }
+    toolIdCache.set(cacheKey, existing.toolId)
     return { toolId: existing.toolId, justCreated: false }
   }
 
@@ -521,8 +748,8 @@ async function ensureTool(
     phase: 'tool_create',
     message: `creating sandbox tool ${toolName} (first run, ~30s)`,
   })
-  const toolId = await createTool(envId, cred)
-  toolIdCache.set(envId, toolId)
+  const toolId = await createTool(envId, cred, cos)
+  toolIdCache.set(cacheKey, toolId)
   return { toolId, justCreated: true }
 }
 
@@ -532,12 +759,14 @@ async function ensureTool(
  * 平台拉镜像需要时间，立即 StartSandboxInstance 会失败（CREATING / InternalError）。
  */
 async function waitToolWarmup(onProgress?: (msg: { phase: string; message: string }) => void): Promise<void> {
-  for (let round = 1; round <= TOOL_WARMUP_POLL_MAX; round++) {
+  const maxRounds = getToolWarmupPollMax()
+  const pollMs = getToolWarmupPollMs()
+  for (let round = 1; round <= maxRounds; round++) {
     onProgress?.({
       phase: 'template_warmup',
-      message: `tool image warmup (${round}/${TOOL_WARMUP_POLL_MAX})...`,
+      message: `tool image warmup (${round}/${maxRounds})...`,
     })
-    await new Promise((r) => setTimeout(r, TOOL_WARMUP_POLL_MS))
+    await new Promise((r) => setTimeout(r, pollMs))
   }
 }
 
@@ -567,23 +796,27 @@ async function startInstanceWithRetry(args: {
   cred: ResolvedCredentials
   envId: string
   defaultTimeout: string
+  cos: ResolvedCosMount | null
+  userId: string
   onProgress?: (msg: { phase: string; message: string }) => void
 }): Promise<string> {
-  const { toolId, cred, envId, defaultTimeout, onProgress } = args
+  const { toolId, cred, envId, defaultTimeout, cos, userId, onProgress } = args
+  const maxAttempts = getToolWarmupPollMax()
+  const pollMs = getToolWarmupPollMs()
   let lastErr: unknown
-  for (let attempt = 1; attempt <= TOOL_WARMUP_POLL_MAX; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return await startInstance(toolId, cred, envId, defaultTimeout)
+      return await startInstance({ toolId, cred, envId, defaultTimeout, cos, userId })
     } catch (err) {
       lastErr = err
-      if (!isAgsRetryableError(err) || attempt >= TOOL_WARMUP_POLL_MAX) {
+      if (!isAgsRetryableError(err) || attempt >= maxAttempts) {
         throw err
       }
       onProgress?.({
         phase: 'instance_start_retry',
-        message: `instance start retryable error, retry ${attempt}/${TOOL_WARMUP_POLL_MAX}...`,
+        message: `instance start retryable error, retry ${attempt}/${maxAttempts}...`,
       })
-      await new Promise((r) => setTimeout(r, TOOL_WARMUP_POLL_MS))
+      await new Promise((r) => setTimeout(r, pollMs))
     }
   }
   throw lastErr
@@ -603,8 +836,40 @@ export class AgsStatefulSandbox implements SandboxRuntime {
     const cred = resolveCredentials(this.options)
     const baseUrl = resolveGatewayUrl(ctx.envId, cred.gatewayBaseUrl)
     const scope = ctx.scope ?? 'session'
+    const cosMode = this.options.cosMount ?? 'auto'
 
-    const { toolId, justCreated } = await ensureTool(ctx.envId, cred, ctx.onProgress)
+    // ── Spec B / cosMount addendum:解析 COS 配置 ──────────────────
+    // - 'disabled' → 跳过发现,cos = null,不传 StorageMounts/MountOptions
+    // - 'auto' / 'enabled' → 用 manager-node 自动发现 envId 默认 storage bucket
+    // - 'enabled' 且发现失败 → ConfigError(早 fail)
+    let cos: ResolvedCosMount | null = null
+    if (cosMode !== 'disabled') {
+      ctx.onProgress?.({ phase: 'cos_lookup', message: 'discovering envId default storage bucket...' })
+      cos = await discoverCosBucket(cred, ctx.envId)
+      if (!cos && cosMode === 'enabled') {
+        throw new ConfigError(
+          `cosMount='enabled' but envId='${ctx.envId}' has no default storage bucket. ` +
+            `Either enable CloudBase storage for this envId, or set cosMount: 'disabled' / 'auto'.`,
+        )
+      }
+      if (cos) {
+        ctx.onProgress?.({
+          phase: 'cos_resolved',
+          message: `cos bucket=${cos.bucketName} bucketPath=${cos.bucketPath}`,
+        })
+      }
+    }
+
+    const { toolId, justCreated } = await ensureTool({
+      envId: ctx.envId,
+      cred,
+      cos,
+      onProgress: ctx.onProgress,
+    })
+
+    // userId fallback:cosMount 启用时,SubPath = userId 实现 user 级隔离;
+    // 不传 userId 时用 'default'(work for single-user 场景,但不应用于多租户)
+    const userIdForSubPath = ctx.userId ?? 'default'
 
     // 新建 Tool 后必须等镜像 warmup（参考 stateful-infra 一条龙 #24），
     // 否则 StartSandboxInstance 立即返回 "is not active, current status: CREATING"
@@ -612,11 +877,36 @@ export class AgsStatefulSandbox implements SandboxRuntime {
       await waitToolWarmup(ctx.onProgress)
     }
 
+    // ── Spec B:启动 instance 前预创建 SubPath/.keep ────────────────
+    // AGS 不自建目录,缺失会 PortBindingFailed 446
+    if (cos) {
+      ctx.onProgress?.({
+        phase: 'cos_keep',
+        message: `pre-creating cos://${cos.bucketName}${cos.bucketPath}/${userIdForSubPath}/.keep`,
+      })
+      try {
+        await ensureSubPathKeep(cred, cos, ctx.envId, userIdForSubPath)
+      } catch (err) {
+        throw new SandboxError(
+          `Failed to pre-create cos://${cos.bucketName}${cos.bucketPath}/${userIdForSubPath}/.keep — ` +
+            `AGS requires this path to exist before mounting. Original: ${(err as Error).message}`,
+          err,
+        )
+      }
+    }
+
     // 按 scope 分流
     let instanceId: string
     let isShared: boolean
     if (scope === 'shared') {
-      const result = await ensureSharedInstance(toolId, cred, ctx.envId, ctx.onProgress)
+      const result = await ensureSharedInstance({
+        toolId,
+        cred,
+        envId: ctx.envId,
+        cos,
+        userId: userIdForSubPath,
+        onProgress: ctx.onProgress,
+      })
       instanceId = result.instanceId
       isShared = true
     } else {
@@ -629,6 +919,8 @@ export class AgsStatefulSandbox implements SandboxRuntime {
         cred,
         envId: ctx.envId,
         defaultTimeout: cred.defaultTimeout,
+        cos,
+        userId: userIdForSubPath,
         onProgress: ctx.onProgress,
       })
       isShared = false

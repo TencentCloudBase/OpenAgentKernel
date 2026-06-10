@@ -145,6 +145,7 @@ function createSession(deps: SessionDeps): Session {
       sandboxAcquirePromise = sandboxRuntime.acquire({
         envId: config.envId,
         conversationId,
+        userId,
         scope: config.sandbox?.scope ?? 'session',
         onProgress: (msg) => {
           if (process.env.OAK_DEBUG === '1') {

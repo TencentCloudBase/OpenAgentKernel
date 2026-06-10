@@ -65,6 +65,13 @@ export interface SandboxAcquireContext {
   /** 当前 session 的 conversationId */
   conversationId: string
   /**
+   * 当前 session 的 userId(Spec B cosMount addendum 必需)。
+   * - 用作 MountOption.SubPath,实现 user 级隔离的 COS 子路径
+   * - 不传时使用 'default'(同 envId 所有 user 共享同一 SubPath,工作区会互相覆盖,
+   *   非生产场景可接受;cosMount 启用且需要严格隔离的应用必须传)
+   */
+  userId?: string
+  /**
    * 实例粒度：
    * - 'session'：每个 session 一个独立实例（默认，PR #6A 行为）
    * - 'shared'：同 envId 多 session 共享一个实例（PR #6B 新增）
