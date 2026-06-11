@@ -101,7 +101,7 @@ async function main() {
 
   // 等 trw 的 /health 状态刷新(trw bootstrap 后可能需要时间更新 restoreStatus)
   console.log('[19b] 等待 2s 让 trw /health 状态刷新...')
-  await new Promise(r => setTimeout(r, 2000))
+  await new Promise((r) => setTimeout(r, 2000))
 
   const restoreStatus = (await session.getRestoreStatus?.()) ?? null
   console.log(`\n[19b] >>> KEY SIGNAL <<<  restoreStatus=${restoreStatus}`)
