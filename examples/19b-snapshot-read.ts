@@ -99,26 +99,6 @@ async function main() {
 
   const session = await agent.startSession({ userId })
 
-  // 等 trw 的 /health 状态刷新(trw bootstrap 后可能需要时间更新 restoreStatus)
-  console.log('[19b] 等待 2s 让 trw /health 状态刷新...')
-  await new Promise((r) => setTimeout(r, 2000))
-
-  const restoreStatus = (await session.getRestoreStatus?.()) ?? null
-  console.log(`\n[19b] >>> KEY SIGNAL <<<  restoreStatus=${restoreStatus}`)
-  if (restoreStatus === 'full' || restoreStatus === 'partial') {
-    console.log(`[19b]   ✅ restore 链路通了 — 期望模型也能读到 stamp`)
-  } else if (restoreStatus === 'fresh') {
-    console.warn(
-      `[19b]   ⚠️  restoreStatus=fresh — 可能 19a 的 send-end snapshot 没真写到 COS,或 19a 这次写的是新 SubPath`,
-    )
-  } else if (restoreStatus === 'failed') {
-    console.error(`[19b]   ❌ restoreStatus=failed — restoreFromCos 阶段出错,看 sandbox 端日志`)
-  } else {
-    console.warn(
-      `[19b]   ⚠️  restoreStatus=${restoreStatus} — 期望 'full'。如果你看到日志里 instance_reuse 而非 instance_start,说明上一步 stop 没成功`,
-    )
-  }
-
   const prompt =
     '请用 cat 命令读取 /home/user/.last-update.txt,把里面的内容(单行 ISO 时间戳)原样复述给我,不要添加任何说明。'
   console.log(`\n[19b] prompt: ${prompt}`)
@@ -144,6 +124,23 @@ async function main() {
         `\n[19b][error] ${(ev.error as { name?: string }).name}: ${(ev.error as { message?: string }).message}`,
       )
     }
+  }
+
+  // send() 完成后 sandbox 已就绪，此时 getRestoreStatus() 可正常查询
+  const restoreStatus = (await session.getRestoreStatus?.()) ?? null
+  console.log(`\n[19b] >>> KEY SIGNAL <<<  restoreStatus=${restoreStatus}`)
+  if (restoreStatus === 'full' || restoreStatus === 'partial') {
+    console.log(`[19b]   ✅ restore 链路通了`)
+  } else if (restoreStatus === 'fresh') {
+    console.warn(
+      `[19b]   ⚠️  restoreStatus=fresh — 可能 19a 的 send-end snapshot 没真写到 COS,或 19a 这次写的是新 SubPath`,
+    )
+  } else if (restoreStatus === 'failed') {
+    console.error(`[19b]   ❌ restoreStatus=failed — restoreFromCos 阶段出错,看 sandbox 端日志`)
+  } else {
+    console.warn(
+      `[19b]   ⚠️  restoreStatus=${restoreStatus} — 期望 'full'。如果你看到日志里 instance_reuse 而非 instance_start,说明上一步 stop 没成功`,
+    )
   }
 
   console.log('\n\n──── 验收 ────')

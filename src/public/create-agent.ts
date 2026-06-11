@@ -393,12 +393,33 @@ function createSession(deps: SessionDeps): Session {
     /**
      * Spec B 新增。查询本 session 启动时的 restore 状态。
      *
-     * - workspaceSnapshot 未启用 / 沙箱未就绪 → null
+     * **调用时机**：必须在 send() 之后调用（sandbox / snapshotEngine 为懒初始化）。
+     * send() 前调用始终返回 null。
+     *
+     * - sandbox 未就绪 / snapshotEngine 未创建 → null
      * - /health 暂不可用或 restoreStatus 字段为空 → null(graceful)
      */
     async getRestoreStatus(): Promise<'full' | 'fresh' | 'partial' | 'failed' | null> {
-      if (!sessionSnapshotEngine || !sandboxInstance) return null
-      return sessionSnapshotEngine.getRestoreStatus(sandboxInstance)
+      if (!sessionSnapshotEngine) {
+        if (process.env.OAK_DEBUG === '1') {
+          // eslint-disable-next-line no-console
+          console.error('[oak][getRestoreStatus] NULL PATH ①: sessionSnapshotEngine not yet created — call send() first')
+        }
+        return null
+      }
+      if (!sandboxInstance) {
+        if (process.env.OAK_DEBUG === '1') {
+          // eslint-disable-next-line no-console
+          console.error('[oak][getRestoreStatus] NULL PATH ①: sandboxInstance not yet acquired — call send() first')
+        }
+        return null
+      }
+      const status = await sessionSnapshotEngine.getRestoreStatus(sandboxInstance)
+      if (process.env.OAK_DEBUG === '1') {
+        // eslint-disable-next-line no-console
+        console.error(`[oak][getRestoreStatus] result=${status}`)
+      }
+      return status
     },
   }
 

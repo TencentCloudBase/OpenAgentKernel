@@ -77,6 +77,10 @@ export class WorkspaceSnapshotEngine {
   }
 
   async getRestoreStatus(inst: SandboxInstance): Promise<Restored | null> {
+    if (process.env.OAK_DEBUG === '1') {
+      // eslint-disable-next-line no-console
+      console.error(`[oak][snapshotEngine.getRestoreStatus] delegating to getHealthRestoreStatus, inst.id=${inst.id}`)
+    }
     return getHealthRestoreStatus(inst)
   }
 }
