@@ -97,11 +97,15 @@ ${stamp}
       console.log(`[19a][tool#${toolCalls}] ← isError=${ev.isError} ${out.slice(0, 200)}${out.length > 200 ? '…' : ''}`)
     }
     if (ev.type === 'error') {
-      console.warn(`\n[19a][error] ${(ev.error as { name?: string; message?: string }).name}: ${(ev.error as { message?: string }).message}`)
+      console.warn(
+        `\n[19a][error] ${(ev.error as { name?: string; message?: string }).name}: ${(ev.error as { message?: string }).message}`,
+      )
     }
   }
   console.log(`\n[19a] write phase done.`)
-  console.log(`[19a] aborting (send-end snapshot 已在 send finally 内完成,下一行应已看到 [oak][workspace-snapshot] ms=N)...`)
+  console.log(
+    `[19a] aborting (send-end snapshot 已在 send finally 内完成,下一行应已看到 [oak][workspace-snapshot] ms=N)...`,
+  )
   await session.abort()
 
   // 持久化 userId + stamp 给 19b 校验

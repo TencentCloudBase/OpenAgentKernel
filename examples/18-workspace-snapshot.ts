@@ -129,11 +129,7 @@ async function main() {
   // 物理上还在,根本没经历 restore。这一轮真正验证的是:
   //   - send-end snapshot 没破坏 workspace
   //   - 模型 cat 能读到第一轮写入的内容
-  await runOne(
-    'round-2 (read)',
-    userId,
-    '请使用 Read 工具(或 cat)读取工作区根目录的 hello.txt,把内容原样告诉我。',
-  )
+  await runOne('round-2 (read)', userId, '请使用 Read 工具(或 cat)读取工作区根目录的 hello.txt,把内容原样告诉我。')
 
   console.log('\n[main] DONE.')
   console.log('[main] 想验证真正的 COS restore 跨进程闭环,请运行 example 19(它会模拟"换节点").')

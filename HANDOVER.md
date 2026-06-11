@@ -1,6 +1,6 @@
 # @cloudbase/open-agent-kernel 交接文档
 
-> 最后更新：2026-06-04 16:37 | 分支：`feat/support-open-agent-kernel` | 版本：`0.2.0-alpha.0`
+> 最后更新：2026-06-11 12:37 | 分支：`feat/support-open-agent-kernel` | 版本：`0.3.0-alpha.0`
 
 ---
 
@@ -28,6 +28,99 @@
 - **默认 ephemeral cwd 是 process-level 随机的**:不传 `cwd` 时,SDK 把项目级 auto-memory 写到 `<CLAUDE_CONFIG_DIR>/projects/<random-hash>/memory/`。跨节点 hash 不一致,**项目级主会话 auto-memory 跨节点不可复用**。要复用请传一个稳定的 `cwd`(业务镜像内固定路径)。**用户级 CLAUDE.md 与 user-level subagent memory 不受影响,跨节点正常工作**。
 - **CloudBaseCosClaudeHomeStore 缺 mock 单测**:目前仅集成层(example 16/17)验证。建议在 V2 加 mock 单测覆盖 key pattern / assertSafeKey / delete-404。
 - **session.send / runClaudeQuery 缺 sync-hook 集成测**:try/finally 触发 push 这条不变量目前没单测验证,只靠 spec compliance review 确认。建议 V2 加。
+
+---
+
+## v0.3.0 — Workspace Snapshot (Spec B) 
+
+**新增功能**:COS 快照同步 — 沙箱工作区跨进程/跨节点持久化
+
+### 核心实现
+- **AgsStatefulSandbox** 支持 COS mount + workspace snapshot
+- **send-end snapshot**:session.send() 结束自动触发 snapshot 到 COS
+- **manual snapshot**:`session.snapshotWorkspace()` API
+- **restoreFromCos**:新实例启动时自动从 COS 恢复工作区
+- **状态查询**:`session.getRestoreStatus()` 返回 `'full' | 'fresh' | 'partial' | 'failed' | null`
+
+### 验证用例
+- **example 18**:单进程验证(send-end snapshot + cosfs 持久化)
+- **example 19a/19b**:跨进程验证(写阶段 + 手动 stop + 读阶段)
+
+### Spec B 沙箱快照 — 技术架构总结
+
+#### 1. 快照生命周期
+```
+[OAK session.send() 结束] → [send-end snapshot 触发]
+    ↓
+[trw snapshotNow()] → [tar.zst 打包 /home/user] → [上传 COS]
+    ↓
+[新实例启动] → [trw restoreFromCos()] → [下载 snapshot] → [解压到 /home/user]
+    ↓
+[模型读取恢复的文件] → [跨进程数据接续完成]
+```
+
+#### 2. COS 存储结构
+```
+COS bucket/oak-workspaces/
+├── {userId}/                          # 用户隔离命名空间
+│   ├── .keep                          # 目录占位文件
+│   ├── .sync-out-status.json          # snapshot 元数据
+│   └── .snapshot-{timestamp}.tar.zst  # 压缩快照文件
+```
+
+#### 3. 关键文件格式
+
+**`.sync-out-status.json`**(快照元数据):
+```json
+{
+  "syncedAt": "2026-06-10T13:20:03.680Z",
+  "sizeBytes": 17877984,
+  "fileCount": 462,
+  "snapshotKey": ".snapshot-2026-06-10T13-20-03.680Z.tar.zst",
+  "snapshotSha256": "3d2d46bbf94fef6d0442b50c3c28c807918e2652acfb9339304d8662bf29b48a",
+  "snapshotSizeBytes": 4284680,
+  "lastGoodSnapshotKey": ".snapshot-2026-06-10T13-20-09.082Z.tar.zst",
+  "format": "tar.zst",
+  "version": 2
+}
+```
+
+#### 4. 挂载配置
+```json
+{
+  "MountOptions": [{
+    "Name": "oak-cos-workspace",
+    "SubPath": "restore-probe-{userId}"  // COS 子目录
+  }],
+  "CustomConfiguration": {
+    "Env": [{
+      "Name": "COS_MOUNT_DIR", 
+      "Value": "/mnt/workspace"  // 容器内挂载点
+    }]
+  }
+}
+```
+
+#### 5. 状态同步机制
+- **trw `/health`**:返回 `restored: "full" | "fresh" | "partial" | "failed"`
+- **OAK `getRestoreStatus()`**:读取 trw 状态并返回给业务层
+- **时序要求**:startSession 后需等待 trw bootstrap 完成才能读取准确状态
+
+### 已验证功能
+✅ **COS 写入链路**:OAK send-end → trw snapshotNow() → COS bucket/oak-workspaces/{userId}/.snapshot-*.tar.zst  
+✅ **COS 恢复链路**:新实例启动 → trw restoreFromCos() → 从 COS 下载 snapshot → 解压到 /home/user  
+✅ **跨进程数据接续**:新实例读到旧实例写入的文件内容
+✅ **trw 状态同步**:`/health` 正确返回 `restored: "full"`
+
+### 待优化问题
+- **OAK restoreStatus API 误报**:trw `/health` 显示 `"full"` 但 OAK `getRestoreStatus()` 有时返回 `null`(时序问题)
+- **example 19b 验收逻辑**:需要优化以模型读取结果为最终标准
+- **错误处理增强**:snapshot/restore 失败的用户提示
+
+### 技术细节
+- **COS 路径映射**:bucket/oak-workspaces/{userId}/ 正确挂载到 /mnt/workspace/
+- **文件格式**:`.snapshot-*.tar.zst`(压缩快照) + `.sync-out-status.json`(元数据)
+- **触发条件**:`workspaceRoot` ≠ `COS_MOUNT_DIR` 时自动启用 rsync 模式
 
 ---
 
@@ -577,7 +670,7 @@ if (process.env.OAK_DEBUG === '1') {
 
 ## 十二、待办事项 / 已知问题
 
-### 待完善
+### v0.2.0 (Spec A) 待完善
 
 1. ~~**`history-store/` 模块**~~ — ✅ 已删除（双写机制已覆盖需求）
 2. ~~**`getHistory()` 分页**~~ — ✅ 已优化（`loadEntriesByMessageIds` 避免全量扫描）
@@ -585,10 +678,19 @@ if (process.env.OAK_DEBUG === '1') {
 4. ~~**`listSessions()` 返回结构**~~ — ✅ 已通过 `registerSession` 持久化 userId
 5. **`resumeSession()` 实现** — 当前 SDK 层 resume 能工作（transcript 由 SDK 加载），但 kernel 层 userId 硬编码为 `'resumed'`、沙箱/权限状态未恢复（低优先级）
 
+### v0.3.0 (Spec B) 待优化
+
+1. **OAK restoreStatus API 误报** — trw `/health` 显示 `"full"` 但 OAK `getRestoreStatus()` 有时返回 `null`（时序同步问题）
+2. **example 19b 验收逻辑** — 需要优化以模型读取结果为最终标准，减少对 `getRestoreStatus()` 的依赖
+3. **错误处理增强** — snapshot/restore 失败的用户提示和 graceful 降级
+4. **性能监控** — snapshot 耗时、成功率等指标收集
+
 ### 技术债
 
 1. `cloudbase-db-driver.ts` 的 `gtCommand()` / `ltCommand()` 每次都动态加载 CloudBase SDK 获取 `db.command`，可缓存
 2. `extractMessageParts()` 中 `sdkMsg.message as { content?: unknown[] | string }` 类型断言链过长，应定义 SDKMessage 类型
+3. **CloudBaseCosClaudeHomeStore mock 单测** — 目前仅集成层验证，建议 V2 加 mock 单测
+4. **session.send / runClaudeQuery sync-hook 集成测** — try/finally 触发 push 的不变量需要单测验证
 
 ---
 

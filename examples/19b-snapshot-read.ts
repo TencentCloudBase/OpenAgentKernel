@@ -66,6 +66,27 @@ async function main() {
   console.log(`[19b] expectedStamp = ${expectedStamp}`)
   console.log('[19b] 提醒:跑这步前必须已经手动 tcb sandbox instance stop <19a 那个 instanceId>')
 
+  // ─── 诊断 1:先用独立的 AgsStatefulSandbox.acquire 拿 inst,直接 GET /health
+  //          看 trw 真实 body —— 区分 restoreStatus=null 是因为字段缺失还是 restored:fresh ───
+  console.log('\n[19b][diag] acquire raw sandbox instance to inspect /health body...')
+  const probeRuntime = new AgsStatefulSandbox()
+  const probeInst = await probeRuntime.acquire({
+    envId: process.env.TCB_ENV_ID!,
+    conversationId: `probe-${Date.now()}`,
+    scope: 'shared',
+    userId,
+  })
+  console.log(`[19b][diag] probe instance.id = ${probeInst.id}`)
+  try {
+    const healthRes = await probeInst.request('/health', { method: 'GET' })
+    const healthText = await healthRes.text()
+    console.log(`[19b][diag] /health status=${healthRes.status}`)
+    console.log(`[19b][diag] /health body  =\n${healthText}`)
+  } catch (err) {
+    console.warn(`[19b][diag] /health probe failed: ${(err as Error).message}`)
+  }
+  // probe inst 不主动 release(shared 模式 release 也是 no-op,无所谓)
+
   const agent = createAgent({
     envId: process.env.TCB_ENV_ID!,
     model: buildModel(),
@@ -77,16 +98,25 @@ async function main() {
   })
 
   const session = await agent.startSession({ userId })
+
+  // 等 trw 的 /health 状态刷新(trw bootstrap 后可能需要时间更新 restoreStatus)
+  console.log('[19b] 等待 2s 让 trw /health 状态刷新...')
+  await new Promise(r => setTimeout(r, 2000))
+
   const restoreStatus = (await session.getRestoreStatus?.()) ?? null
   console.log(`\n[19b] >>> KEY SIGNAL <<<  restoreStatus=${restoreStatus}`)
   if (restoreStatus === 'full' || restoreStatus === 'partial') {
     console.log(`[19b]   ✅ restore 链路通了 — 期望模型也能读到 stamp`)
   } else if (restoreStatus === 'fresh') {
-    console.warn(`[19b]   ⚠️  restoreStatus=fresh — 可能 19a 的 send-end snapshot 没真写到 COS,或 19a 这次写的是新 SubPath`)
+    console.warn(
+      `[19b]   ⚠️  restoreStatus=fresh — 可能 19a 的 send-end snapshot 没真写到 COS,或 19a 这次写的是新 SubPath`,
+    )
   } else if (restoreStatus === 'failed') {
     console.error(`[19b]   ❌ restoreStatus=failed — restoreFromCos 阶段出错,看 sandbox 端日志`)
   } else {
-    console.warn(`[19b]   ⚠️  restoreStatus=${restoreStatus} — 期望 'full'。如果你看到日志里 instance_reuse 而非 instance_start,说明上一步 stop 没成功`)
+    console.warn(
+      `[19b]   ⚠️  restoreStatus=${restoreStatus} — 期望 'full'。如果你看到日志里 instance_reuse 而非 instance_start,说明上一步 stop 没成功`,
+    )
   }
 
   const prompt =
@@ -110,7 +140,9 @@ async function main() {
       console.log(`[19b][tool#${toolCalls}] ← isError=${ev.isError} ${out.slice(0, 300)}${out.length > 300 ? '…' : ''}`)
     }
     if (ev.type === 'error') {
-      console.warn(`\n[19b][error] ${(ev.error as { name?: string }).name}: ${(ev.error as { message?: string }).message}`)
+      console.warn(
+        `\n[19b][error] ${(ev.error as { name?: string }).name}: ${(ev.error as { message?: string }).message}`,
+      )
     }
   }
 
