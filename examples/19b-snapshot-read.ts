@@ -95,8 +95,7 @@ async function main() {
     model: buildModel(),
     systemPrompt: 'You are a coding assistant with shell + filesystem tools. 用工具完成,不要编造。',
     sandbox: {
-      runtime: new AgsStatefulSandbox({ apiKey: getSandboxApiKey() }),
-      scope: 'shared',
+      enabled: true,
     },
   })
 

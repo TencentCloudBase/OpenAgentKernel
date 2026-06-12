@@ -19,9 +19,9 @@
  *   - 第一次运行会触发 CreateSandboxTool（~30s）+ StartSandboxInstance（~30-60s）
  *   - 之后同一 envId 会复用 ToolId（内存 cache），但每个 session 仍会启新实例
  */
-import { getEnvId, getPlatformCredentials, getSandboxApiKey } from './_shared/env.js'
+import { getEnvId, getPlatformCredentials } from './_shared/env.js'
 
-import { createAgent, AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
+import { createAgent } from '@cloudbase/open-agent-kernel'
 
 async function main(): Promise<void> {
   const envId = getEnvId()
@@ -37,9 +37,8 @@ async function main(): Promise<void> {
       'Always use the tools to interact with the filesystem—never fabricate output. ' +
       'Reply concisely in Chinese.',
     sandbox: {
-      runtime: new AgsStatefulSandbox({ apiKey: getSandboxApiKey() }),
-      scope: 'shared',
-      // PR #6A 默认 isolated 模式（每个 session 一个独立实例）
+      enabled: true,
+      // 默认使用 AgsStatefulSandbox + scope: 'shared'
     },
   })
 

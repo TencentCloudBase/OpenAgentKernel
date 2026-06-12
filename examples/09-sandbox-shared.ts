@@ -11,9 +11,9 @@
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/09-sandbox-shared.ts
  */
-import { getEnvId, getPlatformCredentials, getSandboxApiKey } from './_shared/env.js'
+import { getEnvId, getPlatformCredentials } from './_shared/env.js'
 
-import { createAgent, AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
+import { createAgent } from '@cloudbase/open-agent-kernel'
 import type { SessionEvent } from '@cloudbase/open-agent-kernel'
 
 async function streamSession(
@@ -53,9 +53,8 @@ async function main(): Promise<void> {
       'Always use the tools to interact with the filesystem—never fabricate output. ' +
       'Reply concisely in Chinese.',
     sandbox: {
-      runtime: new AgsStatefulSandbox({ apiKey: getSandboxApiKey() }),
-      // shared 模式：同 envId 多 session 共享一个实例
-      scope: 'shared',
+      enabled: true,
+      // 默认 shared 模式：同 envId 多 session 共享一个实例
     },
   })
 

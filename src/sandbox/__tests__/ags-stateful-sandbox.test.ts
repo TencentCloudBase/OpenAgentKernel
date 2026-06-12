@@ -95,6 +95,7 @@ function setupMocks(opts: {
   toolFound?: boolean
   toolStorageBucketPath?: string | null
   envInfoStorages?: Array<Record<string, unknown>>
+  instanceSet?: Array<Record<string, unknown>>
 }): {
   records: AcquireRequestRecord[]
 } {
@@ -143,7 +144,7 @@ function setupMocks(opts: {
     }
 
     if (action === 'DescribeSandboxInstanceList') {
-      return { InstanceSet: [], TotalCount: 0 }
+      return { InstanceSet: opts.instanceSet ?? [], TotalCount: opts.instanceSet?.length ?? 0 }
     }
 
     if (action === 'StartSandboxInstance') {
@@ -268,6 +269,35 @@ describe('AgsStatefulSandbox cosMount = "auto" with discovered bucket', () => {
 
     const start = findRequest(records, 'StartSandboxInstance')
     expect(start!.MountOptions).toEqual([{ Name: 'oak-cos-workspace', SubPath: 'bob' }])
+  })
+
+  it('reuses shared instance only when the process knows it belongs to the same userId', async () => {
+    const instanceSet: Array<Record<string, unknown>> = []
+    const { records } = setupMocks({ toolFound: true, toolStorageBucketPath: '/oak-workspaces', instanceSet })
+    const runtime = newTestRuntime({ cosMount: 'auto' })
+
+    await runtime.acquire({ envId: 'test-env', conversationId: 'c1', userId: 'alice', scope: 'shared' })
+    instanceSet.push({ InstanceId: 'inst-123', Status: 'RUNNING', ToolId: 'sdt-existing' })
+    await runtime.acquire({ envId: 'test-env', conversationId: 'c2', userId: 'alice', scope: 'shared' })
+
+    const starts = records.filter((r) => r.action === 'StartSandboxInstance')
+    expect(starts).toHaveLength(1)
+  })
+
+  it('does not reuse unknown-owner shared instances when cosMount binds SubPath to userId', async () => {
+    const { records } = setupMocks({
+      toolFound: true,
+      toolStorageBucketPath: '/oak-workspaces',
+      instanceSet: [{ InstanceId: 'inst-unknown', Status: 'RUNNING', ToolId: 'sdt-existing' }],
+    })
+    const runtime = newTestRuntime({ cosMount: 'auto' })
+
+    await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'shared' })
+
+    const start = findRequest(records, 'StartSandboxInstance')
+    const stop = findRequest(records, 'StopSandboxInstance')
+    expect(start).toBeDefined()
+    expect(stop).toBeUndefined()
   })
 
   it('injects CustomConfiguration.Env.COS_MOUNT_DIR on StartSandboxInstance', async () => {

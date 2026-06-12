@@ -17,10 +17,10 @@
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/14-session-history.ts
  */
-import { getEnvId, getPlatformCredentials, getSandboxApiKey } from './_shared/env.js'
+import { getEnvId, getPlatformCredentials } from './_shared/env.js'
 
 import { randomUUID } from 'node:crypto'
-import { AgsStatefulSandbox, createAgent } from '@cloudbase/open-agent-kernel'
+import { createAgent } from '@cloudbase/open-agent-kernel'
 
 // ─── 辅助函数 ──────────────────────────────────────────────────────
 
@@ -83,9 +83,8 @@ const agent = createAgent({
     'When asked to list/read files, use glob or read.\n' +
     'Reply concisely in Chinese.',
   sandbox: {
-    runtime: new AgsStatefulSandbox({ apiKey: getSandboxApiKey() }),
+    enabled: true,
     cloudbaseTools: false, // 只用 sandbox 工具，不启用 cloudbase MCP（简化依赖）
-    scope: 'shared',
   },
   permissions: {
     // bash 命令需要审批（危险操作）

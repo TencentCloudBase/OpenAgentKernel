@@ -15,9 +15,9 @@
  *   OAK_DEBUG=1 pnpm dlx tsx packages/open-agent-kernel/examples/18-workspace-snapshot.ts
  */
 
-import { AgsStatefulSandbox, createAgent } from '@cloudbase/open-agent-kernel'
+import { createAgent } from '@cloudbase/open-agent-kernel'
 
-import { getPlatformCredentials, getSandboxApiKey, loadEnv } from './_shared/env.js'
+import { getPlatformCredentials, loadEnv } from './_shared/env.js'
 
 function buildModel() {
   const customModelId = process.env.OAK_EXAMPLE_MODEL_ID
@@ -73,8 +73,7 @@ async function runOne(label: string, userId: string, prompt: string, opts: { man
     model: buildModel(),
     systemPrompt: 'You are a coding assistant with shell + filesystem tools. 请用工具完成任务,不要编造。',
     sandbox: {
-      runtime: new AgsStatefulSandbox({ apiKey: getSandboxApiKey() }),
-      scope: 'shared',
+      enabled: true,
     },
   })
 

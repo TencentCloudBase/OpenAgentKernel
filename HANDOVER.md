@@ -1009,6 +1009,44 @@ await writeUserMemoryFiles({
 })
 ```
 
+---
+
+### 优化 6：sandbox 主动开启后的默认 AGS 配置（✅ 已完成）
+
+> **状态**: 已实施。sandbox 仍默认关闭，但用户主动开启后不再需要理解 `new AgsStatefulSandbox`、`getSandboxApiKey()` 和 `scope: 'shared'` 这些默认细节。
+
+#### 设计结论
+
+1. **新增 `sandbox.enabled` 默认路径**
+   - `sandbox: { enabled: true }` 会自动创建默认 `AgsStatefulSandbox`。
+   - 默认 `provider` 为 `ags-stateful`，为后续扩展其他 sandbox 产品预留类型标识。
+   - 默认 `scope` 为 `shared`，匹配 workspace snapshot 和跨 session 接续的主路径。
+
+2. **默认 AGS 数据面凭证**
+   - 优先级：`sandbox.apiKey` → `TCB_API_KEY` → `OAK_SANDBOX_API_KEY`。
+   - 缺失时在 `createAgent` 阶段抛出明确配置错误。
+   - 平台控制面凭证仍通过 `createAgent({ credentials })` 统一下传。
+
+3. **保留高级覆盖**
+   - 用户显式传 `sandbox.runtime` 时，kernel 不会替换为默认 AGS runtime。
+   - `sandbox.cloudbaseTools: false`、`workspaceSnapshot`、timeout 等高级配置继续生效。
+
+4. **修复 shared + cosMount 的 userId 复用隔离**
+   - cosMount 的 `SubPath` 在 `StartSandboxInstance` 阶段绑定到 `userId`。
+   - 旧逻辑按 `envId/toolId` 复用任意 shared 实例，可能把当前用户的 snapshot 写到旧实例所属 userId 的 COS 目录，导致下一次用当前 userId restore 时出现 `restoreStatus=fresh`。
+   - 新逻辑仅复用本进程明确记录 owner 且 owner 相同的 shared 实例；未知 owner 的历史实例不再直接复用，交给 AGS timeout 回收或用户手动停止。
+
+#### 新推荐用法
+
+```typescript
+const agent = createAgent({
+  envId,
+  credentials: { secretId, secretKey },
+  model: 'glm-5.1',
+  sandbox: { enabled: true },
+})
+```
+
 ## 十三、依赖关系
 
 ### 运行时依赖

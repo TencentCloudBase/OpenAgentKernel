@@ -54,4 +54,4 @@ pnpm dlx tsx packages/open-agent-kernel/examples/14-session-history.ts
 
 ## 共享工具
 
-`_shared/env.ts` 在 import 时调 `dotenv.config()` 加载 `.env.local`，并提供 `getEnvId()`、`getPlatformCredentials()`、`getSandboxApiKey()`。示例层负责从环境变量读取凭证，再通过 `createAgent({ credentials })` 或构造参数显式传给 SDK。
+`_shared/env.ts` 在 import 时调 `dotenv.config()` 加载 `.env.local`，并提供 `getEnvId()`、`getPlatformCredentials()`、`getSandboxApiKey()`。示例层负责从环境变量读取凭证，再通过 `createAgent({ credentials })` 显式传给 SDK。常规 sandbox 示例使用 `sandbox: { enabled: true }`，SDK 会从 `TCB_API_KEY` / `OAK_SANDBOX_API_KEY` 读取默认 AGS 数据面凭证；只有 probe 脚本会直接构造 sandbox runtime。

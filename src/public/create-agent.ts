@@ -13,6 +13,7 @@ import { buildClaudeQueryOptions } from '../runtime/agent-builder.js'
 import { createTranslatorState, translateSdkMessage } from '../runtime/event-translator.js'
 import { buildPromptAsync } from '../runtime/prompt-builder.js'
 import { createCloudBaseMcpServer, type CloudBaseUserCredentials } from '../sandbox/cloudbase-mcp.js'
+import { AgsStatefulSandbox } from '../sandbox/index.js'
 import type { SandboxInstance, SandboxRuntime } from '../sandbox/types.js'
 import type { WorkspaceSnapshotEngine } from '../sandbox/workspace-snapshot/index.js'
 import { CloudBaseDbDriver, CloudBaseSessionStore } from '../session-store/index.js'
@@ -117,6 +118,7 @@ function normalizeAgentConfig(config: AgentConfig): AgentConfig {
   const normalizedConfig: AgentConfig = {
     ...config,
     ...(credentials ? { credentials } : {}),
+    sandbox: resolveSandboxConfig(config),
     storage: config.storage ?? (credentials ? new CloudBaseStorage({ credentials }) : undefined),
   }
 
@@ -134,6 +136,38 @@ function resolvePlatformCredentials(config: AgentConfig): ResolvedPlatformCreden
   return {
     ...credentials,
     envId: credentials.envId ?? config.envId,
+  }
+}
+
+function resolveSandboxConfig(config: AgentConfig): AgentConfig['sandbox'] {
+  const sandbox = config.sandbox
+  if (!sandbox || sandbox.enabled === false) return undefined
+
+  if (sandbox.runtime) return sandbox
+
+  const provider = sandbox.provider ?? 'ags-stateful'
+  if (provider !== 'ags-stateful') {
+    throw new InvalidConfigError(
+      `AgentConfig.sandbox.provider="${provider}" is not supported yet. ` +
+        'The built-in sandbox currently supports provider="ags-stateful". ' +
+        'Pass a custom SandboxRuntime via AgentConfig.sandbox.runtime for advanced scenarios.',
+    )
+  }
+
+  const apiKey = sandbox.apiKey ?? process.env.TCB_API_KEY ?? process.env.OAK_SANDBOX_API_KEY
+  if (!apiKey) {
+    throw new InvalidConfigError(
+      'AgentConfig.sandbox.enabled=true requires sandbox.apiKey, TCB_API_KEY, or OAK_SANDBOX_API_KEY ' +
+        'for the default AgsStatefulSandbox runtime.',
+    )
+  }
+
+  return {
+    ...sandbox,
+    enabled: true,
+    provider,
+    runtime: new AgsStatefulSandbox({ apiKey }),
+    scope: sandbox.scope ?? 'shared',
   }
 }
 

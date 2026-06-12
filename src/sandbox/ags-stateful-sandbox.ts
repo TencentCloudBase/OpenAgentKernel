@@ -644,6 +644,8 @@ function pickPrimaryInstance(candidates: AgsInstanceStatus[]): AgsInstanceStatus
   return null
 }
 
+const sharedInstanceOwners = new Map<string, string>()
+
 /**
  * Shared 模式：同 envId/toolId 下复用单个实例。
  *
@@ -666,7 +668,12 @@ async function ensureSharedInstance(args: {
   const { toolId, cred, envId, cos, userId, onProgress } = args
   const all = await describeInstances(cred, envId, { toolId })
   const active = all.filter((it) => ['RUNNING', 'PAUSED', 'RESUME_FAILED'].includes(it.status))
-  const primary = pickPrimaryInstance(active)
+  // cosMount 的 SubPath 在 StartSandboxInstance 时绑定到 userId。跨 user 复用同一 shared
+  // instance 会把 snapshot 写到旧 userId 的 COS 目录，导致后续 restore=fresh。
+  // AGS Describe 当前拿不到启动时的 SubPath，因此只复用本进程明确启动过且 owner 相同的实例；
+  // 未知 owner 的历史实例交给 AGS timeout 回收，不主动复用也不打断。
+  const reusable = cos ? active.filter((it) => sharedInstanceOwners.get(it.instanceId) === userId) : active
+  const primary = pickPrimaryInstance(reusable)
 
   if (!primary) {
     onProgress?.({
@@ -682,11 +689,12 @@ async function ensureSharedInstance(args: {
       userId,
       onProgress,
     })
+    sharedInstanceOwners.set(instanceId, userId)
     return { instanceId, reused: false }
   }
 
   // 同 toolId 下保留一个实例：多余的 best-effort 停掉，避免漂移
-  const redundant = active.filter((it) => it.instanceId !== primary.instanceId)
+  const redundant = reusable.filter((it) => it.instanceId !== primary.instanceId)
   for (const item of redundant) {
     try {
       await stopInstance(item.instanceId, cred, envId)
@@ -709,6 +717,7 @@ async function ensureSharedInstance(args: {
     })
   }
 
+  sharedInstanceOwners.set(primary.instanceId, userId)
   return { instanceId: primary.instanceId, reused: true }
 }
 
@@ -773,6 +782,7 @@ const toolIdCache = new Map<string, string>()
  */
 export function __clearToolIdCacheForTests(): void {
   toolIdCache.clear()
+  sharedInstanceOwners.clear()
 }
 
 function buildToolCacheKey(envId: string, expectedBucketPath: string | null): string {

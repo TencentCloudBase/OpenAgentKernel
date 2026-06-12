@@ -24,9 +24,9 @@
  *   - 镜像必须自带 mcporter + cloudbase-mcp（默认 OpenVibeCoding 公开 vibecoding 镜像满足）
  *   - 镜像不带这两个工具时，cloudbase tools 自动 degrade（仍能用 sandbox 文件系统工具）
  */
-import { getEnvId, getPlatformCredentials, getSandboxApiKey } from './_shared/env.js'
+import { getEnvId, getPlatformCredentials } from './_shared/env.js'
 
-import { createAgent, AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
+import { createAgent } from '@cloudbase/open-agent-kernel'
 
 async function main(): Promise<void> {
   const envId = getEnvId()
@@ -45,8 +45,7 @@ async function main(): Promise<void> {
       'Always use the tools to verify—never fabricate output. ' +
       'Reply concisely in Chinese.',
     sandbox: {
-      runtime: new AgsStatefulSandbox({ apiKey: getSandboxApiKey() }),
-      scope: 'shared',
+      enabled: true,
       // 默认 cloudbaseTools: true（开通 sandbox 即内置 cloudbase MCP）
       // 用户租户凭证不传时回退到 AgentConfig.credentials
       // 多租户场景示例（每次 acquire 调一次拿当前用户的凭证）：

@@ -10,7 +10,7 @@
 Open Agent Kernel（OAK）是面向 **CloudBase 平台开发者** 的服务端 Agent SDK。它封装了底层 AI Agent 引擎，让开发者以 `envId` 为锚点，一行代码创建能读写数据库、操作云存储、执行 Shell 命令的 AI Agent。
 
 ```typescript
-import { createAgent, AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
+import { createAgent } from '@cloudbase/open-agent-kernel'
 
 const agent = createAgent({
   envId: 'my-env-123',
@@ -20,7 +20,7 @@ const agent = createAgent({
   },
   model: 'glm-5.1',
   systemPrompt: 'You are a helpful CloudBase assistant.',
-  sandbox: { runtime: new AgsStatefulSandbox({ apiKey: process.env.TCB_API_KEY! }) },
+  sandbox: { enabled: true },
 })
 
 const session = await agent.startSession({ userId: 'user-1' })
@@ -72,7 +72,7 @@ for await (const event of session.send('你好，介绍一下你自己')) {
 ### 带沙箱的 Coding Agent
 
 ```typescript
-import { createAgent, AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
+import { createAgent } from '@cloudbase/open-agent-kernel'
 
 const agent = createAgent({
   envId: process.env.TCB_ENV_ID!,
@@ -82,7 +82,7 @@ const agent = createAgent({
     secretId: process.env.TENCENTCLOUD_SECRETID!,
     secretKey: process.env.TENCENTCLOUD_SECRETKEY!,
   },
-  sandbox: { runtime: new AgsStatefulSandbox({ apiKey: process.env.TCB_API_KEY! }) },
+  sandbox: { enabled: true },
 })
 
 const session = await agent.startSession({ userId: 'user-1' })
@@ -139,7 +139,7 @@ for await (const e of resumed.send('还记得我的名字吗？')) { /* ... */ }
 | `cwd` | `string` | | 平台资产层根目录(skills + 项目级 CLAUDE.md 加载根) |
 | `skills` | `{ enabled?: 'all' \| string[] }` | | 启用 SDK skills 能力(需配合 `cwd`) |
 | `userMemory` | `boolean \| { enabled?: boolean }` | | 用户级长期记忆；`true` 表示启用，自动同步到 envId 对应 COS |
-| `sandbox.workspaceSnapshot` | `'auto' \| 'enabled' \| 'disabled'` | | sandbox cwd 自动持久化(ags-stateful 默认 `'auto'`,需 `scope: 'shared'`) |
+| `sandbox.workspaceSnapshot` | `'auto' \| 'enabled' \| 'disabled'` | | sandbox cwd 自动持久化(ags-stateful 默认 `'auto'`，默认 sandbox 已使用 `scope: 'shared'`) |
 | `sandbox.workspaceSnapshotTimeoutMs` | `number` | | snapshot RPC 超时,默认 `30_000`(镜像内部上限 600_000) |
 | `sandbox.workspaceInitTimeoutMs` | `number` | | bootstrap restore 超时,默认 `60_000`(镜像内部上限 1_200_000) |
 
@@ -157,8 +157,11 @@ interface ModelSpec {
 
 /** 沙箱配置 */
 interface SandboxConfig {
-  runtime?: SandboxRuntime         // AgsStatefulSandbox 实例
-  scope?: 'session' | 'shared'     // 实例粒度（默认 session）
+  enabled?: boolean                // true 时默认使用 AgsStatefulSandbox
+  provider?: 'ags-stateful'        // 当前内置默认 provider
+  apiKey?: string                  // 不传则读取 TCB_API_KEY / OAK_SANDBOX_API_KEY
+  runtime?: SandboxRuntime         // 高级：自定义 sandbox runtime
+  scope?: 'session' | 'shared'     // 实例粒度（默认 shared）
   cloudbaseTools?: boolean         // 暴露 mcp__cloudbase__* 工具（默认 true）
   userCredentials?: SandboxUserCredentials | (() => Promise<SandboxUserCredentials>)
 }
@@ -315,7 +318,7 @@ mcpServers: {
 对敏感工具调用设置人工审批：
 
 ```typescript
-import { createAgent, AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
+import { createAgent } from '@cloudbase/open-agent-kernel'
 
 const envId = process.env.TCB_ENV_ID!
 const credentials = {
@@ -327,7 +330,7 @@ const agent = createAgent({
   envId,
   credentials,
   model: 'glm-5.1',
-  sandbox: { runtime: new AgsStatefulSandbox({ apiKey: process.env.TCB_API_KEY! }) },
+  sandbox: { enabled: true },
   permissions: {
     requireApproval: ['mcp__sandbox__bash', 'mcp__cloudbase__deleteData'],
     // 有 credentials 时默认使用 CloudBase FlexDB permission store，支持跨节点 respondApproval。
@@ -475,25 +478,23 @@ await deleteUserMemoryFiles({
 启用 sandbox cwd 自动持久化(适用 AGS stateful sandbox):每次 `session.send()` 结束后把工作目录打包上传 COS,下次 `startSession` 时由镜像内部 bootstrap 自动 restore,model 能读到上一轮写入的文件 — 跨进程 / 跨节点都生效。
 
 ```typescript
-import { createAgent, AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
+import { createAgent } from '@cloudbase/open-agent-kernel'
 
 const agent = createAgent({
   envId: process.env.TCB_ENV_ID!,
   credentials: {
-    envId: process.env.TCB_ENV_ID!,
     secretId: process.env.TENCENTCLOUD_SECRETID!,
     secretKey: process.env.TENCENTCLOUD_SECRETKEY!,
   },
   model: 'claude-opus-4-8',
   sandbox: {
-    runtime: new AgsStatefulSandbox({ apiKey: process.env.TCB_API_KEY! }),
-    scope: 'shared',         // 必须为 'shared',否则 startSession 抛 ConfigError
+    enabled: true,
     // workspaceSnapshot 默认 'auto',ags-stateful 自动启用
   },
 })
 ```
 
-**关键约束**:`scope: 'shared'`(同 envId 共享容器,跨 session 接续工作目录)。`workspaceSnapshot: 'auto'` 时,只有 ags-stateful 沙箱会启用 — 其他 runtime 自动跳过。`'enabled'` 表示强制启用(非 ags-stateful 会抛 ConfigError),`'disabled'` 关闭。
+**关键约束**:默认 sandbox 会使用 `scope: 'shared'`(同 envId 共享容器,跨 session 接续工作目录)。`workspaceSnapshot: 'auto'` 时,只有 ags-stateful 沙箱会启用 — 其他 runtime 自动跳过。`'enabled'` 表示强制启用(非 ags-stateful 会抛 ConfigError),`'disabled'` 关闭。
 
 **触发**:每次 `session.send()` 结束自动 snapshot;失败 yield 一个 warning event(不抹掉 final answer,bootstrap 失败下次启动时 restore 状态可观测,见下文)。
 
@@ -504,7 +505,7 @@ const agent = createAgent({
 **镜像选型(重要)**:`workspaceSnapshot` 启用时,沙箱镜像必须用 trw **minimal** preset,**不能**用 vibecoding preset。
 
 - vibecoding 镜像在 `/home/user` 下预装 41MB `node_modules.tar.gz` + 349 个 node_modules 子目录(由 `seedCodingTemplate` 在首次 boot 时拷入),snapshot 时 trw `runZstdList` 读取 tar/zstd stderr 撞 1MB 上限抛 `ENOBUFS` → 500。trw 主线 COS 验收只覆盖 minimal preset(参 trw `AGS一条龙.md` §4 Tool 分工 + `infra/vibecoding-sync.md` §72)。
-- 配置方式:`OAK_SANDBOX_IMAGE` 环境变量,或 `new AgsStatefulSandbox({ image })`。OAK 默认 fallback 已是 minimal preset 镜像,但业务下游若覆盖了该值,需自检不要回退到 vibecoding tag。
+- 配置方式:`OAK_SANDBOX_IMAGE` 环境变量,或高级用法传 `sandbox.runtime`。OAK 默认 fallback 已是 minimal preset 镜像,但业务下游若覆盖了该值,需自检不要回退到 vibecoding tag。
 - 标识方法:tag 末尾后缀 `-minimal` / `-magent` / `-vibecoding` / `-full` 表明 preset(参 trw 一条龙 §3 命名规则 `YYMMDD-HHMM-随机-<preset>`)。
 
 **手动 API**(可选):

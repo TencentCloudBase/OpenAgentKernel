@@ -36,9 +36,9 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { AgsStatefulSandbox, createAgent } from '@cloudbase/open-agent-kernel'
+import { createAgent } from '@cloudbase/open-agent-kernel'
 
-import { getPlatformCredentials, getSandboxApiKey, loadEnv } from './_shared/env.js'
+import { getPlatformCredentials, loadEnv } from './_shared/env.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const HANDOFF_FILE = path.join(__dirname, '.last-userid')
@@ -72,8 +72,7 @@ async function main() {
     model: buildModel(),
     systemPrompt: 'You are a coding assistant with shell + filesystem tools. 用工具完成,不要编造。',
     sandbox: {
-      runtime: new AgsStatefulSandbox({ apiKey: getSandboxApiKey() }),
-      scope: 'shared',
+      enabled: true,
     },
   })
 

@@ -75,18 +75,40 @@ export interface ModelSpec {
 
 export interface SandboxConfig {
   /**
+   * 是否启用默认 sandbox。
+   *
+   * - `true`：使用内置默认 provider（当前为 `ags-stateful`），并补齐默认 runtime/scope
+   * - `false` / 未配置 sandbox：不启用 sandbox
+   *
+   * 如果显式传了 `runtime`，即使不传 `enabled` 也会启用 sandbox。
+   */
+  enabled?: boolean
+  /**
+   * 默认 sandbox 产品类型。当前仅内置 `ags-stateful`。
+   *
+   * 未来可扩展到其他 CloudBase/第三方 sandbox 产品；高级用户也可直接传 `runtime`。
+   */
+  provider?: 'ags-stateful'
+  /**
+   * 默认 AGS 数据面认证 JWT。
+   *
+   * 仅在 `enabled: true` 且未显式传 `runtime` 时用于构造默认 AgsStatefulSandbox。
+   * 不传时读取 `TCB_API_KEY` 或 `OAK_SANDBOX_API_KEY`。
+   */
+  apiKey?: string
+  /**
    * Sandbox 后端实例（由用户从 `@cloudbase/open-agent-kernel/sandbox` 子模块构造，
    * 例如 `new AgsStatefulSandbox()`）。
-   * 不传 `runtime` 时不启用任何沙箱（agent 只能跑模型对话，无文件系统/shell 能力）。
+   * 不传 `runtime` 但 `enabled: true` 时，默认使用 AgsStatefulSandbox。
    *
    * 类型故意宽泛（unknown），避免公共类型层依赖底层实现。
    */
   runtime?: unknown
   /**
    * 沙箱粒度(AGS 实例层):
-   * - `'session'`(默认):每个 startSession 一个独立 AGS 实例,session.abort 时 Pause。
+   * - `'session'`:每个 startSession 一个独立 AGS 实例,session.abort 时 Pause。
    *   对应 server feature/stateful-infra 的 `sandboxMode: 'isolated'`。
-   * - `'shared'`:同 envId 多个 session 共享一个 AGS 实例,按需 Resume / Stop 漂移实例,
+   * - `'shared'`(默认):同 envId 多个 session 共享一个 AGS 实例,按需 Resume / Stop 漂移实例,
    *   abort 不 Pause(由 AGS 按 DefaultTimeout 自动回收)。
    *   对应 server feature/stateful-infra 的 `sandboxMode: 'shared'`。
    *
