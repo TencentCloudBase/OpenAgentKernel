@@ -10,6 +10,7 @@ import { createCloudBaseMcpServer, type CloudBaseUserCredentials } from '../sand
 import type { SandboxInstance, SandboxRuntime } from '../sandbox/types.js'
 import type { WorkspaceSnapshotEngine } from '../sandbox/workspace-snapshot/index.js'
 import { CloudBaseDbDriver, CloudBaseSessionStore } from '../session-store/index.js'
+import { CloudBaseStorage } from '../storage/cloudbase-storage.js'
 import type { StorageProvider } from '../storage/types.js'
 import type {
   Agent,
@@ -26,6 +27,8 @@ import type {
   SessionSummary,
 } from './types.js'
 
+type ResolvedPlatformCredentials = NonNullable<AgentConfig['credentials']> & { envId: string }
+
 /**
  * 创建 CloudBase Open Agent 实例。
  *
@@ -41,8 +44,6 @@ import type {
  *   - HITL 工具审批（PR #7.0）：requireApproval / respondApproval / 流终止+resume 范式
  */
 export function createAgent(config: AgentConfig): Agent {
-  config = normalizeAgentConfig(config)
-
   if (!config.envId || typeof config.envId !== 'string') {
     throw new InvalidConfigError('AgentConfig.envId is required and must be a non-empty string')
   }
@@ -60,6 +61,8 @@ export function createAgent(config: AgentConfig): Agent {
       }
     }
   }
+
+  config = normalizeAgentConfig(config)
 
   const agentId = randomUUID()
   const sessionsManagement = createSessionsManagement(config)
@@ -104,9 +107,26 @@ export function createAgent(config: AgentConfig): Agent {
 }
 
 function normalizeAgentConfig(config: AgentConfig): AgentConfig {
-  return {
+  const credentials = resolvePlatformCredentials(config)
+  const normalizedConfig: AgentConfig = {
     ...config,
-    session: resolveSessionConfig(config),
+    ...(credentials ? { credentials } : {}),
+    storage: config.storage ?? (credentials ? new CloudBaseStorage({ credentials }) : undefined),
+  }
+
+  return {
+    ...normalizedConfig,
+    session: resolveSessionConfig(normalizedConfig),
+  }
+}
+
+function resolvePlatformCredentials(config: AgentConfig): ResolvedPlatformCredentials | undefined {
+  const credentials = config.credentials
+  if (!credentials) return undefined
+
+  return {
+    ...credentials,
+    envId: credentials.envId ?? config.envId,
   }
 }
 
@@ -136,7 +156,8 @@ function resolveSessionConfig(config: AgentConfig): AgentConfig['session'] {
         'The built-in session store currently supports database="flexdb".',
     )
   }
-  if (!config.credentials) {
+  const credentials = resolvePlatformCredentials(config)
+  if (!credentials) {
     throw new InvalidConfigError(
       'AgentConfig.session.enabled=true requires AgentConfig.credentials for the default CloudBase FlexDB session store.',
     )
@@ -145,7 +166,7 @@ function resolveSessionConfig(config: AgentConfig): AgentConfig['session'] {
   const projectKey = session?.projectKey ?? config.envId
   const store = new CloudBaseSessionStore({
     driver: new CloudBaseDbDriver({
-      credentials: config.credentials,
+      credentials,
       collectionPrefix: session?.tablePrefix,
     }),
     projectKey,

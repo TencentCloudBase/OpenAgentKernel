@@ -38,7 +38,8 @@ export interface ResourceConfig {
  * 通过 `createAgent({ credentials })` 显式传入。
  */
 export interface PlatformCredentials {
-  envId: string
+  /** CloudBase 环境 ID；不传时默认继承 AgentConfig.envId */
+  envId?: string
   secretId: string
   secretKey: string
   /** STS 临时凭证 token（可选） */
@@ -444,7 +445,8 @@ export interface AgentConfig {
   // ── 多模态附件存储 ──────────────────────────────
   /**
    * StorageProvider 实例（由 `@cloudbase/open-agent-kernel/storage` 导出）。
-   * 不传：传入 attachments 时抛错（不支持多模态）；
+   * 不传且已提供 credentials：默认使用 CloudBase Storage；
+   * 不传且未提供 credentials：传入 attachments 时抛错（不支持多模态）；
    * 传：kernel 把 SessionInput.attachments 解析为 image content block 喂给 SDK。
    *
    * 类型故意宽泛（unknown），避免公共类型层依赖底层实现。

@@ -15,7 +15,6 @@ import { createAgent, AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
 const agent = createAgent({
   envId: 'my-env-123',
   credentials: {
-    envId: 'my-env-123',
     secretId: process.env.TENCENTCLOUD_SECRETID!,
     secretKey: process.env.TENCENTCLOUD_SECRETKEY!,
   },
@@ -80,7 +79,6 @@ const agent = createAgent({
   model: 'glm-5.1',
   systemPrompt: 'You are a coding assistant with sandbox access.',
   credentials: {
-    envId: process.env.TCB_ENV_ID!,
     secretId: process.env.TENCENTCLOUD_SECRETID!,
     secretKey: process.env.TENCENTCLOUD_SECRETKEY!,
   },
@@ -102,7 +100,6 @@ import { createAgent } from '@cloudbase/open-agent-kernel'
 
 const envId = process.env.TCB_ENV_ID!
 const credentials = {
-  envId,
   secretId: process.env.TENCENTCLOUD_SECRETID!,
   secretKey: process.env.TENCENTCLOUD_SECRETKEY!,
 }
@@ -110,7 +107,7 @@ const agent = createAgent({
   envId,
   credentials,
   model: 'glm-5.1',
-  // 有 credentials 时默认启用 CloudBase FlexDB session store。
+  // 有 credentials 时默认启用 CloudBase FlexDB session store 和 CloudBase Storage。
   // 如需自定义表前缀：session: { tablePrefix: 'my_agent_' }
 })
 
@@ -130,14 +127,14 @@ for await (const e of resumed.send('还记得我的名字吗？')) { /* ... */ }
 | 配置项 | 类型 | 必填 | 说明 |
 |--------|------|:----:|------|
 | `envId` | `string` | ✅ | CloudBase 环境 ID |
-| `credentials` | `PlatformCredentials` | 使用 CloudBase 资源时 | 平台凭证；传入后默认启用 CloudBase FlexDB session store |
+| `credentials` | `PlatformCredentials` | 使用 CloudBase 资源时 | 平台凭证；`envId` 可省略并继承顶层 `envId`，传入后默认启用 CloudBase FlexDB session store 和 CloudBase Storage |
 | `model` | `string \| ModelSpec` | ✅ | 模型标识（如 `'glm-5.1'`） |
 | `systemPrompt` | `string` | | 系统提示词 |
 | `sandbox` | `SandboxConfig` | | 沙箱配置（启用文件系统/Shell） |
 | `session` | `SessionConfig` | | 会话持久化配置 |
 | `permissions` | `PermissionConfig` | | HITL 工具审批配置 |
 | `mcpServers` | `Record<string, McpServerConfig>` | | MCP 服务器 |
-| `storage` | `StorageProvider` | | 多模态附件存储 |
+| `storage` | `StorageProvider` | | 多模态附件存储；不传且有 `credentials` 时默认使用 CloudBase Storage |
 | `hooks` | `AgentHooks` | | 业务生命周期钩子 |
 | `cwd` | `string` | | 平台资产层根目录(skills + 项目级 CLAUDE.md 加载根) |
 | `skills` | `{ enabled?: 'all' \| string[] }` | | 启用 SDK skills 能力(需配合 `cwd`) |

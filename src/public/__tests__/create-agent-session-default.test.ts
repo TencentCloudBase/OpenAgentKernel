@@ -6,7 +6,6 @@ const baseConfig: AgentConfig = {
   envId: 'env-test',
   model: 'glm-5.1',
   credentials: {
-    envId: 'env-test',
     secretId: 'sid',
     secretKey: 'sk',
   },
@@ -29,6 +28,21 @@ describe('createAgent — default session store', () => {
 
   it('supports explicit provider="cloudbase" and database="flexdb"', async () => {
     const agent = createAgent({ ...baseConfig, session: { provider: 'cloudbase', database: 'flexdb' } })
+
+    await expect(agent.resumeSession('conversation-id')).resolves.toMatchObject({
+      id: 'conversation-id',
+    })
+  })
+
+  it('defaults credentials.envId from AgentConfig.envId', async () => {
+    const agent = createAgent({
+      envId: 'env-from-agent',
+      model: 'glm-5.1',
+      credentials: {
+        secretId: 'sid',
+        secretKey: 'sk',
+      },
+    })
 
     await expect(agent.resumeSession('conversation-id')).resolves.toMatchObject({
       id: 'conversation-id',

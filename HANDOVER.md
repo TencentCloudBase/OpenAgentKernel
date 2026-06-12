@@ -875,7 +875,7 @@ createAgent({ credentials })
 ```typescript
 const agent = createAgent({
   envId,
-  credentials,
+  credentials: { secretId, secretKey },
   model: 'glm-5.1',
   // 不配置 session 时，credentials 存在会默认启用 CloudBase FlexDB session store
 })
@@ -912,6 +912,33 @@ const agent = createAgent({
 - `pnpm lint`
 
 ---
+
+### 优化 3：createAgent 顶层默认资源补齐（✅ 已完成）
+
+> **状态**: 已实施。继续降低 SDK 用户的上手成本，避免在多个 CloudBase 能力里重复传 `envId` 或手动初始化默认资源类。
+
+#### 设计结论
+
+1. **`credentials.envId` 默认继承顶层 `envId`**
+   - `PlatformCredentials.envId` 改为可选。
+   - `createAgent` 内部会把 `credentials.envId ?? AgentConfig.envId` 归一化后再传给默认 CloudBase 资源。
+   - 推荐写法从 `createAgent({ envId, credentials: { envId, secretId, secretKey } })` 简化为 `createAgent({ envId, credentials: { secretId, secretKey } })`。
+
+2. **有 `credentials` 时默认启用 CloudBase Storage**
+   - 用户不显式传 `storage`，且已提供 `credentials` 时，kernel 自动创建 `CloudBaseStorage`。
+   - 多模态附件默认上传到 CloudBase 云存储并以签名 URL 发送给模型。
+   - 用户仍可通过 `storage: new InMemoryStorage()` 或自定义 `StorageProvider` 覆盖默认行为。
+
+#### 新推荐用法
+
+```typescript
+const agent = createAgent({
+  envId,
+  credentials: { secretId, secretKey },
+  model: 'glm-5v-turbo',
+  // 发送 attachments 时默认使用 CloudBase Storage，无需手动 new CloudBaseStorage
+})
+```
 
 ## 十三、依赖关系
 

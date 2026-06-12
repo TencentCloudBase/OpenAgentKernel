@@ -132,7 +132,11 @@ export function buildClaudeQueryOptions(
     try {
       claudeConfigDir = deriveClaudeConfigDir(config.envId, extra.userId)
       syncEngine = new ClaudeHomeSyncEngine({
-        store: new CloudBaseCosClaudeHomeStore({ credentials: config.credentials }),
+        store: new CloudBaseCosClaudeHomeStore({
+          credentials: config.credentials
+            ? { ...config.credentials, envId: config.credentials.envId ?? config.envId }
+            : undefined,
+        }),
         ctx: { envId: config.envId, userId: extra.userId },
         localDir: claudeConfigDir,
       })
