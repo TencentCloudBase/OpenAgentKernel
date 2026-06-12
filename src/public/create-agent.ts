@@ -403,7 +403,9 @@ function createSession(deps: SessionDeps): Session {
       if (!sessionSnapshotEngine) {
         if (process.env.OAK_DEBUG === '1') {
           // eslint-disable-next-line no-console
-          console.error('[oak][getRestoreStatus] NULL PATH ①: sessionSnapshotEngine not yet created — call send() first')
+          console.error(
+            '[oak][getRestoreStatus] NULL PATH ①: sessionSnapshotEngine not yet created — call send() first',
+          )
         }
         return null
       }

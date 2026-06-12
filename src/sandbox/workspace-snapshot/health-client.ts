@@ -23,14 +23,18 @@ async function readHealthOnce(inst: SandboxInstance): Promise<SyncStatus | null 
     if (!parsed.success) {
       if (process.env.OAK_DEBUG === '1') {
         // eslint-disable-next-line no-console
-        console.error(`[oak][readHealthOnce] NULL PATH ⑤: /health body schema mismatch — zod error=${JSON.stringify(parsed.error.issues).slice(0, 500)} body keys=${JSON.stringify(Object.keys(json))}`)
+        console.error(
+          `[oak][readHealthOnce] NULL PATH ⑤: /health body schema mismatch — zod error=${JSON.stringify(parsed.error.issues).slice(0, 500)} body keys=${JSON.stringify(Object.keys(json))}`,
+        )
       }
       return 'unavailable'
     }
     if (parsed.data.restoreStatus == null) {
       if (process.env.OAK_DEBUG === '1') {
         // eslint-disable-next-line no-console
-        console.error(`[oak][readHealthOnce] NULL PATH ⑦: /health body parsed OK but restoreStatus field is null/undefined — body keys=${JSON.stringify(Object.keys(parsed.data))}`)
+        console.error(
+          `[oak][readHealthOnce] NULL PATH ⑦: /health body parsed OK but restoreStatus field is null/undefined — body keys=${JSON.stringify(Object.keys(parsed.data))}`,
+        )
       }
       return null
     }
