@@ -28,6 +28,7 @@ export type {
   // 配置
   AgentConfig,
   ResourceConfig,
+  PlatformCredentials,
   ModelInput,
   ModelSpec,
   SandboxConfig,

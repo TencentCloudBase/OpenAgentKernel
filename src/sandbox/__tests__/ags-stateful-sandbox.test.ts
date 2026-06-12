@@ -48,10 +48,9 @@ vi.mock('@cloudbase/manager-node/lib/utils', () => {
 
 import { AgsStatefulSandbox, __clearToolIdCacheForTests } from '../ags-stateful-sandbox.js'
 
+const credentials = { envId: 'test-env', secretId: 'fake-secret-id', secretKey: 'fake-secret-key' }
+
 beforeEach(() => {
-  process.env.TCB_API_KEY = 'fake-api-key'
-  process.env.TCB_SECRET_ID = 'fake-secret-id'
-  process.env.TCB_SECRET_KEY = 'fake-secret-key'
   delete process.env.OAK_SECRET_MASTER_KEY
 
   __clearToolIdCacheForTests() // 防止跨测试 tool cache 污染
@@ -74,6 +73,14 @@ afterEach(() => {
 interface AcquireRequestRecord {
   action: string
   param: Record<string, unknown>
+}
+
+function newTestRuntime(options: ConstructorParameters<typeof AgsStatefulSandbox>[0] = {}): AgsStatefulSandbox {
+  return new AgsStatefulSandbox({
+    apiKey: 'fake-api-key',
+    credentials,
+    ...options,
+  })
 }
 
 /**
@@ -162,7 +169,7 @@ function findRequest(records: AcquireRequestRecord[], action: string): Record<st
 describe('AgsStatefulSandbox cosMount = "disabled"', () => {
   it('does not call env.getEnvInfo and does not inject StorageMounts/MountOptions', async () => {
     const { records } = setupMocks({ toolFound: false })
-    const runtime = new AgsStatefulSandbox({ cosMount: 'disabled' })
+    const runtime = newTestRuntime({ cosMount: 'disabled' })
     await runtime.acquire({
       envId: 'test-env',
       conversationId: 'conv-1',
@@ -187,7 +194,7 @@ describe('AgsStatefulSandbox cosMount = "disabled"', () => {
 describe('AgsStatefulSandbox cosMount = "auto" with discovered bucket', () => {
   it('injects StorageMounts on CreateSandboxTool with /oak-workspaces BucketPath', async () => {
     const { records } = setupMocks({ toolFound: false })
-    const runtime = new AgsStatefulSandbox({ cosMount: 'auto' })
+    const runtime = newTestRuntime({ cosMount: 'auto' })
     await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
 
     const create = findRequest(records, 'CreateSandboxTool')
@@ -209,7 +216,7 @@ describe('AgsStatefulSandbox cosMount = "auto" with discovered bucket', () => {
 
   it('pre-creates SubPath/.keep with userId (alongside BucketPath/.keep)', async () => {
     setupMocks({ toolFound: false })
-    const runtime = new AgsStatefulSandbox({ cosMount: 'auto' })
+    const runtime = newTestRuntime({ cosMount: 'auto' })
     await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
 
     // tool create 路径:两次 upload(bucket-level + user-level)
@@ -223,7 +230,7 @@ describe('AgsStatefulSandbox cosMount = "auto" with discovered bucket', () => {
 
   it('pre-creates BOTH BucketPath/.keep (tool prerequisite) AND SubPath/.keep (instance prerequisite)', async () => {
     setupMocks({ toolFound: false })
-    const runtime = new AgsStatefulSandbox({ cosMount: 'auto' })
+    const runtime = newTestRuntime({ cosMount: 'auto' })
     await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
 
     expect(uploadFileMock).toHaveBeenCalledTimes(2)
@@ -238,7 +245,7 @@ describe('AgsStatefulSandbox cosMount = "auto" with discovered bucket', () => {
 
   it('skips BucketPath/.keep when reusing existing tool (only SubPath needed)', async () => {
     setupMocks({ toolFound: true, toolStorageBucketPath: '/oak-workspaces' })
-    const runtime = new AgsStatefulSandbox({ cosMount: 'auto' })
+    const runtime = newTestRuntime({ cosMount: 'auto' })
     await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
 
     // 复用已有 tool,只建 SubPath/.keep,不重建 BucketPath/.keep
@@ -248,7 +255,7 @@ describe('AgsStatefulSandbox cosMount = "auto" with discovered bucket', () => {
 
   it('falls back to SubPath="default" when ctx.userId is undefined', async () => {
     setupMocks({ toolFound: false })
-    const runtime = new AgsStatefulSandbox({ cosMount: 'auto' })
+    const runtime = newTestRuntime({ cosMount: 'auto' })
     await runtime.acquire({ envId: 'test-env', conversationId: 'c', scope: 'session' })
 
     expect(uploadFileMock).toHaveBeenCalledWith(expect.objectContaining({ cloudPath: 'oak-workspaces/default/.keep' }))
@@ -256,7 +263,7 @@ describe('AgsStatefulSandbox cosMount = "auto" with discovered bucket', () => {
 
   it('injects MountOptions.SubPath=userId on StartSandboxInstance', async () => {
     const { records } = setupMocks({ toolFound: false })
-    const runtime = new AgsStatefulSandbox({ cosMount: 'auto' })
+    const runtime = newTestRuntime({ cosMount: 'auto' })
     await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'bob', scope: 'session' })
 
     const start = findRequest(records, 'StartSandboxInstance')
@@ -265,7 +272,7 @@ describe('AgsStatefulSandbox cosMount = "auto" with discovered bucket', () => {
 
   it('injects CustomConfiguration.Env.COS_MOUNT_DIR on StartSandboxInstance', async () => {
     const { records } = setupMocks({ toolFound: false })
-    const runtime = new AgsStatefulSandbox({ cosMount: 'auto' })
+    const runtime = newTestRuntime({ cosMount: 'auto' })
     await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
 
     const start = findRequest(records, 'StartSandboxInstance')
@@ -276,7 +283,7 @@ describe('AgsStatefulSandbox cosMount = "auto" with discovered bucket', () => {
   it('passes through OAK_SECRET_MASTER_KEY env to Env.SECRET_MASTER_KEY', async () => {
     process.env.OAK_SECRET_MASTER_KEY = 'super-secret-key'
     const { records } = setupMocks({ toolFound: false })
-    const runtime = new AgsStatefulSandbox({ cosMount: 'auto' })
+    const runtime = newTestRuntime({ cosMount: 'auto' })
     await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
 
     const start = findRequest(records, 'StartSandboxInstance')
@@ -286,7 +293,7 @@ describe('AgsStatefulSandbox cosMount = "auto" with discovered bucket', () => {
 
   it('does NOT inject SECRET_MASTER_KEY when OAK_SECRET_MASTER_KEY unset', async () => {
     const { records } = setupMocks({ toolFound: false })
-    const runtime = new AgsStatefulSandbox({ cosMount: 'auto' })
+    const runtime = newTestRuntime({ cosMount: 'auto' })
     await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
 
     const start = findRequest(records, 'StartSandboxInstance')
@@ -300,7 +307,7 @@ describe('AgsStatefulSandbox cosMount = "auto" with discovered bucket', () => {
 describe('AgsStatefulSandbox cosMount = "auto" with NO storage', () => {
   it('silently skips COS injection when env has no Storages', async () => {
     const { records } = setupMocks({ toolFound: false, envInfoStorages: [] })
-    const runtime = new AgsStatefulSandbox({ cosMount: 'auto' })
+    const runtime = newTestRuntime({ cosMount: 'auto' })
     await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
 
     expect(uploadFileMock).not.toHaveBeenCalled()
@@ -312,7 +319,7 @@ describe('AgsStatefulSandbox cosMount = "auto" with NO storage', () => {
 
   it('throws ConfigError on cosMount="enabled" + no Storages', async () => {
     setupMocks({ toolFound: false, envInfoStorages: [] })
-    const runtime = new AgsStatefulSandbox({ cosMount: 'enabled' })
+    const runtime = newTestRuntime({ cosMount: 'enabled' })
     await expect(
       runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' }),
     ).rejects.toThrow(/no default storage bucket/)
@@ -322,7 +329,7 @@ describe('AgsStatefulSandbox cosMount = "auto" with NO storage', () => {
 describe('AgsStatefulSandbox cosMountOverride', () => {
   it('uses cosMountOverride and skips env.getEnvInfo discovery', async () => {
     const { records } = setupMocks({ toolFound: false })
-    const runtime = new AgsStatefulSandbox({
+    const runtime = newTestRuntime({
       cosMountOverride: {
         bucketName: 'ags-trw-shanghai-1253192607',
         region: 'ap-shanghai',
@@ -353,7 +360,7 @@ describe('AgsStatefulSandbox cosMountOverride', () => {
 
   it('cosMountOverride defaults bucketPath to /oak-workspaces when not provided', async () => {
     const { records } = setupMocks({ toolFound: false })
-    const runtime = new AgsStatefulSandbox({
+    const runtime = newTestRuntime({
       cosMountOverride: {
         bucketName: 'my-bucket-1253192607',
         region: 'ap-guangzhou',
@@ -370,7 +377,7 @@ describe('AgsStatefulSandbox cosMountOverride', () => {
 
   it('cosMountOverride respects cosMount="disabled" (override ignored)', async () => {
     const { records } = setupMocks({ toolFound: false })
-    const runtime = new AgsStatefulSandbox({
+    const runtime = newTestRuntime({
       cosMount: 'disabled',
       cosMountOverride: {
         bucketName: 'should-be-ignored',
@@ -387,7 +394,7 @@ describe('AgsStatefulSandbox cosMountOverride', () => {
 describe('AgsStatefulSandbox cosMountOverride', () => {
   it('uses cosMountOverride and skips env.getEnvInfo discovery', async () => {
     const { records } = setupMocks({ toolFound: false })
-    const runtime = new AgsStatefulSandbox({
+    const runtime = newTestRuntime({
       cosMountOverride: {
         bucketName: 'ags-trw-shanghai-1253192607',
         region: 'ap-shanghai',
@@ -418,7 +425,7 @@ describe('AgsStatefulSandbox cosMountOverride', () => {
 
   it('cosMountOverride defaults bucketPath to /oak-workspaces when not provided', async () => {
     const { records } = setupMocks({ toolFound: false })
-    const runtime = new AgsStatefulSandbox({
+    const runtime = newTestRuntime({
       cosMountOverride: {
         bucketName: 'my-bucket-1253192607',
         region: 'ap-guangzhou',
@@ -435,7 +442,7 @@ describe('AgsStatefulSandbox cosMountOverride', () => {
 
   it('cosMountOverride respects cosMount="disabled" (override ignored)', async () => {
     const { records } = setupMocks({ toolFound: false })
-    const runtime = new AgsStatefulSandbox({
+    const runtime = newTestRuntime({
       cosMount: 'disabled',
       cosMountOverride: {
         bucketName: 'should-be-ignored',
@@ -452,7 +459,7 @@ describe('AgsStatefulSandbox cosMountOverride', () => {
 describe('AgsStatefulSandbox existing tool BucketPath mismatch', () => {
   it('throws ConfigError when existing tool has different BucketPath', async () => {
     setupMocks({ toolFound: true, toolStorageBucketPath: '/legacy-path' })
-    const runtime = new AgsStatefulSandbox({ cosMount: 'auto' })
+    const runtime = newTestRuntime({ cosMount: 'auto' })
     await expect(
       runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' }),
     ).rejects.toThrow(/BucketPath=\/legacy-path.*resolves to \/oak-workspaces/s)
@@ -460,7 +467,7 @@ describe('AgsStatefulSandbox existing tool BucketPath mismatch', () => {
 
   it('throws ConfigError when existing tool has NO StorageMounts but cosMount auto resolved', async () => {
     setupMocks({ toolFound: true, toolStorageBucketPath: null })
-    const runtime = new AgsStatefulSandbox({ cosMount: 'auto' })
+    const runtime = newTestRuntime({ cosMount: 'auto' })
     await expect(
       runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' }),
     ).rejects.toThrow(/BucketPath=\(none\).*resolves to \/oak-workspaces/s)
@@ -468,7 +475,7 @@ describe('AgsStatefulSandbox existing tool BucketPath mismatch', () => {
 
   it('reuses existing tool when BucketPath matches', async () => {
     const { records } = setupMocks({ toolFound: true, toolStorageBucketPath: '/oak-workspaces' })
-    const runtime = new AgsStatefulSandbox({ cosMount: 'auto' })
+    const runtime = newTestRuntime({ cosMount: 'auto' })
     await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
 
     // 不该再调 CreateSandboxTool
@@ -479,7 +486,7 @@ describe('AgsStatefulSandbox existing tool BucketPath mismatch', () => {
 
   it('reuses existing tool with no StorageMounts when cosMount=disabled', async () => {
     const { records } = setupMocks({ toolFound: true, toolStorageBucketPath: null })
-    const runtime = new AgsStatefulSandbox({ cosMount: 'disabled' })
+    const runtime = newTestRuntime({ cosMount: 'disabled' })
     await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
 
     // disabled 时期望也是 null,匹配
@@ -498,7 +505,7 @@ describe('AgsStatefulSandbox env-driven defaults (deferred read)', () => {
 
     try {
       const { records } = setupMocks({ toolFound: false })
-      const runtime = new AgsStatefulSandbox({ cosMount: 'disabled' })
+      const runtime = newTestRuntime({ cosMount: 'disabled' })
       await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
 
       const create = findRequest(records, 'CreateSandboxTool')
@@ -516,7 +523,7 @@ describe('AgsStatefulSandbox env-driven defaults (deferred read)', () => {
 
     try {
       const { records } = setupMocks({ toolFound: false })
-      const runtime = new AgsStatefulSandbox({ cosMount: 'disabled' })
+      const runtime = newTestRuntime({ cosMount: 'disabled' })
       await runtime.acquire({ envId: 'test-env', conversationId: 'c', userId: 'alice', scope: 'session' })
 
       const create = findRequest(records, 'CreateSandboxTool')
@@ -532,7 +539,7 @@ describe('AgsStatefulSandbox env-driven defaults (deferred read)', () => {
 
     try {
       const { records } = setupMocks({ toolFound: false })
-      const runtime = new AgsStatefulSandbox({
+      const runtime = newTestRuntime({
         cosMount: 'disabled',
         image: 'ccr.example.com/explicit/option:tag',
       })

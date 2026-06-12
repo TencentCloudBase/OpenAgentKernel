@@ -2,9 +2,9 @@
  * CloudBaseStorage：把 attachment 上传到 CloudBase 云存储（COS），
  * 给 SDK 返回 url source（短 payload + 长期可访问）。
  *
- * 凭证模式（与 CloudBaseDbDriver 完全一致）：
- *   - TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY（环境变量）
- *   - 也支持 CloudBaseStorageOptions.credentials（编程注入）
+ * 凭证模式：
+ *   - 推荐通过 CloudBaseStorageOptions.credentials 显式注入
+ *   - 不传时不做 env fallback，由 @cloudbase/node-sdk 自身处理运行环境认证
  *
  * 路径策略：
  *   `agent-attachments/{envId}/{sessionId}/{timestamp}-{index}.{ext}`
@@ -37,7 +37,7 @@ export interface CloudBaseStorageOptions {
 const DEFAULT_PATH_PREFIX = 'agent-attachments/'
 const DEFAULT_URL_EXPIRES_IN = 3600 // 1 hour
 
-interface ResolvedCredentials extends CloudBaseStorageCredentials {
+interface ResolvedCredentials extends Partial<CloudBaseStorageCredentials> {
   region: string
 }
 
@@ -49,21 +49,14 @@ interface CloudBaseApp {
 }
 
 function resolveCredentials(opts?: CloudBaseStorageOptions): ResolvedCredentials {
-  const fromOpts = opts?.credentials
-  const envId = fromOpts?.envId ?? process.env.TCB_ENV_ID
-  const secretId = fromOpts?.secretId ?? process.env.TCB_SECRET_ID
-  const secretKey = fromOpts?.secretKey ?? process.env.TCB_SECRET_KEY
-  const sessionToken = fromOpts?.sessionToken ?? process.env.TCB_TOKEN ?? undefined
-  const region = fromOpts?.region ?? process.env.TCB_REGION ?? 'ap-shanghai'
-
-  if (!envId || !secretId || !secretKey) {
-    throw new ResourceError(
-      'CloudBase credentials missing for CloudBaseStorage. Set one of:\n' +
-        '  - process.env: TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY\n' +
-        '  - CloudBaseStorageOptions.credentials (programmatic)',
-    )
+  const creds = opts?.credentials
+  return {
+    ...(creds?.envId ? { envId: creds.envId } : {}),
+    ...(creds?.secretId ? { secretId: creds.secretId } : {}),
+    ...(creds?.secretKey ? { secretKey: creds.secretKey } : {}),
+    ...(creds?.sessionToken ? { sessionToken: creds.sessionToken } : {}),
+    region: creds?.region ?? 'ap-shanghai',
   }
-  return { envId, secretId, secretKey, sessionToken, region }
 }
 
 export class CloudBaseStorage implements StorageProvider {
@@ -90,10 +83,10 @@ export class CloudBaseStorage implements StorageProvider {
       )
     }
     this.app = init.init({
-      env: this.creds.envId,
       region: this.creds.region,
-      secretId: this.creds.secretId,
-      secretKey: this.creds.secretKey,
+      ...(this.creds.envId ? { env: this.creds.envId } : {}),
+      ...(this.creds.secretId ? { secretId: this.creds.secretId } : {}),
+      ...(this.creds.secretKey ? { secretKey: this.creds.secretKey } : {}),
       ...(this.creds.sessionToken ? { sessionToken: this.creds.sessionToken } : {}),
     })
     return this.app

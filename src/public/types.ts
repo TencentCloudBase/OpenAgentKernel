@@ -31,6 +31,22 @@ export interface ResourceConfig {
   modelGatewayBaseUrl?: string
 }
 
+/**
+ * 平台凭证，用于初始化 CloudBase 管理端/服务端 SDK。
+ *
+ * kernel 不从 `process.env` 读取平台凭证；示例或业务代码可自行从环境变量加载后，
+ * 通过 `createAgent({ credentials })` 显式传入。
+ */
+export interface PlatformCredentials {
+  envId: string
+  secretId: string
+  secretKey: string
+  /** STS 临时凭证 token（可选） */
+  sessionToken?: string
+  /** 默认 ap-shanghai */
+  region?: string
+}
+
 // ============================================================
 // 模型配置
 // ============================================================
@@ -98,13 +114,13 @@ export interface SandboxConfig {
   /**
    * 用户租户的 CloudBase 凭证（仅 PR #6.5 cloudbase MCP 工具调用时使用）。
    *
-   * 与 sandbox 控制面凭证（process.env.TCB_SECRET_ID/KEY，由平台持有）**不一定相同**——
+   * 与 sandbox 控制面凭证（AgentConfig.credentials，由平台持有）**不一定相同**——
    * 多租户场景下沙箱本身用平台凭证起，但沙箱内 cloudbase-mcp 操作的是用户自己的资源。
    *
    * 优先级：
    *   1. `userCredentials` 函数（异步回调，每次 acquire 调一次，适合多租户）
    *   2. `userCredentials` 静态对象（适合单租户/本地开发）
-   *   3. `process.env`（兜底）：`TCB_ENV_ID` / `TCB_SECRET_ID` / `TCB_SECRET_KEY` / `TCB_TOKEN`
+   *   3. `AgentConfig.credentials`（单租户/本地开发兜底）
    *
    * 缺凭证时 cloudbase 工具会 degrade（agent 仍能用文件系统 / shell 工具）。
    */
@@ -392,6 +408,8 @@ export interface AgentConfig {
   // ── 资源锚点 ────────────────────────────────────
   envId: string
   resources?: ResourceConfig
+  /** 平台凭证，用于初始化 CloudBase SDK。不传则依赖下游 SDK 自身行为或按能力报错。 */
+  credentials?: PlatformCredentials
 
   // ── 模型 ────────────────────────────────────────
   model: ModelInput

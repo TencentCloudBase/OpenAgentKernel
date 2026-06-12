@@ -710,9 +710,11 @@ if (process.env.OAK_DEBUG === '1') {
 
 ---
 
-### 优化 1：凭证环境变量规范化（🔴 当前任务，未开始）
+### 优化 1：凭证环境变量规范化（✅ 已完成）
 
-> **状态**: 方案已讨论确定，等待实施。**这是第一项优化任务，其他优化在此完成后进行。**
+> **状态**: 已实施。kernel SDK 逻辑中不再读取 CloudBase 凭证类环境变量；示例层负责从 `.env.local` 读取后显式注入 `credentials` / `apiKey`。
+>
+> **验证**: `pnpm format`、`pnpm -F @cloudbase/open-agent-kernel test`、`pnpm -F @cloudbase/open-agent-kernel type-check`、`pnpm -F @cloudbase/open-agent-kernel build`、`pnpm lint` 均通过。
 
 #### 背景
 
@@ -824,22 +826,22 @@ createAgent({ credentials })
 
 #### 验收标准
 
-- [ ] 所有 `resolveCredentials()` 函数中无 `process.env.TCB_*` / `process.env.TENCENTCLOUD_*` 等凭证 env var 读取
-- [ ] `AgentConfig.credentials` 类型定义完整
-- [ ] `.env.example` 使用标准变量名
-- [ ] 测试文件中无凭证 env var 设置
-- [ ] `pnpm build` 通过
-- [ ] `pnpm type-check` 通过
-- [ ] `pnpm lint` 通过
-- [ ] `pnpm test` 通过
-- [ ] 更新 `src/public/types.ts` 中 `SandboxUserCredentials` 的 JSDoc 中 env var 引用
+- [x] 所有 `resolveCredentials()` 函数中无 `process.env.TCB_*` / `process.env.TENCENTCLOUD_*` 等凭证 env var 读取
+- [x] `AgentConfig.credentials` 类型定义完整
+- [x] `.env.example` 使用标准变量名
+- [x] 测试文件中无凭证 env var 设置
+- [x] `pnpm build` 通过
+- [x] `pnpm type-check` 通过
+- [x] `pnpm lint` 通过
+- [x] `pnpm test` 通过
+- [x] 更新 `src/public/types.ts` 中 `SandboxUserCredentials` 的 JSDoc 中 env var 引用
 
 #### 确认点（实施前与用户确认）
 
 1. ✅ 统一 `credentials` 到 `AgentConfig` 入口 — 已确认
 2. ✅ manager-node 用户必须传凭证，缺则报错 — 已确认
 3. ✅ node-sdk 用户建议传凭证，不传交由 SDK 自身处理 — 已确认
-4. 🔲 `PlatformCredentials` 是否独立于 `SandboxUserCredentials`？还是合二为一？当前方案是独立的（平台 vs 用户语义不同）
+4. ✅ `PlatformCredentials` 独立于 `SandboxUserCredentials`（平台控制面凭证 vs 用户租户凭证语义不同）
 
 ---
 

@@ -8,7 +8,7 @@
  *      把上次的 conversationId 传入，agent.resumeSession 从 DB 拉历史继续
  *
  * 凭证写在 examples/.env.local（从 .env.example 复制）：
- *   TENCENTCLOUD_TOKENHUB_API_KEY、TCB_ENV_ID、TCB_SECRET_ID、TCB_SECRET_KEY
+ *   TENCENTCLOUD_TOKENHUB_API_KEY、TCB_ENV_ID、TENCENTCLOUD_SECRETID、TENCENTCLOUD_SECRETKEY
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/04-multi-turn-db.ts
@@ -16,18 +16,16 @@
  * 验证 DB：
  *   在 CloudBase 控制台 → 数据库 → 看 oak_sessions / oak_session_entries / oak_session_summaries
  */
-import './_shared/env.js'
+import { getEnvId, getPlatformCredentials } from './_shared/env.js'
 
 import { CloudBaseDbDriver, CloudBaseSessionStore, createAgent } from '@cloudbase/open-agent-kernel'
 
 async function main(): Promise<void> {
-  const envId = process.env.TCB_ENV_ID
-  if (!envId) {
-    throw new Error('TCB_ENV_ID is required (set it in examples/.env.local)')
-  }
+  const envId = getEnvId()
+  const credentials = getPlatformCredentials()
 
   const driver = new CloudBaseDbDriver({
-    // 不传 credentials → 从 TCB_ENV_ID / TCB_SECRET_ID / TCB_SECRET_KEY 读取
+    credentials,
     // collectionPrefix 默认 'oak_'，可按需自定义避免冲突
   })
   const store = new CloudBaseSessionStore({
@@ -39,6 +37,7 @@ async function main(): Promise<void> {
 
   const agent = createAgent({
     envId,
+    credentials,
     model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
     systemPrompt: 'You are a helpful assistant. Reply concisely in Chinese. ' + 'Remember details across turns.',
     session: { store },

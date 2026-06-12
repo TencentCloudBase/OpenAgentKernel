@@ -14,9 +14,14 @@ import { createAgent, AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
 
 const agent = createAgent({
   envId: 'my-env-123',
+  credentials: {
+    envId: 'my-env-123',
+    secretId: process.env.TENCENTCLOUD_SECRETID!,
+    secretKey: process.env.TENCENTCLOUD_SECRETKEY!,
+  },
   model: 'glm-5.1',
   systemPrompt: 'You are a helpful CloudBase assistant.',
-  sandbox: { runtime: new AgsStatefulSandbox() },
+  sandbox: { runtime: new AgsStatefulSandbox({ apiKey: process.env.TCB_API_KEY! }) },
 })
 
 const session = await agent.startSession({ userId: 'user-1' })
@@ -74,7 +79,12 @@ const agent = createAgent({
   envId: process.env.TCB_ENV_ID!,
   model: 'glm-5.1',
   systemPrompt: 'You are a coding assistant with sandbox access.',
-  sandbox: { runtime: new AgsStatefulSandbox() },
+  credentials: {
+    envId: process.env.TCB_ENV_ID!,
+    secretId: process.env.TENCENTCLOUD_SECRETID!,
+    secretKey: process.env.TENCENTCLOUD_SECRETKEY!,
+  },
+  sandbox: { runtime: new AgsStatefulSandbox({ apiKey: process.env.TCB_API_KEY! }) },
 })
 
 const session = await agent.startSession({ userId: 'user-1' })
@@ -91,13 +101,19 @@ await session.abort() // 释放沙箱
 import { createAgent, CloudBaseSessionStore, CloudBaseDbDriver } from '@cloudbase/open-agent-kernel'
 
 const envId = process.env.TCB_ENV_ID!
+const credentials = {
+  envId,
+  secretId: process.env.TENCENTCLOUD_SECRETID!,
+  secretKey: process.env.TENCENTCLOUD_SECRETKEY!,
+}
 const store = new CloudBaseSessionStore({
-  driver: new CloudBaseDbDriver(),
+  driver: new CloudBaseDbDriver({ credentials }),
   projectKey: envId,
 })
 
 const agent = createAgent({
   envId,
+  credentials,
   model: 'glm-5.1',
   session: { store, projectKey: envId },
 })
@@ -310,16 +326,22 @@ import {
 } from '@cloudbase/open-agent-kernel'
 
 const envId = process.env.TCB_ENV_ID!
-const sessionStore = new CloudBaseSessionStore({ driver: new CloudBaseDbDriver(), projectKey: envId })
+const credentials = {
+  envId,
+  secretId: process.env.TENCENTCLOUD_SECRETID!,
+  secretKey: process.env.TENCENTCLOUD_SECRETKEY!,
+}
+const sessionStore = new CloudBaseSessionStore({ driver: new CloudBaseDbDriver({ credentials }), projectKey: envId })
 const permissionStore = new CloudBasePermissionStore({
-  driver: new CloudBaseDbPermissionDriver(),
+  driver: new CloudBaseDbPermissionDriver({ credentials }),
   projectKey: envId,
 })
 
 const agent = createAgent({
   envId,
+  credentials,
   model: 'glm-5.1',
-  sandbox: { runtime: new AgsStatefulSandbox() },
+  sandbox: { runtime: new AgsStatefulSandbox({ apiKey: process.env.TCB_API_KEY! }) },
   session: { store: sessionStore, projectKey: envId },
   permissions: {
     requireApproval: ['mcp__sandbox__bash', 'mcp__cloudbase__deleteData'],
@@ -357,8 +379,9 @@ const history = await session.getHistory({ limit: 20 })
 |------|------|:----:|
 | `TCB_ENV_ID` | CloudBase 环境 ID | ✅ |
 | `TENCENTCLOUD_TOKENHUB_API_KEY` | 模型凭证（TokenHub） | ✅ |
-| `TCB_SECRET_ID` | CloudBase AK | 使用 DB/沙箱时 |
-| `TCB_SECRET_KEY` | CloudBase SK | 使用 DB/沙箱时 |
+| `TENCENTCLOUD_SECRETID` | CloudBase AK | 使用 DB/沙箱/userMemory 时 |
+| `TENCENTCLOUD_SECRETKEY` | CloudBase SK | 使用 DB/沙箱/userMemory 时 |
+| `TENCENTCLOUD_SESSIONTOKEN` | 临时凭证 token | 使用 STS 临时凭证时 |
 | `TCB_API_KEY` | 沙箱数据面 JWT | 使用沙箱时 |
 | `OAK_DEBUG` | 设为 `1` 启用调试日志 | |
 
@@ -446,9 +469,14 @@ import { createAgent, AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
 
 const agent = createAgent({
   envId: process.env.TCB_ENV_ID!,
+  credentials: {
+    envId: process.env.TCB_ENV_ID!,
+    secretId: process.env.TENCENTCLOUD_SECRETID!,
+    secretKey: process.env.TENCENTCLOUD_SECRETKEY!,
+  },
   model: 'claude-opus-4-8',
   sandbox: {
-    runtime: new AgsStatefulSandbox(),
+    runtime: new AgsStatefulSandbox({ apiKey: process.env.TCB_API_KEY! }),
     scope: 'shared',         // 必须为 'shared',否则 startSession 抛 ConfigError
     // workspaceSnapshot 默认 'auto',ags-stateful 自动启用
   },

@@ -17,7 +17,7 @@
 
 import { AgsStatefulSandbox, createAgent } from '@cloudbase/open-agent-kernel'
 
-import { loadEnv } from './_shared/env.js'
+import { getPlatformCredentials, getSandboxApiKey, loadEnv } from './_shared/env.js'
 
 function buildModel() {
   const customModelId = process.env.OAK_EXAMPLE_MODEL_ID
@@ -66,12 +66,14 @@ function fmtEvent(ev: unknown): string {
 
 async function runOne(label: string, userId: string, prompt: string, opts: { manualSnapshotAfter?: boolean } = {}) {
   console.log(`\n══════ ${label} ══════`)
+  const credentials = getPlatformCredentials()
   const agent = createAgent({
-    envId: process.env.TCB_ENV_ID!,
+    envId: credentials.envId,
+    credentials,
     model: buildModel(),
     systemPrompt: 'You are a coding assistant with shell + filesystem tools. 请用工具完成任务,不要编造。',
     sandbox: {
-      runtime: new AgsStatefulSandbox(),
+      runtime: new AgsStatefulSandbox({ apiKey: getSandboxApiKey() }),
       scope: 'shared',
     },
   })

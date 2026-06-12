@@ -1,17 +1,18 @@
 /**
  * 调试脚本：直接用 sandbox 跑 mcporter list 看输出格式
  */
-import './_shared/env.js'
+import { getEnvId, getPlatformCredentials, getSandboxApiKey } from './_shared/env.js'
 
 import { AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
 
 async function main(): Promise<void> {
-  const envId = process.env.TCB_ENV_ID
-  if (!envId) throw new Error('TCB_ENV_ID is required')
+  const envId = getEnvId()
+  const credentials = getPlatformCredentials()
 
-  const runtime = new AgsStatefulSandbox()
+  const runtime = new AgsStatefulSandbox({ apiKey: getSandboxApiKey() })
   const sandbox = await runtime.acquire({
     envId,
+    credentials,
     conversationId: 'debug-mcporter',
     scope: 'session',
     onProgress: (m) => console.log('[probe]', m.phase, m.message),

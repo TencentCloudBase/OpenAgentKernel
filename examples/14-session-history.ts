@@ -11,13 +11,13 @@
  *
  * 前置条件：
  *   - TENCENTCLOUD_TOKENHUB_API_KEY（模型凭证）
- *   - TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY（CloudBase 控制面）
+ *   - TCB_ENV_ID + TENCENTCLOUD_SECRETID + TENCENTCLOUD_SECRETKEY（CloudBase 控制面）
  *   - TCB_API_KEY（沙箱数据面 JWT）
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/14-session-history.ts
  */
-import './_shared/env.js'
+import { getEnvId, getPlatformCredentials, getSandboxApiKey } from './_shared/env.js'
 
 import { randomUUID } from 'node:crypto'
 import {
@@ -73,21 +73,20 @@ function printHistory(history: Awaited<ReturnType<typeof session.getHistory>>): 
 
 // ─── 主流程 ────────────────────────────────────────────────────────
 
-const envId = process.env.TCB_ENV_ID
-if (!envId) {
-  throw new Error('TCB_ENV_ID is required (set it in examples/.env.local)')
-}
+const envId = getEnvId()
+const credentials = getPlatformCredentials()
 
-const driver = new CloudBaseDbDriver()
+const driver = new CloudBaseDbDriver({ credentials })
 const sessionStore = new CloudBaseSessionStore({ driver, projectKey: envId })
 
 const permissionStore = new CloudBasePermissionStore({
   projectKey: envId,
-  driver: new CloudBaseDbPermissionDriver(),
+  driver: new CloudBaseDbPermissionDriver({ credentials }),
 })
 
 const agent = createAgent({
   envId,
+  credentials,
   model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
   systemPrompt:
     'You are a helpful coding assistant working inside a sandbox.\n' +
@@ -99,7 +98,7 @@ const agent = createAgent({
     'When asked to list/read files, use glob or read.\n' +
     'Reply concisely in Chinese.',
   sandbox: {
-    runtime: new AgsStatefulSandbox(),
+    runtime: new AgsStatefulSandbox({ apiKey: getSandboxApiKey() }),
     cloudbaseTools: false, // 只用 sandbox 工具，不启用 cloudbase MCP（简化依赖）
   },
   session: { store: sessionStore, projectKey: envId },

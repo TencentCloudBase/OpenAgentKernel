@@ -11,7 +11,7 @@
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/09-sandbox-shared.ts
  */
-import './_shared/env.js'
+import { getEnvId, getPlatformCredentials, getSandboxApiKey } from './_shared/env.js'
 
 import { createAgent, AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
 import type { SessionEvent } from '@cloudbase/open-agent-kernel'
@@ -40,13 +40,12 @@ async function streamSession(
 }
 
 async function main(): Promise<void> {
-  const envId = process.env.TCB_ENV_ID
-  if (!envId) {
-    throw new Error('TCB_ENV_ID is required (set it in examples/.env.local)')
-  }
+  const envId = getEnvId()
+  const credentials = getPlatformCredentials()
 
   const agent = createAgent({
     envId,
+    credentials,
     model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
     systemPrompt:
       'You are a helpful coding assistant working inside a sandbox. ' +
@@ -54,7 +53,7 @@ async function main(): Promise<void> {
       'Always use the tools to interact with the filesystem—never fabricate output. ' +
       'Reply concisely in Chinese.',
     sandbox: {
-      runtime: new AgsStatefulSandbox(),
+      runtime: new AgsStatefulSandbox({ apiKey: getSandboxApiKey() }),
       // shared 模式：同 envId 多 session 共享一个实例
       scope: 'shared',
     },

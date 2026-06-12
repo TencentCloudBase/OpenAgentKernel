@@ -10,6 +10,8 @@
  * 但做了大幅精简（PR #6A 不需要 prepare/release 的复杂上下文）。
  */
 
+import type { PlatformCredentials } from '../public/types.js'
+
 /**
  * 沙箱实例（acquire 后返回）。
  *
@@ -62,6 +64,8 @@ export interface SandboxRuntime {
 export interface SandboxAcquireContext {
   /** 业务 envId（多租户隔离的根） */
   envId: string
+  /** 平台凭证，由 createAgent({ credentials }) 统一下传给需要控制面能力的 runtime */
+  credentials?: PlatformCredentials
   /** 当前 session 的 conversationId */
   conversationId: string
   /**

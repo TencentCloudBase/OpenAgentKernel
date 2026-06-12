@@ -38,7 +38,7 @@ import { fileURLToPath } from 'node:url'
 
 import { AgsStatefulSandbox, createAgent } from '@cloudbase/open-agent-kernel'
 
-import { loadEnv } from './_shared/env.js'
+import { getPlatformCredentials, getSandboxApiKey, loadEnv } from './_shared/env.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const HANDOFF_FILE = path.join(__dirname, '.last-userid')
@@ -58,6 +58,7 @@ function buildModel() {
 
 async function main() {
   loadEnv()
+  const credentials = getPlatformCredentials()
   const userId = `restore-probe-${Date.now()}`
   const stamp = new Date().toISOString()
 
@@ -66,11 +67,12 @@ async function main() {
   console.log(`[19a] stamp  = ${stamp}`)
 
   const agent = createAgent({
-    envId: process.env.TCB_ENV_ID!,
+    envId: credentials.envId,
+    credentials,
     model: buildModel(),
     systemPrompt: 'You are a coding assistant with shell + filesystem tools. 用工具完成,不要编造。',
     sandbox: {
-      runtime: new AgsStatefulSandbox(),
+      runtime: new AgsStatefulSandbox({ apiKey: getSandboxApiKey() }),
       scope: 'shared',
     },
   })

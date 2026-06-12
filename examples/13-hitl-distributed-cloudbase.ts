@@ -13,7 +13,7 @@
  *   - Example 13：跨实例 CloudBasePermissionStore（审批状态跨进程持久化）
  *
  * 凭证（examples/.env.local）：
- *   TENCENTCLOUD_TOKENHUB_API_KEY、TCB_ENV_ID、TCB_SECRET_ID、TCB_SECRET_KEY
+ *   TENCENTCLOUD_TOKENHUB_API_KEY、TCB_ENV_ID、TENCENTCLOUD_SECRETID、TENCENTCLOUD_SECRETKEY
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/13-hitl-distributed-cloudbase.ts
@@ -21,7 +21,7 @@
  * 验证 DB：
  *   在 CloudBase 控制台 → 数据库 → 看 oak_permissions 集合（pending / decided 都会落到这里）
  */
-import './_shared/env.js'
+import { getEnvId, getPlatformCredentials } from './_shared/env.js'
 
 import {
   CloudBaseDbDriver,
@@ -49,18 +49,16 @@ const dangerousTools = createSdkMcpServer({
 })
 
 async function main(): Promise<void> {
-  const envId = process.env.TCB_ENV_ID
-  if (!envId) {
-    throw new Error('TCB_ENV_ID is required (set it in examples/.env.local)')
-  }
+  const envId = getEnvId()
+  const credentials = getPlatformCredentials()
 
   // ─── 共享后端：两个 agent 实例共用同一份 CloudBase DB ──────────────
   const sessionStore = new CloudBaseSessionStore({
-    driver: new CloudBaseDbDriver(),
+    driver: new CloudBaseDbDriver({ credentials }),
     projectKey: envId,
   })
   const permissionStore = new CloudBasePermissionStore({
-    driver: new CloudBaseDbPermissionDriver(),
+    driver: new CloudBaseDbPermissionDriver({ credentials }),
     projectKey: envId,
   })
 
@@ -68,6 +66,7 @@ async function main(): Promise<void> {
   console.log('=== 节点 A：startSession + send，触发审批 ===\n')
   const agentA = createAgent({
     envId,
+    credentials,
     model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
     systemPrompt:
       'You are a helpful assistant with one tool: ' +
@@ -128,6 +127,7 @@ async function main(): Promise<void> {
   console.log('\n=== 节点 B：另一个 agent 实例 resume + respondApproval ===\n')
   const agentB = createAgent({
     envId,
+    credentials,
     model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
     systemPrompt:
       'You are a helpful assistant with one tool: ' +

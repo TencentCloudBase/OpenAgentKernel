@@ -13,7 +13,7 @@
  *   - TENCENTCLOUD_TOKENHUB_API_KEY  模型凭证
  *   - TCB_API_KEY                     沙箱数据面长期 JWT
  *   - TCB_ENV_ID                      CloudBase 环境
- *   - TCB_SECRET_ID / TCB_SECRET_KEY  控制面 AK/SK（同时作为用户租户凭证兜底）
+ *   - TENCENTCLOUD_SECRETID / TENCENTCLOUD_SECRETKEY  控制面 AK/SK（同时作为用户租户凭证兜底）
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/10-sandbox-cloudbase-tools.ts
@@ -24,18 +24,17 @@
  *   - 镜像必须自带 mcporter + cloudbase-mcp（默认 OpenVibeCoding 公开 vibecoding 镜像满足）
  *   - 镜像不带这两个工具时，cloudbase tools 自动 degrade（仍能用 sandbox 文件系统工具）
  */
-import './_shared/env.js'
+import { getEnvId, getPlatformCredentials, getSandboxApiKey } from './_shared/env.js'
 
 import { createAgent, AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
 
 async function main(): Promise<void> {
-  const envId = process.env.TCB_ENV_ID
-  if (!envId) {
-    throw new Error('TCB_ENV_ID is required (set it in examples/.env.local)')
-  }
+  const envId = getEnvId()
+  const credentials = getPlatformCredentials()
 
   const agent = createAgent({
     envId,
+    credentials,
     model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
     systemPrompt:
       'You are a CloudBase coding assistant working inside a sandbox. ' +
@@ -46,9 +45,10 @@ async function main(): Promise<void> {
       'Always use the tools to verify—never fabricate output. ' +
       'Reply concisely in Chinese.',
     sandbox: {
-      runtime: new AgsStatefulSandbox(),
+      runtime: new AgsStatefulSandbox({ apiKey: getSandboxApiKey() }),
+      scope: 'shared',
       // 默认 cloudbaseTools: true（开通 sandbox 即内置 cloudbase MCP）
-      // 用户租户凭证不传时回退到 process.env.TCB_SECRET_ID/KEY
+      // 用户租户凭证不传时回退到 AgentConfig.credentials
       // 多租户场景示例（每次 acquire 调一次拿当前用户的凭证）：
       //   userCredentials: async () => {
       //     const u = await myDb.getUserCloudbaseCreds(currentUserId)

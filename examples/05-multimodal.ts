@@ -7,27 +7,29 @@
  *
  * 凭证写在 examples/.env.local（从 .env.example 复制）：
  *   - TENCENTCLOUD_TOKENHUB_API_KEY 必需
- *   - OAK_STORAGE=cloudbase 时还需要 TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY
+ *   - OAK_STORAGE=cloudbase 时还需要 TCB_ENV_ID + TENCENTCLOUD_SECRETID + TENCENTCLOUD_SECRETKEY
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/05-multimodal.ts
  */
-import './_shared/env.js'
+import { getPlatformCredentials } from './_shared/env.js'
 
 import * as path from 'node:path'
 import { CloudBaseStorage, InMemoryStorage, createAgent } from '@cloudbase/open-agent-kernel'
 
 async function main(): Promise<void> {
   const useCloudBaseStorage = process.env.OAK_STORAGE === 'cloudbase'
-  const storage = useCloudBaseStorage ? new CloudBaseStorage() : new InMemoryStorage()
+  const credentials = useCloudBaseStorage ? getPlatformCredentials() : undefined
+  const storage = useCloudBaseStorage ? new CloudBaseStorage({ credentials }) : new InMemoryStorage()
   const storageName = useCloudBaseStorage ? 'CloudBaseStorage' : 'InMemoryStorage'
 
   // 默认用项目根目录的 screenshot.png（一张产品截图，模型应该能识别出 UI 元素）
-  const defaultImage = path.resolve(new URL('../../../', import.meta.url).pathname, 'screenshot.png')
+  const defaultImage = path.resolve(new URL('./', import.meta.url).pathname, 'cloud.png')
   const imagePath = process.env.OAK_IMAGE_PATH ?? defaultImage
 
   const agent = createAgent({
     envId: process.env.TCB_ENV_ID ?? 'demo-env',
+    ...(credentials ? { credentials } : {}),
     // 视觉模型：glm-5v-turbo 已实测在 TokenHub Anthropic 协议下支持图片
     model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5v-turbo',
     systemPrompt: 'You are a helpful image analysis assistant. Reply concisely in Chinese.',

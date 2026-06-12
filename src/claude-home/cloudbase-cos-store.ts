@@ -12,9 +12,7 @@
  *     这种"遍历 + 双向同步"场景的正确选择。Monorepo 的 packages/server 也是用它做
  *     云存储管理的。
  *
- * 凭证派生(与 CloudBaseStorage 一致):
- *   1. options.credentials(编程注入)
- *   2. process.env: TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY (+ TCB_TOKEN)
+ * 凭证由 options.credentials 显式注入；manager-node 不从环境变量兜底读取。
  *
  * `@cloudbase/manager-node` 是 optional peer dep,按需懒加载。
  */
@@ -22,7 +20,7 @@
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { ResourceError } from '../internal/errors.js'
+import { InvalidConfigError, ResourceError } from '../internal/errors.js'
 import { sha256OfBuffer } from './dedup.js'
 import type { ClaudeHomeContext, ClaudeHomeSyncStore, RelativePath } from './types.js'
 
@@ -73,17 +71,16 @@ interface ManagerCtor {
 
 function resolveCredentials(opts?: CloudBaseCosClaudeHomeStoreOptions): ResolvedCredentials {
   const fromOpts = opts?.credentials
-  const envId = fromOpts?.envId ?? process.env.TCB_ENV_ID
-  const secretId = fromOpts?.secretId ?? process.env.TCB_SECRET_ID
-  const secretKey = fromOpts?.secretKey ?? process.env.TCB_SECRET_KEY
-  const sessionToken = fromOpts?.sessionToken ?? process.env.TCB_TOKEN ?? undefined
-  const region = fromOpts?.region ?? process.env.TCB_REGION ?? 'ap-shanghai'
+  const envId = fromOpts?.envId
+  const secretId = fromOpts?.secretId
+  const secretKey = fromOpts?.secretKey
+  const sessionToken = fromOpts?.sessionToken
+  const region = fromOpts?.region ?? 'ap-shanghai'
 
   if (!envId || !secretId || !secretKey) {
-    throw new ResourceError(
-      'CloudBase credentials missing for CloudBaseCosClaudeHomeStore. Set one of:\n' +
-        '  - process.env: TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY\n' +
-        '  - constructor option `credentials`',
+    throw new InvalidConfigError(
+      'CloudBaseCosClaudeHomeStore requires platform credentials. ' +
+        'Pass constructor option `credentials` or createAgent({ credentials }).',
     )
   }
   return { envId, secretId, secretKey, sessionToken, region }

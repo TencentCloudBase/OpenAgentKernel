@@ -5,8 +5,8 @@
  * 这样每个小租户环境只需开通 1 张临时状态表，而不是每个功能开一张。
  *
  * 凭证模式（与 CloudBaseDbDriver / CloudBaseStorage 一致）：
- *   - TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY
- *   - 也支持配置注入（CloudBaseDbPermissionDriverOptions.credentials）
+ *   - 推荐通过 CloudBaseDbPermissionDriverOptions.credentials 显式注入
+ *   - 不传时不做 env fallback，由 @cloudbase/node-sdk 自身处理运行环境认证
  *
  * oak_state 文档结构（type='permission'）：
  *   {
@@ -45,7 +45,7 @@ export interface CloudBasePermissionCredentials {
 }
 
 export interface CloudBaseDbPermissionDriverOptions {
-  /** 显式凭证；不传则从 process.env 读取 TCB_ENV_ID/TCB_SECRET_ID/TCB_SECRET_KEY */
+  /** 显式凭证；不传则由 @cloudbase/node-sdk 自身处理运行环境认证 */
   credentials?: CloudBasePermissionCredentials
   /**
    * 集合名前缀（默认 `oak_`）。
@@ -65,27 +65,19 @@ const STATE_COLLECTION = 'state'
 const ENTRY_TYPE = 'permission'
 const DEFAULT_EXPIRES_AFTER_MS = 1_800_000 // 30 分钟
 
-interface ResolvedCredentials extends CloudBasePermissionCredentials {
+interface ResolvedCredentials extends Partial<CloudBasePermissionCredentials> {
   region: string
 }
 
 function resolveCredentials(opts?: CloudBaseDbPermissionDriverOptions): ResolvedCredentials {
-  const fromOpts = opts?.credentials
-  const envId = fromOpts?.envId ?? process.env.TCB_ENV_ID
-  const secretId = fromOpts?.secretId ?? process.env.TCB_SECRET_ID
-  const secretKey = fromOpts?.secretKey ?? process.env.TCB_SECRET_KEY
-  const sessionToken = fromOpts?.sessionToken ?? process.env.TCB_TOKEN ?? undefined
-  const region = fromOpts?.region ?? process.env.TCB_REGION ?? 'ap-shanghai'
-
-  if (!envId || !secretId || !secretKey) {
-    throw new ResourceError(
-      'CloudBase credentials missing. Set one of:\n' +
-        '  - process.env: TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY\n' +
-        '  - CloudBaseDbPermissionDriverOptions.credentials (programmatic)',
-    )
+  const creds = opts?.credentials
+  return {
+    ...(creds?.envId ? { envId: creds.envId } : {}),
+    ...(creds?.secretId ? { secretId: creds.secretId } : {}),
+    ...(creds?.secretKey ? { secretKey: creds.secretKey } : {}),
+    ...(creds?.sessionToken ? { sessionToken: creds.sessionToken } : {}),
+    region: creds?.region ?? 'ap-shanghai',
   }
-
-  return { envId, secretId, secretKey, sessionToken, region }
 }
 
 // `@cloudbase/node-sdk` 没有 export 类型，只能用 unknown 包装
@@ -148,10 +140,10 @@ export class CloudBaseDbPermissionDriver implements PermissionStoreDriver {
       )
     }
     this.app = init.init({
-      env: this.creds.envId,
       region: this.creds.region,
-      secretId: this.creds.secretId,
-      secretKey: this.creds.secretKey,
+      ...(this.creds.envId ? { env: this.creds.envId } : {}),
+      ...(this.creds.secretId ? { secretId: this.creds.secretId } : {}),
+      ...(this.creds.secretKey ? { secretKey: this.creds.secretKey } : {}),
       ...(this.creds.sessionToken ? { sessionToken: this.creds.sessionToken } : {}),
     })
     return this.app

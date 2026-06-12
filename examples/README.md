@@ -34,7 +34,7 @@ pnpm dlx tsx packages/open-agent-kernel/examples/14-session-history.ts
 
 ## 凭证依赖矩阵
 
-| Example | 模型 key | TCB_ENV_ID | TCB_SECRET_ID/KEY | TCB_API_KEY |
+| Example | 模型 key | TCB_ENV_ID | TENCENTCLOUD_SECRETID/KEY | TCB_API_KEY |
 |---------|:---:|:---:|:---:|:---:|
 | 01-quickstart | ✅ | | | |
 | 02-debug | ✅ | | | |
@@ -54,4 +54,4 @@ pnpm dlx tsx packages/open-agent-kernel/examples/14-session-history.ts
 
 ## 共享工具
 
-`_shared/env.ts` 在 import 时调 `dotenv.config()` 加载 `.env.local`，每个 example 顶部 `import './_shared/env.js'` 一次（副作用导入），之后正常 `process.env.XXX`。
+`_shared/env.ts` 在 import 时调 `dotenv.config()` 加载 `.env.local`，并提供 `getEnvId()`、`getPlatformCredentials()`、`getSandboxApiKey()`。示例层负责从环境变量读取凭证，再通过 `createAgent({ credentials })` 或构造参数显式传给 SDK。

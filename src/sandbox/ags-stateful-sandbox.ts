@@ -20,7 +20,8 @@
  *       E2b-Sandbox-Port: 9000  (TRW 默认端口)
  */
 
-import { ConfigError, SandboxError } from '../internal/errors.js'
+import { ConfigError, InvalidConfigError, SandboxError } from '../internal/errors.js'
+import type { PlatformCredentials } from '../public/types.js'
 import type { SandboxAcquireContext, SandboxInstance, SandboxRuntime } from './types.js'
 
 // ─── Constants ──────────────────────────────────────────────────────────
@@ -87,20 +88,22 @@ function getDefaultToolRoleArn(): string {
 export interface AgsStatefulSandboxOptions {
   /**
    * AGS 数据面认证用的长期 JWT。
-   * 默认从 `process.env.TCB_API_KEY` 读取。
+   * 必须显式传入；kernel 不读取凭证类环境变量。
    */
   apiKey?: string
+  /** 控制面平台凭证；未传时可由 createAgent({ credentials }) 通过 acquire 上下文下传 */
+  credentials?: PlatformCredentials
   /**
    * 控制面（AGS OpenAPI）的 secretId。
-   * 默认按以下优先级读：TCB_SECRET_ID → TENCENTCLOUD_SECRET_ID → TENCENT_SECRET_ID
+   * @deprecated 推荐使用 options.credentials 或 createAgent({ credentials })。
    */
   secretId?: string
   /**
    * 控制面 secretKey。
-   * 默认按以下优先级读：TCB_SECRET_KEY → TENCENTCLOUD_SECRET_KEY → TENCENT_SECRET_KEY
+   * @deprecated 推荐使用 options.credentials 或 createAgent({ credentials })。
    */
   secretKey?: string
-  /** 临时凭证 token（可选）：TCB_TOKEN / TENCENTCLOUD_SESSIONTOKEN */
+  /** 临时凭证 token（可选）。@deprecated 推荐使用 options.credentials。 */
   sessionToken?: string
   /** 容器镜像（不传走默认公开 TCR） */
   image?: string
@@ -170,32 +173,23 @@ interface ResolvedCredentials {
   gatewayBaseUrl?: string
 }
 
-function resolveCredentials(opts: AgsStatefulSandboxOptions): ResolvedCredentials {
-  const apiKey = opts.apiKey ?? process.env.TCB_API_KEY ?? ''
-  const secretId =
-    opts.secretId ??
-    process.env.TCB_SECRET_ID ??
-    process.env.TENCENTCLOUD_SECRET_ID ??
-    process.env.TENCENT_SECRET_ID ??
-    ''
-  const secretKey =
-    opts.secretKey ??
-    process.env.TCB_SECRET_KEY ??
-    process.env.TENCENTCLOUD_SECRET_KEY ??
-    process.env.TENCENT_SECRET_KEY ??
-    ''
-  const sessionToken = opts.sessionToken ?? process.env.TCB_TOKEN ?? process.env.TENCENTCLOUD_SESSIONTOKEN ?? undefined
+function resolveCredentials(
+  opts: AgsStatefulSandboxOptions,
+  platformCredentials?: PlatformCredentials,
+): ResolvedCredentials {
+  const controlCredentials = opts.credentials ?? platformCredentials
+  const apiKey = opts.apiKey ?? ''
+  const secretId = opts.secretId ?? controlCredentials?.secretId ?? ''
+  const secretKey = opts.secretKey ?? controlCredentials?.secretKey ?? ''
+  const sessionToken = opts.sessionToken ?? controlCredentials?.sessionToken
 
   if (!apiKey) {
-    throw new SandboxError(
-      'AgsStatefulSandbox requires TCB_API_KEY (long-lived JWT for data-plane auth). ' +
-        'Set process.env.TCB_API_KEY or pass options.apiKey.',
-    )
+    throw new InvalidConfigError('AgsStatefulSandbox requires options.apiKey (long-lived JWT for data-plane auth).')
   }
   if (!secretId || !secretKey) {
-    throw new SandboxError(
-      'AgsStatefulSandbox requires TCB_SECRET_ID / TCB_SECRET_KEY for control-plane (AGS OpenAPI). ' +
-        'Set the env vars or pass options.secretId / options.secretKey.',
+    throw new InvalidConfigError(
+      'AgsStatefulSandbox requires platform credentials for control-plane APIs. ' +
+        'Pass options.credentials or createAgent({ credentials }).',
     )
   }
 
@@ -927,7 +921,7 @@ export class AgsStatefulSandbox implements SandboxRuntime {
   }
 
   async acquire(ctx: SandboxAcquireContext): Promise<SandboxInstance> {
-    const cred = resolveCredentials(this.options)
+    const cred = resolveCredentials(this.options, ctx.credentials)
     const baseUrl = resolveGatewayUrl(ctx.envId, cred.gatewayBaseUrl)
     const scope = ctx.scope ?? 'session'
     const cosMode = this.options.cosMount ?? 'auto'

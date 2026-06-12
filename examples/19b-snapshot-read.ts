@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url'
 
 import { AgsStatefulSandbox, createAgent } from '@cloudbase/open-agent-kernel'
 
-import { loadEnv } from './_shared/env.js'
+import { getPlatformCredentials, getSandboxApiKey, loadEnv } from './_shared/env.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const HANDOFF_FILE = path.join(__dirname, '.last-userid')
@@ -59,6 +59,7 @@ function readHandoff(): Handoff {
 
 async function main() {
   loadEnv()
+  const credentials = getPlatformCredentials()
   const { userId, stamp: expectedStamp } = readHandoff()
 
   console.log('\n══════ 19b — read phase ══════')
@@ -69,9 +70,10 @@ async function main() {
   // ─── 诊断 1:先用独立的 AgsStatefulSandbox.acquire 拿 inst,直接 GET /health
   //          看 trw 真实 body —— 区分 restoreStatus=null 是因为字段缺失还是 restored:fresh ───
   console.log('\n[19b][diag] acquire raw sandbox instance to inspect /health body...')
-  const probeRuntime = new AgsStatefulSandbox()
+  const probeRuntime = new AgsStatefulSandbox({ apiKey: getSandboxApiKey() })
   const probeInst = await probeRuntime.acquire({
-    envId: process.env.TCB_ENV_ID!,
+    envId: credentials.envId,
+    credentials,
     conversationId: `probe-${Date.now()}`,
     scope: 'shared',
     userId,
@@ -88,11 +90,12 @@ async function main() {
   // probe inst 不主动 release(shared 模式 release 也是 no-op,无所谓)
 
   const agent = createAgent({
-    envId: process.env.TCB_ENV_ID!,
+    envId: credentials.envId,
+    credentials,
     model: buildModel(),
     systemPrompt: 'You are a coding assistant with shell + filesystem tools. 用工具完成,不要编造。',
     sandbox: {
-      runtime: new AgsStatefulSandbox(),
+      runtime: new AgsStatefulSandbox({ apiKey: getSandboxApiKey() }),
       scope: 'shared',
     },
   })

@@ -16,7 +16,7 @@
  *   4. 模型根据 CLAUDE.md 内容回答问题 → 验证同步真的把内容带进了 prompt
  *
  * 运行前提:
- *   - .env.local 配置 TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY +
+ *   - .env.local 配置 TCB_ENV_ID + TENCENTCLOUD_SECRETID + TENCENTCLOUD_SECRETKEY +
  *     TENCENTCLOUD_TOKENHUB_API_KEY
  *   - envId 对应的 CloudBase 已开通 COS
  *
@@ -26,7 +26,7 @@
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
 
-import { loadEnv } from './_shared/env.js'
+import { getEnvId, getPlatformCredentials, loadEnv } from './_shared/env.js'
 import { clearSeededClaudeHome, seedClaudeHome } from './_shared/seed-claude-home.js'
 
 // 预置到 COS 的 CLAUDE.md 内容 — 含可被验证的具体事实
@@ -45,6 +45,7 @@ const SEEDED_CLAUDE_MD = `# 项目偏好(预置)
 `
 
 async function runConversation(prompt: string, userId: string) {
+  const credentials = getPlatformCredentials()
   // 模型配置:支持环境变量自带 key + endpoint(测试方便),不传则走 CloudBase 网关默认。
   // ⚠️ 不要在源码里硬编码 apiKey;.env.local 不该提交到 git。
   const customModelId = process.env.OAK_EXAMPLE_MODEL_ID
@@ -59,7 +60,8 @@ async function runConversation(prompt: string, userId: string) {
     : (customModelId ?? 'glm-5.1')
 
   const agent = createAgent({
-    envId: process.env.TCB_ENV_ID!,
+    envId: credentials.envId,
+    credentials,
     model,
     systemPrompt: 'You are a coding assistant. Answer based on the project conventions you can see.',
     userMemory: { enabled: true },
@@ -78,7 +80,8 @@ async function runConversation(prompt: string, userId: string) {
 
 async function main() {
   loadEnv()
-  const envId = process.env.TCB_ENV_ID!
+  const envId = getEnvId()
+  const credentials = getPlatformCredentials()
   const userId = `demo-user-${Date.now()}`
 
   // ── Step 1:预置 CLAUDE.md 到 COS ────────────────────────────────
@@ -86,6 +89,7 @@ async function main() {
   await seedClaudeHome({
     envId,
     userId,
+    credentials,
     files: [{ relPath: 'CLAUDE.md', content: SEEDED_CLAUDE_MD }],
   })
 
@@ -104,7 +108,7 @@ async function main() {
   } finally {
     // ── Step 3:清理 COS,避免污染下次运行 ─────────────────────────
     console.log('\n[example] Step 3: cleaning up seeded files from COS...')
-    await clearSeededClaudeHome({ envId, userId, relPaths: ['CLAUDE.md'] })
+    await clearSeededClaudeHome({ envId, userId, credentials, relPaths: ['CLAUDE.md'] })
   }
 }
 

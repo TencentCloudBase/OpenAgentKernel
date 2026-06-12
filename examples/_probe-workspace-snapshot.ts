@@ -16,7 +16,7 @@
  */
 
 import { AgsStatefulSandbox } from '../src/sandbox/index.js'
-import { loadEnv } from './_shared/env.js'
+import { getPlatformCredentials, getSandboxApiKey, loadEnv } from './_shared/env.js'
 
 async function readBody(res: Response): Promise<unknown> {
   const text = await res.text()
@@ -33,18 +33,16 @@ function head(label: string): void {
 
 async function main() {
   loadEnv()
-  const envId = process.env.TCB_ENV_ID
-  if (!envId) {
-    console.error('TCB_ENV_ID 未设;请填好 .env.local 后再跑')
-    process.exit(1)
-  }
+  const credentials = getPlatformCredentials()
+  const envId = credentials.envId
 
   const conversationId = `probe-${Date.now()}`
   console.log(`[probe] envId=${envId}  conversationId=${conversationId}  scope=shared`)
 
-  const runtime = new AgsStatefulSandbox()
+  const runtime = new AgsStatefulSandbox({ apiKey: getSandboxApiKey() })
   const inst = await runtime.acquire({
     envId,
+    credentials,
     conversationId,
     scope: 'shared',
     onProgress: (m) => console.log(`[probe][acquire] ${m.phase}: ${m.message}`),

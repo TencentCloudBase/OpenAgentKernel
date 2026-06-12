@@ -24,7 +24,7 @@
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
 
-import { loadEnv } from './_shared/env.js'
+import { getEnvId, getPlatformCredentials, loadEnv } from './_shared/env.js'
 import { clearSeededClaudeHome, seedClaudeHome } from './_shared/seed-claude-home.js'
 
 const SEEDED_CLAUDE_MD = `# 项目偏好(预置)
@@ -49,8 +49,10 @@ function buildModel() {
 
 async function runOnNode(nodeName: string, userId: string, prompt: string) {
   console.log(`\n--- ${nodeName} ---`)
+  const credentials = getPlatformCredentials()
   const agent = createAgent({
-    envId: process.env.TCB_ENV_ID!,
+    envId: credentials.envId,
+    credentials,
     model: buildModel(),
     systemPrompt: 'You are a coding assistant. Answer based on the project conventions you can see.',
     userMemory: { enabled: true },
@@ -67,7 +69,8 @@ async function runOnNode(nodeName: string, userId: string, prompt: string) {
 
 async function main() {
   loadEnv()
-  const envId = process.env.TCB_ENV_ID!
+  const envId = getEnvId()
+  const credentials = getPlatformCredentials()
   const userId = `dist-demo-${Date.now()}`
 
   // ── Step 1:预置 CLAUDE.md 到 COS ────────────────────────────────
@@ -75,6 +78,7 @@ async function main() {
   await seedClaudeHome({
     envId,
     userId,
+    credentials,
     files: [{ relPath: 'CLAUDE.md', content: SEEDED_CLAUDE_MD }],
   })
 
@@ -93,7 +97,7 @@ async function main() {
   } finally {
     // ── Step 5:清理 COS ────────────────────────────────────────
     console.log('\n[example] Step 5: cleaning up seeded files from COS...')
-    await clearSeededClaudeHome({ envId, userId, relPaths: ['CLAUDE.md'] })
+    await clearSeededClaudeHome({ envId, userId, credentials, relPaths: ['CLAUDE.md'] })
   }
 }
 

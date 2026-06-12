@@ -1,10 +1,12 @@
-import './_shared/env.js'
+import { getPlatformCredentials, getSandboxApiKey } from './_shared/env.js'
 import { AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
 
 async function main(): Promise<void> {
-  const runtime = new AgsStatefulSandbox()
+  const credentials = getPlatformCredentials()
+  const runtime = new AgsStatefulSandbox({ apiKey: getSandboxApiKey() })
   const sandbox = await runtime.acquire({
-    envId: process.env.TCB_ENV_ID!,
+    envId: credentials.envId,
+    credentials,
     conversationId: 'probe3',
     scope: 'session',
   })

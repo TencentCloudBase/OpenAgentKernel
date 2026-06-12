@@ -132,12 +132,12 @@ export function buildClaudeQueryOptions(
     try {
       claudeConfigDir = deriveClaudeConfigDir(config.envId, extra.userId)
       syncEngine = new ClaudeHomeSyncEngine({
-        store: new CloudBaseCosClaudeHomeStore(), // 复用 process.env 凭证
+        store: new CloudBaseCosClaudeHomeStore({ credentials: config.credentials }),
         ctx: { envId: config.envId, userId: extra.userId },
         localDir: claudeConfigDir,
       })
     } catch (err) {
-      // ResourceError 等(比如缺 TCB_* 凭证) → graceful degrade,本次 send 不同步,继续工作
+      // ResourceError / InvalidConfigError 等 → graceful degrade,本次 send 不同步,继续工作
       // eslint-disable-next-line no-console
       console.warn(
         '[oak/userMemory] failed to construct sync engine, sync disabled this turn:',

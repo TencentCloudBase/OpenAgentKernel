@@ -144,6 +144,7 @@ function createSession(deps: SessionDeps): Session {
     if (!sandboxAcquirePromise) {
       sandboxAcquirePromise = sandboxRuntime.acquire({
         envId: config.envId,
+        credentials: config.credentials,
         conversationId,
         userId,
         scope: config.sandbox?.scope ?? 'session',
@@ -979,25 +980,22 @@ async function resolveUserCredentials(config: AgentConfig): Promise<CloudBaseUse
     }
   }
 
-  const envSecretId = process.env.TCB_SECRET_ID ?? process.env.TENCENTCLOUD_SECRET_ID ?? ''
-  const envSecretKey = process.env.TCB_SECRET_KEY ?? process.env.TENCENTCLOUD_SECRET_KEY ?? ''
-  const envSessionToken = process.env.TCB_TOKEN ?? process.env.TENCENTCLOUD_SESSIONTOKEN
-  const envEnvId = process.env.TCB_ENV_ID ?? config.envId
+  const platformCreds = config.credentials
 
-  if (!envSecretId || !envSecretKey) {
+  if (!platformCreds?.secretId || !platformCreds.secretKey) {
     throw new InvalidConfigError(
       'CloudBase MCP tools require user credentials. ' +
         'Either set AgentConfig.sandbox.userCredentials, ' +
-        'or set process.env TCB_SECRET_ID + TCB_SECRET_KEY. ' +
+        'or pass AgentConfig.credentials. ' +
         'To disable cloudbase tools entirely, pass `sandbox: { cloudbaseTools: false }`.',
     )
   }
 
   return {
-    envId: envEnvId,
-    secretId: envSecretId,
-    secretKey: envSecretKey,
-    sessionToken: envSessionToken,
+    envId: platformCreds.envId || config.envId,
+    secretId: platformCreds.secretId,
+    secretKey: platformCreds.secretKey,
+    sessionToken: platformCreds.sessionToken,
   }
 }
 

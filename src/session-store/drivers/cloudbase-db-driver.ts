@@ -1,9 +1,9 @@
 /**
  * CloudBaseDbDriver: 把 SessionStoreDriver 落到 CloudBase 数据库（NoSQL）。
  *
- * 凭证模式（与 OpenVibeCoding 项目保持一致）：
- *   - TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY
- *   - 也支持配置注入（CloudBaseDbDriverOptions.credentials）
+ * 凭证模式：
+ *   - 推荐通过 CloudBaseDbDriverOptions.credentials 显式注入
+ *   - 不传时不做 env fallback，由 @cloudbase/node-sdk 自身处理运行环境认证
  *
  * 四张集合：
  *   - {prefix}sessions          一行 = 一个 session（用作 listSessions 索引）
@@ -33,7 +33,7 @@ export interface CloudBaseCredentials {
 }
 
 export interface CloudBaseDbDriverOptions {
-  /** 显式凭证；不传则从 process.env 读取 TCB_ENV_ID/TCB_SECRET_ID/TCB_SECRET_KEY */
+  /** 显式凭证；不传则由 @cloudbase/node-sdk 自身处理运行环境认证 */
   credentials?: CloudBaseCredentials
   /**
    * 集合名前缀（默认 `oak_`，与 OpenVibeCoding 的 `vibe_agent_` 区分开，
@@ -44,27 +44,19 @@ export interface CloudBaseDbDriverOptions {
 
 const DEFAULT_PREFIX = 'oak_'
 
-interface ResolvedCredentials extends CloudBaseCredentials {
+interface ResolvedCredentials extends Partial<CloudBaseCredentials> {
   region: string
 }
 
 function resolveCredentials(opts?: CloudBaseDbDriverOptions): ResolvedCredentials {
-  const fromEnv = opts?.credentials
-  const envId = fromEnv?.envId ?? process.env.TCB_ENV_ID
-  const secretId = fromEnv?.secretId ?? process.env.TCB_SECRET_ID
-  const secretKey = fromEnv?.secretKey ?? process.env.TCB_SECRET_KEY
-  const sessionToken = fromEnv?.sessionToken ?? process.env.TCB_TOKEN ?? undefined
-  const region = fromEnv?.region ?? process.env.TCB_REGION ?? 'ap-shanghai'
-
-  if (!envId || !secretId || !secretKey) {
-    throw new ResourceError(
-      'CloudBase credentials missing. Set one of:\n' +
-        '  - process.env: TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY\n' +
-        '  - CloudBaseDbDriverOptions.credentials (programmatic)',
-    )
+  const creds = opts?.credentials
+  return {
+    ...(creds?.envId ? { envId: creds.envId } : {}),
+    ...(creds?.secretId ? { secretId: creds.secretId } : {}),
+    ...(creds?.secretKey ? { secretKey: creds.secretKey } : {}),
+    ...(creds?.sessionToken ? { sessionToken: creds.sessionToken } : {}),
+    region: creds?.region ?? 'ap-shanghai',
   }
-
-  return { envId, secretId, secretKey, sessionToken, region }
 }
 
 // `@cloudbase/node-sdk` 没有 export 类型，只能用 unknown 包装。
@@ -126,10 +118,10 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
       )
     }
     this.app = init.init({
-      env: this.creds.envId,
       region: this.creds.region,
-      secretId: this.creds.secretId,
-      secretKey: this.creds.secretKey,
+      ...(this.creds.envId ? { env: this.creds.envId } : {}),
+      ...(this.creds.secretId ? { secretId: this.creds.secretId } : {}),
+      ...(this.creds.secretKey ? { secretKey: this.creds.secretKey } : {}),
       ...(this.creds.sessionToken ? { sessionToken: this.creds.sessionToken } : {}),
     })
     return this.app

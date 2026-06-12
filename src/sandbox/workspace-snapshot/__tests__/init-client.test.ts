@@ -20,13 +20,16 @@ describe('callWorkspaceInit', () => {
           result: {
             workspace: '/home/user',
             git: { enabled: true, hasGit: true, branch: 'main' },
-            env: { TCB_ENV_ID: '<set>' },
+            env: { CLOUDBASE_ENV_ID: '<set>' },
           },
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       )
     })
-    const result = await callWorkspaceInit(inst as any, { credentials: { TCB_ENV_ID: 'env-1' }, timeoutMs: 60_000 })
+    const result = await callWorkspaceInit(inst as any, {
+      credentials: { CLOUDBASE_ENV_ID: 'env-1' },
+      timeoutMs: 60_000,
+    })
     expect(result.workspace).toBe('/home/user')
     // 不应有 restoreStatus 字段(init body 不返回它)
     expect((result as any).restoreStatus).toBeUndefined()
@@ -73,9 +76,9 @@ describe('callWorkspaceInit', () => {
       )
     })
     await callWorkspaceInit(inst as any, {
-      credentials: { TCB_ENV_ID: 'env-1', TCB_SECRET_ID: 's' },
+      credentials: { CLOUDBASE_ENV_ID: 'env-1', TENCENTCLOUD_SECRETID: 's' },
       timeoutMs: 60_000,
     })
-    expect(capturedBody.env).toEqual({ TCB_ENV_ID: 'env-1', TCB_SECRET_ID: 's' })
+    expect(capturedBody.env).toEqual({ CLOUDBASE_ENV_ID: 'env-1', TENCENTCLOUD_SECRETID: 's' })
   })
 })

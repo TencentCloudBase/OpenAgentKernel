@@ -20,6 +20,7 @@ import type { SandboxRuntime } from '../../sandbox/types.js'
 const baseConfig: AgentConfig = {
   envId: 'env-test',
   model: 'glm-5.1',
+  credentials: { envId: 'env-test', secretId: 'test-id', secretKey: 'test-key' },
 }
 
 // 跑前给 credential factory 一个非空 API key,避免 resolveCredential 抛错。
@@ -124,12 +125,7 @@ describe('buildClaudeQueryOptions — skills', () => {
 })
 
 describe('buildClaudeQueryOptions — userMemory', () => {
-  // CloudBaseCosClaudeHomeStore 构造时 resolveCredentials 会读 env,
-  // 测试时设 process.env.TCB_ENV_ID/SECRET_ID/SECRET_KEY 让构造不抛
   beforeEach(() => {
-    process.env.TCB_ENV_ID = 'env-test'
-    process.env.TCB_SECRET_ID = 'test-id'
-    process.env.TCB_SECRET_KEY = 'test-key'
     delete process.env.CLAUDE_CONFIG_DIR
   })
 
@@ -218,15 +214,12 @@ describe('buildClaudeQueryOptions — userMemory', () => {
     expect(options.env?.CLAUDE_CONFIG_DIR).toBeUndefined()
   })
 
-  it('userMemory + missing TCB_* env → graceful degrade (no syncEngine, no throw)', () => {
-    // 模拟 spec §3.1:COS 凭证缺失时,构造 store 抛 ResourceError →
+  it('userMemory + missing credentials → graceful degrade (no syncEngine, no throw)', () => {
+    // 模拟 spec §3.1:COS 凭证缺失时,构造 store 抛 InvalidConfigError →
     // agent-builder 应 try/catch 兜住,返回 syncEngine=undefined,不影响 send 主流程
-    delete process.env.TCB_ENV_ID
-    delete process.env.TCB_SECRET_ID
-    delete process.env.TCB_SECRET_KEY
     expect(() => {
       const { options, syncEngine } = buildClaudeQueryOptions(
-        { ...baseConfig, userMemory: { enabled: true } },
+        { ...baseConfig, credentials: undefined, userMemory: { enabled: true } },
         { userId: 'alice' },
       )
       expect(syncEngine).toBeUndefined()

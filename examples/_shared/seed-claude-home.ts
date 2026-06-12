@@ -10,6 +10,7 @@
  */
 
 import { CloudBaseCosClaudeHomeStore } from '../../src/claude-home/cloudbase-cos-store.js'
+import type { PlatformCredentials } from '@cloudbase/open-agent-kernel'
 
 export interface SeedFile {
   /** 相对 CLAUDE_CONFIG_DIR 的路径,例:'CLAUDE.md' / 'agent-memory/code-reviewer/MEMORY.md' */
@@ -23,8 +24,13 @@ export interface SeedFile {
  *
  * 失败会抛 — 调用方负责处理(测试里通常希望失败立刻可见)。
  */
-export async function seedClaudeHome(args: { envId: string; userId: string; files: SeedFile[] }): Promise<void> {
-  const store = new CloudBaseCosClaudeHomeStore()
+export async function seedClaudeHome(args: {
+  envId: string
+  userId: string
+  credentials: PlatformCredentials
+  files: SeedFile[]
+}): Promise<void> {
+  const store = new CloudBaseCosClaudeHomeStore({ credentials: args.credentials })
   for (const file of args.files) {
     await store.put({ envId: args.envId, userId: args.userId }, file.relPath, Buffer.from(file.content, 'utf8'))
     // eslint-disable-next-line no-console
@@ -40,9 +46,10 @@ export async function seedClaudeHome(args: { envId: string; userId: string; file
 export async function clearSeededClaudeHome(args: {
   envId: string
   userId: string
+  credentials: PlatformCredentials
   relPaths: string[]
 }): Promise<void> {
-  const store = new CloudBaseCosClaudeHomeStore()
+  const store = new CloudBaseCosClaudeHomeStore({ credentials: args.credentials })
   for (const relPath of args.relPaths) {
     await store.delete({ envId: args.envId, userId: args.userId }, relPath)
     // eslint-disable-next-line no-console

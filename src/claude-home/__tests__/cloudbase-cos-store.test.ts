@@ -19,16 +19,15 @@ import { CloudBaseCosClaudeHomeStore } from '../cloudbase-cos-store.js'
 
 const ctx = { envId: 'env-test', userId: 'alice' }
 const PREFIX = 'oak/users/alice/claude-home/'
-
-beforeEach(() => {
-  process.env.TCB_ENV_ID = 'env-test'
-  process.env.TCB_SECRET_ID = 'sid'
-  process.env.TCB_SECRET_KEY = 'sk'
-})
+const credentials = { envId: 'env-test', secretId: 'sid', secretKey: 'sk' }
 
 afterEach(() => {
   vi.restoreAllMocks()
 })
+
+function newStore(): CloudBaseCosClaudeHomeStore {
+  return new CloudBaseCosClaudeHomeStore({ credentials })
+}
 
 // ── 测试辅助:构造一个 fake CloudBaseManager 实例 ──────────────
 function makeFakeManager(
@@ -62,17 +61,11 @@ function spyManagerCtor(store: CloudBaseCosClaudeHomeStore, instance: unknown, s
 
 // ── 凭证 ───────────────────────────────────────────────────────
 describe('CloudBaseCosClaudeHomeStore — credential validation', () => {
-  it('throws ResourceError when credentials missing', () => {
-    delete process.env.TCB_ENV_ID
-    delete process.env.TCB_SECRET_ID
-    delete process.env.TCB_SECRET_KEY
-    expect(() => new CloudBaseCosClaudeHomeStore()).toThrow(/CloudBase credentials missing/)
+  it('throws InvalidConfigError when credentials missing', () => {
+    expect(() => new CloudBaseCosClaudeHomeStore()).toThrow(/requires platform credentials/)
   })
 
   it('accepts programmatic credentials', () => {
-    delete process.env.TCB_ENV_ID
-    delete process.env.TCB_SECRET_ID
-    delete process.env.TCB_SECRET_KEY
     expect(
       () => new CloudBaseCosClaudeHomeStore({ credentials: { envId: 'e', secretId: 's', secretKey: 'k' } }),
     ).not.toThrow()
@@ -82,7 +75,7 @@ describe('CloudBaseCosClaudeHomeStore — credential validation', () => {
 // ── 模块加载形态 ───────────────────────────────────────────────
 describe('CloudBaseCosClaudeHomeStore — getManager() module shape adaptation', () => {
   it('propagates the failure when @cloudbase/manager-node is not installed', async () => {
-    const store = new CloudBaseCosClaudeHomeStore()
+    const store = newStore()
     // 在 requireManagerNode 这一层拦截 = 模拟"包加载失败被业务层捕获后包装的 ResourceError"
     // (生产代码 try/catch 会把任何 dynamicImport 失败包成 ResourceError;这里直接 mock
     // 抛 ResourceError 文案,验证其能向上传播)
@@ -95,7 +88,7 @@ describe('CloudBaseCosClaudeHomeStore — getManager() module shape adaptation',
   })
 
   it('uses mod.default when SDK exports CJS shape (default-wrapped)', async () => {
-    const store = new CloudBaseCosClaudeHomeStore()
+    const store = newStore()
     const fake = makeFakeManager()
     const Ctor = spyManagerCtor(store, fake, 'cjs')
 
@@ -109,7 +102,7 @@ describe('CloudBaseCosClaudeHomeStore — getManager() module shape adaptation',
   })
 
   it('uses mod directly when SDK exports ESM shape (no default wrapper)', async () => {
-    const store = new CloudBaseCosClaudeHomeStore()
+    const store = newStore()
     const fake = makeFakeManager()
     const Ctor = spyManagerCtor(store, fake, 'esm')
 
@@ -118,7 +111,7 @@ describe('CloudBaseCosClaudeHomeStore — getManager() module shape adaptation',
   })
 
   it('throws ResourceError when SDK loaded but default is not a constructor', async () => {
-    const store = new CloudBaseCosClaudeHomeStore()
+    const store = newStore()
     vi.spyOn(
       store as unknown as { requireManagerNode: () => Promise<unknown> },
       'requireManagerNode',
@@ -128,7 +121,7 @@ describe('CloudBaseCosClaudeHomeStore — getManager() module shape adaptation',
   })
 
   it('caches manager between calls (constructor only invoked once)', async () => {
-    const store = new CloudBaseCosClaudeHomeStore()
+    const store = newStore()
     const fake = makeFakeManager({ deleteFile: vi.fn().mockResolvedValue({}) })
     const Ctor = spyManagerCtor(store, fake, 'cjs')
 
@@ -151,7 +144,7 @@ describe('CloudBaseCosClaudeHomeStore — pull()', () => {
   })
 
   it('returns empty baseline when COS namespace is empty', async () => {
-    const store = new CloudBaseCosClaudeHomeStore()
+    const store = newStore()
     const fake = makeFakeManager({ walkCloudDir: vi.fn().mockResolvedValue([]) })
     spyManagerCtor(store, fake, 'cjs')
 
@@ -162,7 +155,7 @@ describe('CloudBaseCosClaudeHomeStore — pull()', () => {
   })
 
   it('downloads files via temporary URL and returns hashed baseline', async () => {
-    const store = new CloudBaseCosClaudeHomeStore()
+    const store = newStore()
     const fileKey = PREFIX + 'CLAUDE.md'
     const fake = makeFakeManager({
       walkCloudDir: vi.fn().mockResolvedValue([{ Key: fileKey, Size: '13' }]),
@@ -187,7 +180,7 @@ describe('CloudBaseCosClaudeHomeStore — pull()', () => {
   })
 
   it('skips directory placeholders (key ending with /) and zero-size entries', async () => {
-    const store = new CloudBaseCosClaudeHomeStore()
+    const store = newStore()
     const fake = makeFakeManager({
       walkCloudDir: vi.fn().mockResolvedValue([
         { Key: PREFIX + 'memory/', Size: 0 },
@@ -203,7 +196,7 @@ describe('CloudBaseCosClaudeHomeStore — pull()', () => {
   })
 
   it('throws when temp URL fetch fails (so caller can decide retry vs fail-open)', async () => {
-    const store = new CloudBaseCosClaudeHomeStore()
+    const store = newStore()
     const fileKey = PREFIX + 'CLAUDE.md'
     const fake = makeFakeManager({
       walkCloudDir: vi.fn().mockResolvedValue([{ Key: fileKey, Size: '5' }]),
@@ -220,7 +213,7 @@ describe('CloudBaseCosClaudeHomeStore — pull()', () => {
 // ── put(): Buffer → tmp file → uploadFile → cleanup ────────────
 describe('CloudBaseCosClaudeHomeStore — put()', () => {
   it('writes buffer to a tmp file, uploads it, then cleans up the tmp dir', async () => {
-    const store = new CloudBaseCosClaudeHomeStore()
+    const store = newStore()
     let capturedLocalPath: string | undefined
     const fake = makeFakeManager({
       uploadFile: vi.fn().mockImplementation(async (args: { localPath: string; cloudPath: string }) => {
@@ -243,7 +236,7 @@ describe('CloudBaseCosClaudeHomeStore — put()', () => {
   })
 
   it('still cleans up tmp dir if uploadFile throws', async () => {
-    const store = new CloudBaseCosClaudeHomeStore()
+    const store = newStore()
     let capturedLocalPath: string | undefined
     const fake = makeFakeManager({
       uploadFile: vi.fn().mockImplementation(async (args: { localPath: string }) => {
@@ -262,7 +255,7 @@ describe('CloudBaseCosClaudeHomeStore — put()', () => {
 // ── delete(): 幂等(文件不存在视为成功)─────────────────────────
 describe('CloudBaseCosClaudeHomeStore — delete()', () => {
   it('calls deleteFile with full COS key', async () => {
-    const store = new CloudBaseCosClaudeHomeStore()
+    const store = newStore()
     const fake = makeFakeManager()
     spyManagerCtor(store, fake, 'cjs')
 
@@ -273,7 +266,7 @@ describe('CloudBaseCosClaudeHomeStore — delete()', () => {
 
   for (const code of ['STORAGE.FileNotFound', 'STORAGE_FILE_NONEXIST', 'NoSuchKey']) {
     it(`treats ${code} as success (idempotent delete)`, async () => {
-      const store = new CloudBaseCosClaudeHomeStore()
+      const store = newStore()
       const fake = makeFakeManager({
         deleteFile: vi.fn().mockRejectedValue(Object.assign(new Error('not found'), { code })),
       })
@@ -284,7 +277,7 @@ describe('CloudBaseCosClaudeHomeStore — delete()', () => {
   }
 
   it('treats HTTP 404 as success', async () => {
-    const store = new CloudBaseCosClaudeHomeStore()
+    const store = newStore()
     const fake = makeFakeManager({
       deleteFile: vi.fn().mockRejectedValue(Object.assign(new Error('not found'), { statusCode: 404 })),
     })
@@ -294,7 +287,7 @@ describe('CloudBaseCosClaudeHomeStore — delete()', () => {
   })
 
   it('rethrows on real errors (e.g. permission)', async () => {
-    const store = new CloudBaseCosClaudeHomeStore()
+    const store = newStore()
     const fake = makeFakeManager({
       deleteFile: vi
         .fn()
