@@ -2,7 +2,7 @@
  * 04-multi-turn-db.ts —— 多轮对话 + CloudBaseDbDriver（CloudBase 数据库持久化）
  *
  * 演示：
- *   1. 用 CloudBaseDbDriver 启用 session 持久化（数据真的落 CloudBase DB）
+ *   1. 传入 credentials 后默认启用 CloudBase FlexDB session 持久化
  *   2. 同一个 session 跑两轮对话，第二轮模型应该能引用第一轮的内容
  *   3. 跨进程 resume：第二次运行时配置 OAK_RESUME_CONVERSATION_ID=<id>
  *      把上次的 conversationId 传入，agent.resumeSession 从 DB 拉历史继续
@@ -18,29 +18,19 @@
  */
 import { getEnvId, getPlatformCredentials } from './_shared/env.js'
 
-import { CloudBaseDbDriver, CloudBaseSessionStore, createAgent } from '@cloudbase/open-agent-kernel'
+import { createAgent } from '@cloudbase/open-agent-kernel'
 
 async function main(): Promise<void> {
   const envId = getEnvId()
   const credentials = getPlatformCredentials()
-
-  const driver = new CloudBaseDbDriver({
-    credentials,
-    // collectionPrefix 默认 'oak_'，可按需自定义避免冲突
-  })
-  const store = new CloudBaseSessionStore({
-    driver,
-    // 推荐生产环境传 envId：把 SDK 派生的 "sanitized cwd" 替换为业务标识，
-    // 解决"多环境部署 cwd 漂移"和"多租户隔离"两个问题。
-    projectKey: envId,
-  })
 
   const agent = createAgent({
     envId,
     credentials,
     model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
     systemPrompt: 'You are a helpful assistant. Reply concisely in Chinese. ' + 'Remember details across turns.',
-    session: { store },
+    // 不配置 session 时，credentials 存在会默认启用 CloudBase FlexDB session store。
+    // 如需自定义表前缀：session: { tablePrefix: 'my_agent_' }
   })
 
   const resumeId = process.env.OAK_RESUME_CONVERSATION_ID
@@ -81,14 +71,8 @@ async function main(): Promise<void> {
 
   // ── 验证：用 envId 直接查 DB 确认数据真的落库 ─────────────────
   console.log('\n--- Diagnostic ---')
-  const sessionsInDb = await driver.listSessions(envId)
-  console.log(`sessions in DB (projectKey=${envId}): ${sessionsInDb.length}`)
-  const entries = await driver.loadEntries({ projectKey: envId, sessionId: session.id })
-  console.log(`entries for current conversation: ${entries?.length ?? 0}`)
   console.log(`conversation=${session.id}`)
-  console.log(
-    `→ 在 CloudBase 控制台 oak_session_entries 集合里按 sessionId="${session.id}" 过滤可见全部 transcript 条目。`,
-  )
+  console.log('→ 在 CloudBase 控制台 oak_session_entries 集合里按 sessionId 过滤可见全部 transcript 条目。')
 
   console.log('\n--- Done ---')
 }

@@ -395,6 +395,21 @@ export interface SessionContext {
   envId: string
 }
 
+/**
+ * Session 持久化资源域。
+ *
+ * 当前主路径是 CloudBase 资源；具体使用哪类 CloudBase 数据库由
+ * `SessionConfig.database` 表达。
+ */
+export type SessionStoreProvider = 'cloudbase'
+
+/**
+ * CloudBase 内部可用于 session 持久化的数据资源类型。
+ *
+ * 当前内置实现为 `flexdb`，后续可扩展到 CloudBase Mongo / MySQL / PostgreSQL。
+ */
+export type CloudBaseSessionDatabase = 'flexdb' | 'mongo' | 'mysql' | 'pgsql'
+
 // ============================================================
 // Agent 配置（顶层入口）
 // ============================================================
@@ -492,9 +507,11 @@ export interface AgentConfig {
 /**
  * 会话持久化配置。
  *
- * 不传 `store`：transcript 仅在 SDK 子进程的本地临时目录里（进程退出即丢，
- *               不可跨节点 resume）。
- * 传 `store`：transcript 镜像到外部存储（CloudBase DB / 自定义 driver）。
+ * 默认行为：
+ * - 传了 `AgentConfig.credentials` 且未显式关闭时，自动使用 CloudBase FlexDB
+ *   持久化 session，表前缀默认 `oak_`，projectKey 默认 `envId`。
+ * - 未传 credentials 时保持本地临时 transcript，避免无凭证 quickstart 报错。
+ * - 传 `enabled: false` 可显式关闭默认持久化。
  *
  * 注意：本接口刻意不导出底层 SDK 的 `SessionStore` 类型，避免锁定 runtime。
  *       store 对象通过 `kernel/session-store` 子模块的 `CloudBaseSessionStore`
@@ -502,9 +519,36 @@ export interface AgentConfig {
  */
 export interface SessionConfig {
   /**
+   * 是否启用 session 持久化。
+   *
+   * - `undefined`：有 credentials 时默认启用 CloudBase FlexDB；无 credentials 时不启用
+   * - `false`：显式关闭持久化
+   * - `true`：强制启用；若缺少所需配置会在 createAgent 阶段报错
+   */
+  enabled?: boolean
+
+  /**
+   * 持久化资源域。默认 `cloudbase`。
+   *
+   * 当前主路径是 CloudBase 资源；具体数据库类型由 `database` 指定。
+   */
+  provider?: SessionStoreProvider
+
+  /**
+   * CloudBase session 持久化使用的数据资源类型。默认 `flexdb`。
+   *
+   * 当前内置实现：
+   * - `flexdb`：CloudBase FlexDB，使用默认四张表
+   *
+   * 预留扩展：
+   * - `mongo` / `mysql` / `pgsql`：后续通过对应 driver 实现
+   */
+  database?: CloudBaseSessionDatabase
+
+  /**
    * 兼容 Claude Agent SDK SessionStore 接口的 store 对象。
    *
-   * 推荐用法：
+   * 高级用法：
    *   ```ts
    *   import { CloudBaseSessionStore, CloudBaseDbDriver } from '@cloudbase/open-agent-kernel'
    *   session: { store: new CloudBaseSessionStore({ driver: new CloudBaseDbDriver() }) }
@@ -514,6 +558,16 @@ export interface SessionConfig {
    * 内部 runtime/agent-builder 会做结构性校验后传给 SDK。
    */
   store?: unknown
+
+  /**
+   * 默认 CloudBase FlexDB 后端的表前缀。
+   *
+   * 会生成 `{tablePrefix}sessions` / `{tablePrefix}session_entries` /
+   * `{tablePrefix}session_summaries` / `{tablePrefix}session_messages`。
+   *
+   * @default 'oak_'
+   */
+  tablePrefix?: string
 
   /**
    * Project key（多租户隔离）

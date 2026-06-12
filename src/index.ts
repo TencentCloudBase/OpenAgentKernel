@@ -43,6 +43,8 @@ export type {
   PendingApproval,
   RequireApprovalRule,
   SessionConfig,
+  SessionStoreProvider,
+  CloudBaseSessionDatabase,
   // Hooks
   AgentHooks,
   UserMessageContext,

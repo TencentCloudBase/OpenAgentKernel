@@ -845,6 +845,74 @@ createAgent({ credentials })
 
 ---
 
+### 优化 2：sessionStore 默认启用与 API 简化（✅ 已完成）
+
+> **状态**: 已实施。面向 SDK 用户的默认路径从
+> `new CloudBaseDbDriver({ credentials })` → `new CloudBaseSessionStore({ driver })` →
+> `createAgent({ session: { store } })` 简化为只传 `createAgent({ credentials })`。
+
+#### 设计结论
+
+1. **默认启用 CloudBase FlexDB session store**
+   - 当 `AgentConfig.credentials` 存在且 `session.enabled !== false` 时，kernel 自动创建默认 `CloudBaseSessionStore`。
+   - 默认 provider 为 `cloudbase`，默认 database 为 `flexdb`，默认表前缀为 `oak_`。
+   - `projectKey` 默认使用 `envId`，避免 SDK cwd 派生 key 导致跨节点 resume 断裂。
+
+2. **保留显式关闭与高级扩展**
+   - `session: { enabled: false }` 显式关闭默认持久化。
+   - `session: { store }` 仍支持完全自定义 SessionStore。
+   - `session.provider` 表达资源域，当前为 `'cloudbase'`。
+   - `session.database` 表达 CloudBase 内部数据资源类型：`'flexdb' | 'mongo' | 'mysql' | 'pgsql'`。
+   - 当前内置实现为 `database: 'flexdb'`；其他 CloudBase 数据库类型预留，使用时会给出明确未支持错误。
+
+3. **允许自定义表前缀**
+   - 新增 `session.tablePrefix`，用于默认 CloudBase FlexDB 后端。
+   - 生成 `{tablePrefix}sessions` / `{tablePrefix}session_entries` /
+     `{tablePrefix}session_summaries` / `{tablePrefix}session_messages`。
+
+#### 新推荐用法
+
+```typescript
+const agent = createAgent({
+  envId,
+  credentials,
+  model: 'glm-5.1',
+  // 不配置 session 时，credentials 存在会默认启用 CloudBase FlexDB session store
+})
+```
+
+自定义表前缀:
+
+```typescript
+const agent = createAgent({
+  envId,
+  credentials,
+  model: 'glm-5.1',
+  session: { tablePrefix: 'my_agent_' },
+})
+```
+
+关闭默认持久化:
+
+```typescript
+const agent = createAgent({
+  envId,
+  credentials,
+  model: 'glm-5.1',
+  session: { enabled: false },
+})
+```
+
+#### 验证
+
+- `pnpm format`
+- `pnpm -F @cloudbase/open-agent-kernel test`（14 files / 167 tests）
+- `pnpm -F @cloudbase/open-agent-kernel type-check`
+- `pnpm -F @cloudbase/open-agent-kernel build`
+- `pnpm lint`
+
+---
+
 ## 十三、依赖关系
 
 ### 运行时依赖

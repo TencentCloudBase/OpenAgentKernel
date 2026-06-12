@@ -95,10 +95,10 @@ for await (const event of session.send('创建一个 Express 服务器并运行'
 await session.abort() // 释放沙箱
 ```
 
-### 多轮对话 + 持久化
+### 多轮对话 + 默认持久化
 
 ```typescript
-import { createAgent, CloudBaseSessionStore, CloudBaseDbDriver } from '@cloudbase/open-agent-kernel'
+import { createAgent } from '@cloudbase/open-agent-kernel'
 
 const envId = process.env.TCB_ENV_ID!
 const credentials = {
@@ -106,16 +106,12 @@ const credentials = {
   secretId: process.env.TENCENTCLOUD_SECRETID!,
   secretKey: process.env.TENCENTCLOUD_SECRETKEY!,
 }
-const store = new CloudBaseSessionStore({
-  driver: new CloudBaseDbDriver({ credentials }),
-  projectKey: envId,
-})
-
 const agent = createAgent({
   envId,
   credentials,
   model: 'glm-5.1',
-  session: { store, projectKey: envId },
+  // 有 credentials 时默认启用 CloudBase FlexDB session store。
+  // 如需自定义表前缀：session: { tablePrefix: 'my_agent_' }
 })
 
 // 创建会话
@@ -134,6 +130,7 @@ for await (const e of resumed.send('还记得我的名字吗？')) { /* ... */ }
 | 配置项 | 类型 | 必填 | 说明 |
 |--------|------|:----:|------|
 | `envId` | `string` | ✅ | CloudBase 环境 ID |
+| `credentials` | `PlatformCredentials` | 使用 CloudBase 资源时 | 平台凭证；传入后默认启用 CloudBase FlexDB session store |
 | `model` | `string \| ModelSpec` | ✅ | 模型标识（如 `'glm-5.1'`） |
 | `systemPrompt` | `string` | | 系统提示词 |
 | `sandbox` | `SandboxConfig` | | 沙箱配置（启用文件系统/Shell） |
@@ -171,8 +168,12 @@ interface SandboxConfig {
 
 /** 会话持久化配置 */
 interface SessionConfig {
-  store?: SessionStore             // CloudBaseSessionStore 实例
-  projectKey?: string              // 多租户隔离键（推荐传 envId）
+  enabled?: boolean                // 默认：有 credentials 时启用 CloudBase FlexDB
+  provider?: 'cloudbase'           // 默认 cloudbase
+  database?: 'flexdb' | 'mongo' | 'mysql' | 'pgsql' // 默认 flexdb
+  store?: SessionStore             // 高级自定义 SessionStore
+  tablePrefix?: string             // 默认 'oak_'
+  projectKey?: string              // 默认 envId
   flush?: 'batched' | 'eager'      // 落盘策略
 }
 

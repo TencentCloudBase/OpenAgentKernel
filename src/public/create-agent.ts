@@ -9,6 +9,7 @@ import { buildPromptAsync } from '../runtime/prompt-builder.js'
 import { createCloudBaseMcpServer, type CloudBaseUserCredentials } from '../sandbox/cloudbase-mcp.js'
 import type { SandboxInstance, SandboxRuntime } from '../sandbox/types.js'
 import type { WorkspaceSnapshotEngine } from '../sandbox/workspace-snapshot/index.js'
+import { CloudBaseDbDriver, CloudBaseSessionStore } from '../session-store/index.js'
 import type { StorageProvider } from '../storage/types.js'
 import type {
   Agent,
@@ -40,6 +41,8 @@ import type {
  *   - HITL 工具审批（PR #7.0）：requireApproval / respondApproval / 流终止+resume 范式
  */
 export function createAgent(config: AgentConfig): Agent {
+  config = normalizeAgentConfig(config)
+
   if (!config.envId || typeof config.envId !== 'string') {
     throw new InvalidConfigError('AgentConfig.envId is required and must be a non-empty string')
   }
@@ -98,6 +101,63 @@ export function createAgent(config: AgentConfig): Agent {
   }
 
   return agent
+}
+
+function normalizeAgentConfig(config: AgentConfig): AgentConfig {
+  return {
+    ...config,
+    session: resolveSessionConfig(config),
+  }
+}
+
+function resolveSessionConfig(config: AgentConfig): AgentConfig['session'] {
+  const session = config.session
+  if (session?.enabled === false) return undefined
+
+  if (session?.store) {
+    return session
+  }
+
+  const shouldEnable = session?.enabled === true || config.credentials !== undefined
+  if (!shouldEnable) return session
+
+  const provider = session?.provider ?? 'cloudbase'
+  if (provider !== 'cloudbase') {
+    throw new InvalidConfigError(
+      `AgentConfig.session.provider="${provider}" is not supported yet. ` +
+        'The built-in session store currently supports CloudBase resources only. ' +
+        'Pass a custom SessionStore via AgentConfig.session.store for advanced scenarios.',
+    )
+  }
+  const database = session?.database ?? 'flexdb'
+  if (database !== 'flexdb') {
+    throw new InvalidConfigError(
+      `AgentConfig.session.database="${database}" is reserved for future CloudBase support. ` +
+        'The built-in session store currently supports database="flexdb".',
+    )
+  }
+  if (!config.credentials) {
+    throw new InvalidConfigError(
+      'AgentConfig.session.enabled=true requires AgentConfig.credentials for the default CloudBase FlexDB session store.',
+    )
+  }
+
+  const projectKey = session?.projectKey ?? config.envId
+  const store = new CloudBaseSessionStore({
+    driver: new CloudBaseDbDriver({
+      credentials: config.credentials,
+      collectionPrefix: session?.tablePrefix,
+    }),
+    projectKey,
+  })
+
+  return {
+    ...session,
+    provider,
+    database,
+    projectKey,
+    store,
+  }
 }
 
 // ============================================================
