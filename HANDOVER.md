@@ -1,6 +1,6 @@
 # @cloudbase/open-agent-kernel 交接文档
 
-> 最后更新：2026-06-11 12:37 | 分支：`feat/support-open-agent-kernel` | 版本：`0.3.0-alpha.0`
+> 最后更新：2026-06-12 18:39 | 分支：`feat/support-open-agent-kernel` | 版本：`0.3.0-alpha.0`
 
 ---
 
@@ -492,24 +492,40 @@ await session.clearHistory()
 
 ## 九、环境变量
 
+> ⚠️ **凭证环境变量正在规范化中**（见 [十四、当前优化任务 → 优化 1](#优化1凭证环境变量规范化)）。  
+> 最终标准：`TENCENTCLOUD_SECRETID` / `TENCENTCLOUD_SECRETKEY` / `TENCENTCLOUD_SESSIONTOKEN`。  
+> `TCB_SECRET_ID` / `TCB_SECRET_KEY` / `TCB_TOKEN` 仅保留在 `.env.example` / `.env.local` 方便测试注入。
+
 ### 必填
 
 | 变量 | 说明 |
 |---|---|
 | `TCB_ENV_ID` | CloudBase 环境 ID |
 | `TENCENTCLOUD_TOKENHUB_API_KEY` | 模型凭证（TokenHub） |
-| `TCB_SECRET_ID` | CloudBase 控制面 AK |
-| `TCB_SECRET_KEY` | CloudBase 控制面 SK |
 
 ### 可选
 
 | 变量 | 说明 |
 |---|---|
 | `TCB_API_KEY` | 沙箱数据面长期 JWT |
-| `TCB_TOKEN` | STS 临时凭证 token |
 | `TCB_REGION` | 区域（默认 `ap-shanghai`） |
 | `OAK_DEBUG` | 设为 `1` 启用调试日志 |
 | `CLOUDBASE_AGENT_MODEL` | 覆盖默认模型 |
+
+### 凭证相关（下表中变量 kernel 代码不应直接读取）
+
+> Kernel SDK 逻辑中不应存在读取 `TCB_SECRET_ID` / `TCB_SECRET_KEY` / `TCB_TOKEN` /  
+> `TENCENTCLOUD_SECRETID` / `TENCENTCLOUD_SECRETKEY` / `TENCENTCLOUD_SESSIONTOKEN` 等凭证环境变量的代码。  
+> 这些变量仅存在于 `.env.example` / `.env.local`，供测试/示例注入使用。
+
+| 变量 | 说明 |
+|---|---|
+| `TENCENTCLOUD_SECRETID` | 腾讯云标准 SecretId（**正确标准名**） |
+| `TENCENTCLOUD_SECRETKEY` | 腾讯云标准 SecretKey（**正确标准名**） |
+| `TENCENTCLOUD_SESSIONTOKEN` | 腾讯云标准临时 Token（**正确标准名**） |
+| `TCB_SECRET_ID` | ~~旧名，待弃用~~ |
+| `TCB_SECRET_KEY` | ~~旧名，待弃用~~ |
+| `TCB_TOKEN` | ~~旧名，待弃用~~ |
 
 ### 凭证模式
 
@@ -691,6 +707,139 @@ if (process.env.OAK_DEBUG === '1') {
 2. `extractMessageParts()` 中 `sdkMsg.message as { content?: unknown[] | string }` 类型断言链过长，应定义 SDKMessage 类型
 3. **CloudBaseCosClaudeHomeStore mock 单测** — 目前仅集成层验证，建议 V2 加 mock 单测
 4. **session.send / runClaudeQuery sync-hook 集成测** — try/finally 触发 push 的不变量需要单测验证
+
+---
+
+### 优化 1：凭证环境变量规范化（🔴 当前任务，未开始）
+
+> **状态**: 方案已讨论确定，等待实施。**这是第一项优化任务，其他优化在此完成后进行。**
+
+#### 背景
+
+kernel SDK 当前存在凭证环境变量使用不规范的问题：
+- 多处代码读取 `TCB_SECRET_ID` / `TCB_SECRET_KEY` / `TCB_TOKEN` 等非标准变量名
+- 各模块有独立的 `resolveCredentials()` 函数，环境变量 fallback 链不一致
+- 正确标准名：`TENCENTCLOUD_SECRETID` / `TENCENTCLOUD_SECRETKEY` / `TENCENTCLOUD_SESSIONTOKEN`
+
+#### 核心设计原则
+
+1. **kernel SDK 逻辑中不应存在读取凭证环境变量的代码** — 这些变量仅存在于 `.env.example` / `.env.local`，供测试和示例注入使用
+2. **凭证统一通过 `createAgent` 的 `credentials` 参数注入** — 所有下游模块从同一处取值
+3. **当下游 SDK 有内部 env 读取机制时，可不传让它自取；没有时，强制要求传参**
+
+#### 下游 SDK 的凭证行为（关键发现）
+
+| 依赖 | 能否自动读 env？ | 结论 |
+|------|:---:|------|
+| `@cloudbase/node-sdk` | ⚠️ 仅云函数环境 | 云函数内可自动读 `TENCENTCLOUD_SECRETID/SECRETKEY`；通用服务器环境需显式传 `auth.secretId/secretKey` |
+| `@cloudbase/manager-node` | ❌ 无此机制 | 构造函数要求显式传入 `secretId`/`secretKey`/`envId`，文档"云函数内可不填"仅适用于云函数自动注入 |
+| `tencentcloud-sdk-nodejs` | ❌ 代码中未使用 | `AgsStatefulSandbox` 根本不依赖此包，全部走 `@cloudbase/manager-node` 的 `CloudService` 工具类 |
+
+**结论**：
+- `AgsStatefulSandbox` + `CloudBaseCosClaudeHomeStore`（manager-node 用户）→ **必须显式传凭证**，不传直接报错
+- `CloudBaseDbDriver` + `CloudBaseStorage` + `CloudBaseDbPermissionDriver`（node-sdk 用户）→ **建议传凭证**；不传时由 node-sdk 自己处理（非云函数环境会报错）
+
+#### 实施方案
+
+##### 第 0 步：类型定义
+
+在 `src/public/types.ts` 新增统一凭证类型，加入 `AgentConfig`：
+
+```typescript
+/** 平台凭证 — 用于初始化 @cloudbase/node-sdk 和 @cloudbase/manager-node */
+export interface PlatformCredentials {
+  secretId: string
+  secretKey: string
+  sessionToken?: string
+  envId: string
+}
+
+// AgentConfig 新增字段
+export interface AgentConfig {
+  // ...existing fields
+  /** 平台凭证，用于初始化 CloudBase SDK。不传则依赖下游 SDK 自身行为。 */
+  credentials?: PlatformCredentials
+}
+```
+
+`SandboxUserCredentials` 保持不变（用于注入 sandbox MCP 工具），其 JSDoc 需从 `TCB_SECRET_ID` 改为 `TENCENTCLOUD_SECRETID`。
+
+##### 第 1 步：清理 `createAgent()` 中的凭证解析
+
+`src/public/create-agent.ts`:
+- 删除 `resolveUserCredentials()` 中所有 `process.env.TCB_*` / `process.env.TENCENTCLOUD_*` 的 fallback
+- 将 `credentials` 参数传递给所有需要凭证的下游模块
+
+##### 第 2 步：清理各模块的 `resolveCredentials()`
+
+以下 6 处 `resolveCredentials()` 函数需删除 env var fallback，改为从构造参数接收：
+
+| 文件 | 依赖 | 改动 |
+|------|------|------|
+| `src/session-store/drivers/cloudbase-db-driver.ts` | node-sdk | 删除 `resolveCredentials()`，从 `CloudBaseDbDriverOptions` 取 credentials |
+| `src/storage/cloudbase-storage.ts` | node-sdk | 同上 |
+| `src/permissions/drivers/cloudbase-db-driver.ts` | node-sdk | 同上 |
+| `src/claude-home/cloudbase-cos-store.ts` | manager-node | 删除 `resolveCredentials()`，从构造参数取 credentials；缺则报 `InvalidConfigError` |
+| `src/sandbox/ags-stateful-sandbox.ts` | manager-node | 删除 `resolveCredentials()`，从 `AgsStatefulSandboxOptions` 取；缺则报 `InvalidConfigError` |
+| `src/public/create-agent.ts` | - | 删除 `resolveUserCredentials()` 的 env fallback，改为从 `AgentConfig.credentials` 取 |
+
+##### 第 3 步：错误提示
+
+| 模块 | 缺凭证时行为 |
+|------|-------------|
+| manager-node 用户 (sandbox / cos-store) | 抛出 `InvalidConfigError('必须提供 platform credentials')` |
+| node-sdk 用户 (db-driver / storage / permission-driver) | 由 node-sdk 自身报错（其在非云函数环境会抛认证错误） |
+
+##### 第 4 步：更新 `.env.example`
+
+`packages/open-agent-kernel/examples/.env.example`:
+- 变量名改为 `TENCENTCLOUD_SECRETID` / `TENCENTCLOUD_SECRETKEY` / `TENCENTCLOUD_SESSIONTOKEN`
+- 保留旧名注释 + 弃用标记
+
+##### 第 5 步：更新测试文件
+
+以下测试文件通过 `createAgent({ credentials })` 或构造参数传入凭证，不再设置 env：
+
+- `src/sandbox/__tests__/ags-stateful-sandbox.test.ts` — 当前设 `TCB_SECRET_ID/KEY`
+- `src/claude-home/__tests__/cloudbase-cos-store.test.ts` — 当前设 `TCB_SECRET_ID/KEY`
+- `src/runtime/__tests__/agent-builder.test.ts` — 当前设 `TCB_SECRET_ID/KEY`
+- `src/sandbox/workspace-snapshot/__tests__/init-client.test.ts` — 当前用 `TCB_SECRET_ID` 作为 credential key
+
+#### 凭证流转图（改造后）
+
+```
+createAgent({ credentials })
+  ├→ SessionStore (CloudBaseDbDriver)      ← credentials 传入 node-sdk init()
+  ├→ Storage (CloudBaseStorage)            ← credentials 传入 node-sdk init()
+  ├→ PermissionDriver (CloudBaseDbPerm)    ← credentials 传入 node-sdk init()
+  ├→ ClaudeHomeStore (CloudBaseCosStore)   ← credentials 传入 manager-node constructor（必传）
+  └→ Sandbox (AgsStatefulSandbox)          ← credentials 传入 manager-node constructor（必传）
+```
+
+#### 不改变的部分
+
+- `src/resources/credential-provider.ts` — 处理 TokenHub 模型 API Key，与 CloudBase 凭证无关，保持不变
+- `src/sandbox/cloudbase-mcp.ts` — `injectCredentials()` 发送到 sandbox 的 HTTP body 已使用标准 key 名 `TENCENTCLOUD_SECRETID/SECRETKEY/SESSIONTOKEN`，保持不变
+- `src/sandbox/workspace-snapshot/init-client.ts` — 内部逻辑不变，但传入的 credential key 名需统一为标准名
+
+#### 验收标准
+
+- [ ] 所有 `resolveCredentials()` 函数中无 `process.env.TCB_*` / `process.env.TENCENTCLOUD_*` 等凭证 env var 读取
+- [ ] `AgentConfig.credentials` 类型定义完整
+- [ ] `.env.example` 使用标准变量名
+- [ ] 测试文件中无凭证 env var 设置
+- [ ] `pnpm build` 通过
+- [ ] `pnpm type-check` 通过
+- [ ] `pnpm lint` 通过
+- [ ] `pnpm test` 通过
+- [ ] 更新 `src/public/types.ts` 中 `SandboxUserCredentials` 的 JSDoc 中 env var 引用
+
+#### 确认点（实施前与用户确认）
+
+1. ✅ 统一 `credentials` 到 `AgentConfig` 入口 — 已确认
+2. ✅ manager-node 用户必须传凭证，缺则报错 — 已确认
+3. ✅ node-sdk 用户建议传凭证，不传交由 SDK 自身处理 — 已确认
+4. 🔲 `PlatformCredentials` 是否独立于 `SandboxUserCredentials`？还是合二为一？当前方案是独立的（平台 vs 用户语义不同）
 
 ---
 
