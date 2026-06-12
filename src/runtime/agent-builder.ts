@@ -31,7 +31,7 @@ import type {
 import { ClaudeHomeSyncEngine, CloudBaseCosClaudeHomeStore, deriveClaudeConfigDir } from '../claude-home/index.js'
 import { ConfigError, InvalidConfigError } from '../internal/errors.js'
 import { createPreToolUsePermissionHook, type PreToolUseHookLocalState } from '../permissions/hooks.js'
-import type { AgentConfig, SandboxConfig } from '../public/types.js'
+import type { AgentConfig, SandboxConfig, UserMemoryConfig } from '../public/types.js'
 import { createSandboxMcpServer } from '../sandbox/sandbox-tools.js'
 import type { SandboxInstance, SandboxRuntime } from '../sandbox/types.js'
 import { WorkspaceSnapshotEngine } from '../sandbox/workspace-snapshot/index.js'
@@ -128,7 +128,8 @@ export function buildClaudeQueryOptions(
   // 也用作 effectiveCwd:让 SDK 的 projects/<cwd-hash>/memory/ 跨节点可复用。
   let claudeConfigDir: string | undefined
   let syncEngine: ClaudeHomeSyncEngine | undefined
-  if (config.userMemory?.enabled && extra.userId) {
+  const userMemoryEnabled = isUserMemoryEnabled(config.userMemory)
+  if (userMemoryEnabled && extra.userId) {
     try {
       claudeConfigDir = deriveClaudeConfigDir(config.envId, extra.userId)
       syncEngine = new ClaudeHomeSyncEngine({
@@ -327,6 +328,10 @@ export function buildClaudeQueryOptions(
 }
 
 // ─── 辅助 ────────────────────────────────────────────────────────
+
+function isUserMemoryEnabled(config: UserMemoryConfig | undefined): boolean {
+  return config === true || (typeof config === 'object' && config.enabled === true)
+}
 
 /**
  * Spec B:解析 workspaceSnapshot 模式 + 校验 scope。

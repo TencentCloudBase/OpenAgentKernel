@@ -146,6 +146,12 @@ describe('buildClaudeQueryOptions — userMemory', () => {
     expect(options.settingSources).toContain('user')
   })
 
+  it('userMemory shorthand true + userId → settingSources includes "user"', () => {
+    const { options, syncEngine } = buildClaudeQueryOptions({ ...baseConfig, userMemory: true }, { userId: 'alice' })
+    expect(syncEngine).toBeDefined()
+    expect(options.settingSources).toContain('user')
+  })
+
   // userMemory 启用且无 cwd → effectiveCwd 应该用 per-user 稳定路径
   // (而非 ephemeral 随机),让 SDK projects/<cwd-hash>/ 跨节点稳定
   it('userMemory.enabled + userId without cwd → effectiveCwd is stable per-user (not ephemeral)', () => {

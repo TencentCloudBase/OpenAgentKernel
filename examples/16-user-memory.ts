@@ -9,7 +9,7 @@
  *
  * 流程:
  *   1. 用 seedClaudeHome() 预先把 CLAUDE.md 写到 COS(模拟"用户之前累积的偏好")
- *   2. createAgent({ userMemory: { enabled: true } }) → SDK 启动时 OAK pull,
+ *   2. createAgent({ userMemory: true }) → SDK 启动时 OAK pull,
  *      把 CLAUDE.md 落到 <CLAUDE_CONFIG_DIR>/CLAUDE.md
  *   3. SDK 把 CLAUDE.md 当作用户级偏好注入 prompt(SDK 文档:"CLAUDE.md files
  *      are loaded into the context window at the start of every session")
@@ -45,6 +45,7 @@ const SEEDED_CLAUDE_MD = `# 项目偏好(预置)
 `
 
 async function runConversation(prompt: string, userId: string) {
+  const envId = getEnvId()
   const credentials = getPlatformCredentials()
   // 模型配置:支持环境变量自带 key + endpoint(测试方便),不传则走 CloudBase 网关默认。
   // ⚠️ 不要在源码里硬编码 apiKey;.env.local 不该提交到 git。
@@ -60,11 +61,11 @@ async function runConversation(prompt: string, userId: string) {
     : (customModelId ?? 'glm-5.1')
 
   const agent = createAgent({
-    envId: credentials.envId,
+    envId,
     credentials,
     model,
     systemPrompt: 'You are a coding assistant. Answer based on the project conventions you can see.',
-    userMemory: { enabled: true },
+    userMemory: true,
   })
 
   const session = await agent.startSession({ userId })

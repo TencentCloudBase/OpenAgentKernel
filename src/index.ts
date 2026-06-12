@@ -45,6 +45,7 @@ export type {
   SessionConfig,
   SessionStoreProvider,
   CloudBaseSessionDatabase,
+  UserMemoryConfig,
   // Hooks
   AgentHooks,
   UserMessageContext,
@@ -78,6 +79,16 @@ export {
   type ResolveContext,
   type ImageSource,
 } from './storage/index.js'
+
+// User memory：用户级长期记忆文件管理
+export {
+  writeUserMemoryFiles,
+  deleteUserMemoryFiles,
+  type UserMemoryFile,
+  type UserMemoryFilesOptions,
+  type WriteUserMemoryFilesOptions,
+  type DeleteUserMemoryFilesOptions,
+} from './user-memory/index.js'
 
 // Sandbox：可选用于让 agent 在远程容器里跑文件系统/shell（PR #6A）
 export {

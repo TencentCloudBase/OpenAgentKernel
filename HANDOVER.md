@@ -972,6 +972,43 @@ const agent = createAgent({
 })
 ```
 
+---
+
+### 优化 5：userMemory API 简化（✅ 已完成）
+
+> **状态**: 已实施。保持 userMemory 默认关闭，但显式启用和预置/清理用户记忆的路径更短，不再要求示例或业务方理解内部 COS store。
+
+#### 设计结论
+
+1. **支持 `userMemory: true` 简写**
+   - `userMemory: true` 等价于 `userMemory: { enabled: true }`。
+   - 对象形式保留，用于后续扩展更多 userMemory 配置项。
+   - userMemory 仍不默认开启，因为它会读写 COS，且要求同一 `userId` 请求串行。
+
+2. **新增公开用户记忆文件管理 API**
+   - `writeUserMemoryFiles({ envId, userId, credentials, files })`
+   - `deleteUserMemoryFiles({ envId, userId, credentials, paths })`
+   - 内部复用 CloudBase COS 同步 store，业务方无需 deep-import `src/claude-home/*`。
+   - `credentials.envId` 可省略，默认继承参数中的 `envId`。
+
+#### 新推荐用法
+
+```typescript
+const agent = createAgent({
+  envId,
+  credentials: { secretId, secretKey },
+  model: 'glm-5.1',
+  userMemory: true,
+})
+
+await writeUserMemoryFiles({
+  envId,
+  userId,
+  credentials: { secretId, secretKey },
+  files: [{ path: 'CLAUDE.md', content: '请始终用中文回答。' }],
+})
+```
+
 ## 十三、依赖关系
 
 ### 运行时依赖

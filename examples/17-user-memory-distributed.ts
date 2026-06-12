@@ -49,13 +49,14 @@ function buildModel() {
 
 async function runOnNode(nodeName: string, userId: string, prompt: string) {
   console.log(`\n--- ${nodeName} ---`)
+  const envId = getEnvId()
   const credentials = getPlatformCredentials()
   const agent = createAgent({
-    envId: credentials.envId,
+    envId,
     credentials,
     model: buildModel(),
     systemPrompt: 'You are a coding assistant. Answer based on the project conventions you can see.',
-    userMemory: { enabled: true },
+    userMemory: true,
   })
   const session = await agent.startSession({ userId })
   console.log(`[${nodeName}] user: ${prompt}`)

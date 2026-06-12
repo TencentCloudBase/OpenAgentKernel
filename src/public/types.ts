@@ -377,6 +377,17 @@ export interface AgentHooks {
   onSessionEnd?: (ctx: SessionContext) => Promise<void> | void
 }
 
+export type UserMemoryConfig =
+  | boolean
+  | {
+      /**
+       * 是否启用用户级长期记忆。
+       *
+       * `userMemory: true` 是 `{ enabled: true }` 的简写。
+       */
+      enabled?: boolean
+    }
+
 export interface UserMessageContext {
   conversationId: string
   userId: string
@@ -507,9 +518,7 @@ export interface AgentConfig {
    * 即同一时刻不能有两个 SDK 节点同时为 alice 服务。SDK 不在并发场景下做冲突
    * 防御。但允许 alice 这次落 node1、下次落 node2,只要两次不重叠。
    */
-  userMemory?: {
-    enabled?: boolean
-  }
+  userMemory?: UserMemoryConfig
 
   // ── 钩子 ────────────────────────────────────────
   hooks?: AgentHooks

@@ -138,7 +138,7 @@ for await (const e of resumed.send('还记得我的名字吗？')) { /* ... */ }
 | `hooks` | `AgentHooks` | | 业务生命周期钩子 |
 | `cwd` | `string` | | 平台资产层根目录(skills + 项目级 CLAUDE.md 加载根) |
 | `skills` | `{ enabled?: 'all' \| string[] }` | | 启用 SDK skills 能力(需配合 `cwd`) |
-| `userMemory` | `{ enabled?: boolean }` | | 用户级长期记忆(SDK auto-memory 同步到 envId 对应 COS) |
+| `userMemory` | `boolean \| { enabled?: boolean }` | | 用户级长期记忆；`true` 表示启用，自动同步到 envId 对应 COS |
 | `sandbox.workspaceSnapshot` | `'auto' \| 'enabled' \| 'disabled'` | | sandbox cwd 自动持久化(ags-stateful 默认 `'auto'`,需 `scope: 'shared'`) |
 | `sandbox.workspaceSnapshotTimeoutMs` | `number` | | snapshot RPC 超时,默认 `30_000`(镜像内部上限 600_000) |
 | `sandbox.workspaceInitTimeoutMs` | `number` | | bootstrap restore 超时,默认 `60_000`(镜像内部上限 1_200_000) |
@@ -417,7 +417,7 @@ OAK 把 Claude SDK 文件系统资产分两类:
 - 主会话自动记忆(`<CLAUDE_CONFIG_DIR>/projects/*/memory/`)
 - 子 agent 用户级记忆(`<CLAUDE_CONFIG_DIR>/agent-memory/`)
 
-两者用不同的载体:平台资产走 `cwd` 字段,用户私产走 `userMemory.enabled = true`。
+两者用不同的载体:平台资产走 `cwd` 字段,用户私产走 `userMemory: true`。
 
 ## 沙箱粒度(scope)与术语对照
 
@@ -432,11 +432,36 @@ OAK 把 Claude SDK 文件系统资产分两类:
 
 ## userMemory 启用前提
 
-启用 `userMemory.enabled = true` 后,业务方上游必须保证:
+启用 `userMemory: true` 后,业务方上游必须保证:
 
 > **同一 userId 的请求不能并发处理** — 即同一时刻不能有两个 SDK 节点同时为 alice 服务。
 
 注意:这只要求"串行性",**不要求"永远固定到同一节点"**。alice 这次请求落 node1、下次落 node2 完全可以,只要两次不重叠即可。常见实现路径:Redis 互斥锁 / userId 队列 / 会话级路由 / 一致性哈希 — 任选其一。
+
+```typescript
+import { createAgent, writeUserMemoryFiles, deleteUserMemoryFiles } from '@cloudbase/open-agent-kernel'
+
+const agent = createAgent({
+  envId,
+  credentials: { secretId, secretKey },
+  model: 'glm-5.1',
+  userMemory: true,
+})
+
+await writeUserMemoryFiles({
+  envId,
+  userId: 'alice',
+  credentials: { secretId, secretKey },
+  files: [{ path: 'CLAUDE.md', content: '请始终用中文回答。' }],
+})
+
+await deleteUserMemoryFiles({
+  envId,
+  userId: 'alice',
+  credentials: { secretId, secretKey },
+  paths: ['CLAUDE.md'],
+})
+```
 
 ### 已知限制
 
