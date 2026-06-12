@@ -36,7 +36,7 @@ function printHistory(history: Awaited<ReturnType<typeof session.getHistory>>): 
     const roleIcon = msg.role === 'user' ? '👤' : msg.role === 'assistant' ? '🤖' : '⚙️'
     console.log(
       `${roleIcon} [${msg.role}] id=${msg.id.slice(0, 8)}... status=${msg.status} ` +
-      `time=${new Date(msg.createdAt).toISOString()}`,
+        `time=${new Date(msg.createdAt).toISOString()}`,
     )
     for (const part of msg.parts) {
       switch (part.type) {
@@ -49,7 +49,7 @@ function printHistory(history: Awaited<ReturnType<typeof session.getHistory>>): 
         case 'tool_call':
           console.log(
             `   🔧 tool_call: ${part.toolName}(${JSON.stringify(part.input).slice(0, 100)})` +
-            (part.status ? ` [status=${part.status}]` : ''),
+              (part.status ? ` [status=${part.status}]` : ''),
           )
           break
         case 'tool_result':
