@@ -293,7 +293,8 @@ export interface PendingApproval {
 /**
  * 审批状态外部存储接口（让 HITL 支持分布式扩展）。
  *
- * - 不传 store：kernel 使用进程内 `InMemoryPermissionStore`（单进程可用）
+ * - 不传 store 且已提供 credentials：kernel 默认使用 CloudBase FlexDB 分布式存储
+ * - 不传 store 且未提供 credentials：kernel 使用进程内 `InMemoryPermissionStore`（单进程可用）
  * - 传 store：可跨节点 / 跨进程 resume；同一 conversationId 的请求可路由到任意节点
  *
  * 接口与 SessionStoreDriver 同套路：内置 InMemory（默认）+ CloudBaseDb（生产）+ 用户可自实现。
@@ -336,12 +337,20 @@ export interface PermissionConfig {
   requireApproval?: RequireApprovalRule
 
   /**
-   * 审批状态存储。不传走进程内 `InMemoryPermissionStore`。
+   * 审批状态存储。
    *
-   * 单进程场景下 InMemory 够用；多副本部署 / 云函数 / 跨设备审批需传入分布式实现
-   * （PR #7.1 将提供 `CloudBasePermissionStore`）。
+   * 不传且已提供 credentials：默认使用 CloudBase FlexDB 分布式存储；
+   * 不传且未提供 credentials：走进程内 `InMemoryPermissionStore`。
    */
   store?: PermissionStore
+
+  /**
+   * 默认 CloudBase FlexDB 审批状态集合前缀。
+   *
+   * 最终集合名为 `{tablePrefix}state`；默认 `oak_`。
+   * 仅在未显式传 `store` 且 kernel 自动创建 CloudBase store 时生效。
+   */
+  tablePrefix?: string
 
   /**
    * 审批超时（毫秒）。超过后 `respondApproval` 仍能注入决策（如果 store 还在），

@@ -20,14 +20,7 @@
 import { getEnvId, getPlatformCredentials, getSandboxApiKey } from './_shared/env.js'
 
 import { randomUUID } from 'node:crypto'
-import {
-  AgsStatefulSandbox,
-  CloudBaseDbDriver,
-  CloudBaseDbPermissionDriver,
-  CloudBasePermissionStore,
-  CloudBaseSessionStore,
-  createAgent,
-} from '@cloudbase/open-agent-kernel'
+import { AgsStatefulSandbox, createAgent } from '@cloudbase/open-agent-kernel'
 
 // ─── 辅助函数 ──────────────────────────────────────────────────────
 
@@ -43,7 +36,7 @@ function printHistory(history: Awaited<ReturnType<typeof session.getHistory>>): 
     const roleIcon = msg.role === 'user' ? '👤' : msg.role === 'assistant' ? '🤖' : '⚙️'
     console.log(
       `${roleIcon} [${msg.role}] id=${msg.id.slice(0, 8)}... status=${msg.status} ` +
-        `time=${new Date(msg.createdAt).toISOString()}`,
+      `time=${new Date(msg.createdAt).toISOString()}`,
     )
     for (const part of msg.parts) {
       switch (part.type) {
@@ -56,7 +49,7 @@ function printHistory(history: Awaited<ReturnType<typeof session.getHistory>>): 
         case 'tool_call':
           console.log(
             `   🔧 tool_call: ${part.toolName}(${JSON.stringify(part.input).slice(0, 100)})` +
-              (part.status ? ` [status=${part.status}]` : ''),
+            (part.status ? ` [status=${part.status}]` : ''),
           )
           break
         case 'tool_result':
@@ -76,14 +69,6 @@ function printHistory(history: Awaited<ReturnType<typeof session.getHistory>>): 
 const envId = getEnvId()
 const credentials = getPlatformCredentials()
 
-const driver = new CloudBaseDbDriver({ credentials })
-const sessionStore = new CloudBaseSessionStore({ driver, projectKey: envId })
-
-const permissionStore = new CloudBasePermissionStore({
-  projectKey: envId,
-  driver: new CloudBaseDbPermissionDriver({ credentials }),
-})
-
 const agent = createAgent({
   envId,
   credentials,
@@ -100,12 +85,11 @@ const agent = createAgent({
   sandbox: {
     runtime: new AgsStatefulSandbox({ apiKey: getSandboxApiKey() }),
     cloudbaseTools: false, // 只用 sandbox 工具，不启用 cloudbase MCP（简化依赖）
+    scope: 'shared',
   },
-  session: { store: sessionStore, projectKey: envId },
   permissions: {
     // bash 命令需要审批（危险操作）
     requireApproval: 'mcp__sandbox__bash',
-    store: permissionStore,
   },
 })
 

@@ -2,7 +2,13 @@ import { randomUUID } from 'node:crypto'
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk'
 import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
 import { InvalidConfigError, ResourceError } from '../internal/errors.js'
-import { createHookLocalState, InMemoryPermissionStore, type PreToolUseHookLocalState } from '../permissions/index.js'
+import {
+  CloudBaseDbPermissionDriver,
+  CloudBasePermissionStore,
+  createHookLocalState,
+  InMemoryPermissionStore,
+  type PreToolUseHookLocalState,
+} from '../permissions/index.js'
 import { buildClaudeQueryOptions } from '../runtime/agent-builder.js'
 import { createTranslatorState, translateSdkMessage } from '../runtime/event-translator.js'
 import { buildPromptAsync } from '../runtime/prompt-builder.js'
@@ -116,6 +122,7 @@ function normalizeAgentConfig(config: AgentConfig): AgentConfig {
 
   return {
     ...normalizedConfig,
+    permissions: resolvePermissionConfig(normalizedConfig),
     session: resolveSessionConfig(normalizedConfig),
   }
 }
@@ -181,6 +188,25 @@ function resolveSessionConfig(config: AgentConfig): AgentConfig['session'] {
   }
 }
 
+function resolvePermissionConfig(config: AgentConfig): AgentConfig['permissions'] {
+  const permissions = config.permissions
+  if (!permissions || permissions.requireApproval === undefined || permissions.store) return permissions
+
+  const credentials = resolvePlatformCredentials(config)
+  if (!credentials) return permissions
+
+  return {
+    ...permissions,
+    store: new CloudBasePermissionStore({
+      projectKey: config.envId,
+      driver: new CloudBaseDbPermissionDriver({
+        credentials,
+        collectionPrefix: permissions.tablePrefix,
+      }),
+    }),
+  }
+}
+
 // ============================================================
 // 内部：Session 实现
 // ============================================================
@@ -212,7 +238,8 @@ function createSession(deps: SessionDeps): Session {
   let snapshotBootstrapped = false
   let snapshotBootstrapPromise: Promise<void> | undefined
 
-  // PR #7.0：审批 store（默认 InMemoryPermissionStore，进程内单例）。
+  // PR #7.0/7.1：审批 store 已在 normalizeAgentConfig 中按 credentials 默认 CloudBase 化；
+  // 未提供 credentials 时仍回落到进程内单例。
   // 仅在用户配了 requireApproval 时启用；不配则 hook 整体不注入。
   const permissionStore: PermissionStore | undefined =
     config.permissions?.requireApproval !== undefined

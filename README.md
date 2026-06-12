@@ -127,7 +127,7 @@ for await (const e of resumed.send('还记得我的名字吗？')) { /* ... */ }
 | 配置项 | 类型 | 必填 | 说明 |
 |--------|------|:----:|------|
 | `envId` | `string` | ✅ | CloudBase 环境 ID |
-| `credentials` | `PlatformCredentials` | 使用 CloudBase 资源时 | 平台凭证；`envId` 可省略并继承顶层 `envId`，传入后默认启用 CloudBase FlexDB session store 和 CloudBase Storage |
+| `credentials` | `PlatformCredentials` | 使用 CloudBase 资源时 | 平台凭证；`envId` 可省略并继承顶层 `envId`，传入后默认启用 CloudBase FlexDB session store、CloudBase Storage 和 CloudBase permission store |
 | `model` | `string \| ModelSpec` | ✅ | 模型标识（如 `'glm-5.1'`） |
 | `systemPrompt` | `string` | | 系统提示词 |
 | `sandbox` | `SandboxConfig` | | 沙箱配置（启用文件系统/Shell） |
@@ -177,7 +177,8 @@ interface SessionConfig {
 /** HITL 权限配置 */
 interface PermissionConfig {
   requireApproval?: RequireApprovalRule  // 哪些工具需要审批
-  store?: PermissionStore                // 审批状态存储（默认 InMemory）
+  store?: PermissionStore                // 审批状态存储；有 credentials 时默认 CloudBase FlexDB
+  tablePrefix?: string                   // 默认 'oak_'，集合名为 `${tablePrefix}state`
   approvalTimeoutMs?: number             // 超时时间（默认 30 分钟）
 }
 
@@ -314,36 +315,22 @@ mcpServers: {
 对敏感工具调用设置人工审批：
 
 ```typescript
-import {
-  createAgent,
-  AgsStatefulSandbox,
-  CloudBaseSessionStore,
-  CloudBaseDbDriver,
-  CloudBasePermissionStore,
-  CloudBaseDbPermissionDriver,
-} from '@cloudbase/open-agent-kernel'
+import { createAgent, AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
 
 const envId = process.env.TCB_ENV_ID!
 const credentials = {
-  envId,
   secretId: process.env.TENCENTCLOUD_SECRETID!,
   secretKey: process.env.TENCENTCLOUD_SECRETKEY!,
 }
-const sessionStore = new CloudBaseSessionStore({ driver: new CloudBaseDbDriver({ credentials }), projectKey: envId })
-const permissionStore = new CloudBasePermissionStore({
-  driver: new CloudBaseDbPermissionDriver({ credentials }),
-  projectKey: envId,
-})
 
 const agent = createAgent({
   envId,
   credentials,
   model: 'glm-5.1',
   sandbox: { runtime: new AgsStatefulSandbox({ apiKey: process.env.TCB_API_KEY! }) },
-  session: { store: sessionStore, projectKey: envId },
   permissions: {
     requireApproval: ['mcp__sandbox__bash', 'mcp__cloudbase__deleteData'],
-    store: permissionStore,
+    // 有 credentials 时默认使用 CloudBase FlexDB permission store，支持跨节点 respondApproval。
   },
 })
 

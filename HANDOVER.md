@@ -940,6 +940,38 @@ const agent = createAgent({
 })
 ```
 
+---
+
+### 优化 4：permissions 默认 CloudBase 分布式存储（✅ 已完成）
+
+> **状态**: 已实施。HITL 审批从“默认进程内状态”升级为“有 CloudBase credentials 时默认分布式状态”，降低生产部署和跨节点审批的配置成本。
+
+#### 设计结论
+
+1. **有 `credentials + permissions.requireApproval` 时默认启用 CloudBase permission store**
+   - 用户不显式传 `permissions.store`，且已提供 `credentials` 时，kernel 自动创建：
+     `CloudBasePermissionStore({ driver: new CloudBaseDbPermissionDriver({ credentials }) })`。
+   - `projectKey` 默认使用 `AgentConfig.envId`，保证不同节点用同一 CloudBase 环境时可共享审批状态。
+   - 未提供 `credentials` 时保持原行为：回落到进程内 `InMemoryPermissionStore`。
+
+2. **保留显式覆盖**
+   - `permissions.store` 仍优先级最高，用户可传自定义分布式 store 或测试用 store。
+   - 新增 `permissions.tablePrefix`，仅在默认 CloudBase permission store 生效，集合名为 `{tablePrefix}state`，默认 `oak_state`。
+
+#### 新推荐用法
+
+```typescript
+const agent = createAgent({
+  envId,
+  credentials: { secretId, secretKey },
+  model: 'glm-5.1',
+  permissions: {
+    requireApproval: ['mcp__sandbox__bash', 'mcp__cloudbase__deleteData'],
+    // 无需手动 new CloudBasePermissionStore
+  },
+})
+```
+
 ## 十三、依赖关系
 
 ### 运行时依赖
