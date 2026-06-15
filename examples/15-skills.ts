@@ -11,7 +11,8 @@
  *       OAK 启用 skills 时会把 'Skill' 工具加到 allowedTools(spec §4.1)。
  *
  * 运行前提:
- *   - .env.local 配置 TCB_ENV_ID + TCB_API_KEY
+ *   - examples/config.local.json
+ *   - examples/config.local.json: envId / model
  *
  * Run:
  *   pnpm dlx tsx packages/open-agent-kernel/examples/15-skills.ts
@@ -20,7 +21,7 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { loadEnv } from './_shared/env.js'
+import { getEnvId, getModel, loadEnv } from './_shared/env.js'
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
 
@@ -60,8 +61,8 @@ async function main() {
   //    OAK 内部会:① settingSources=['project'] 让 SDK 扫 cwd/.claude/skills/
   //              ② tools=['Skill'] 让模型能 invoke skill
   const agent = createAgent({
-    envId: process.env.TCB_ENV_ID!,
-    model: 'glm-5.1',
+    envId: getEnvId(),
+    model: getModel(),
     systemPrompt: 'You are a helpful assistant.',
     cwd,
     skills: { enabled: 'all' },

@@ -103,7 +103,6 @@ export function buildClaudeQueryOptions(
   const credential = resolveCredential({
     envId: config.envId,
     model: config.model,
-    resources: config.resources,
   })
 
   // ── cwd / settingSources / userMemory 派生(spec §4.1 + §4.2 + §4.6)─────

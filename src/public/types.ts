@@ -9,28 +9,6 @@
 import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
 import type { z } from 'zod'
 
-// ============================================================
-// 资源配置（envId 派生 + 用户覆盖）
-// ============================================================
-
-/**
- * 资源命名配置（可选；不传按规则从 envId 派生）
- *
- * 派生规则：
- * - conversationCollection: 'agent_conversations'
- * - messageCollection: 'agent_messages'
- * - sandboxFunctionName: 'agent-sandbox'
- * - modelGatewayBaseUrl: 'https://{envId}.api.tcloudbasegateway.com/v1/anthropic'
- *   (走 CloudBase 网关的 Anthropic 协议；如需 OpenAI 协议网关，使用 modelGatewayBaseUrl 覆盖)
- */
-export interface ResourceConfig {
-  conversationCollection?: string
-  messageCollection?: string
-  sandboxFunctionName?: string
-  /** 自定义模型网关 URL（覆盖默认派生）*/
-  modelGatewayBaseUrl?: string
-}
-
 /**
  * 平台凭证，用于初始化 CloudBase 管理端/服务端 SDK。
  *
@@ -465,7 +443,6 @@ export interface AgentConfig {
 
   // ── 资源锚点 ────────────────────────────────────
   envId: string
-  resources?: ResourceConfig
   /** 平台凭证，用于初始化 CloudBase SDK。不传则依赖下游 SDK 自身行为或按能力报错。 */
   credentials?: PlatformCredentials
 
@@ -486,14 +463,14 @@ export interface AgentConfig {
 
   // ── 多模态附件存储 ──────────────────────────────
   /**
-   * StorageProvider 实例（由 `@cloudbase/open-agent-kernel/storage` 导出）。
-   * 不传且已提供 credentials：默认使用 CloudBase Storage；
-   * 不传且未提供 credentials：传入 attachments 时抛错（不支持多模态）；
-   * 传：kernel 把 SessionInput.attachments 解析为 image content block 喂给 SDK。
+   * 附件存储配置。
    *
-   * 类型故意宽泛（unknown），避免公共类型层依赖底层实现。
+   * - 不传且已提供 credentials：默认使用 CloudBase Storage
+   * - 传 `{ pathPrefix }`：使用默认 CloudBase Storage，但覆盖上传路径前缀
+   * - 传 StorageProvider 实例：完全自定义附件存储
+   * - 不传且未提供 credentials：传入 attachments 时抛错（不支持多模态）
    */
-  storage?: unknown
+  storage?: StorageConfig
 
   // ── 平台资产层(宿主机 cwd)──────────────────
   /**
@@ -624,6 +601,50 @@ export interface SessionConfig {
    */
   flush?: 'batched' | 'eager'
 }
+
+/**
+ * CloudBase Storage 简化配置。
+ *
+ * 不传 `storage` 且提供 `credentials` 时，SDK 会自动启用默认 CloudBase Storage；
+ * 传此对象时可覆盖默认云存储路径前缀、临时 URL 有效期等资源命名细节。
+ */
+export interface CloudBaseStorageConfig {
+  /**
+   * 是否启用默认 CloudBase Storage。
+   *
+   * - `undefined` / `true`：启用
+   * - `false`：显式关闭默认 storage（传 attachments 时会报错）
+   */
+  enabled?: boolean
+  /** 当前内置 storage provider，仅支持 `cloudbase`。 */
+  provider?: 'cloudbase'
+  /**
+   * 云存储路径前缀。
+   *
+   * 实际上传路径为 `{pathPrefix}{envId}/{sessionId}/{timestamp}-{index}.{ext}`。
+   *
+   * @default 'agent-attachments/'
+   */
+  pathPrefix?: string
+  /**
+   * 临时访问 URL 有效期（秒）。
+   *
+   * @default 3600
+   */
+  urlExpiresIn?: number
+}
+
+/**
+ * 自定义附件存储 provider。
+ *
+ * 高级用户可直接传 `InMemoryStorage` / `CloudBaseStorage` 实例，或实现同形状对象。
+ */
+export interface CustomStorageProvider {
+  resolveAttachment(att: AttachmentInput, ctx: { envId: string; sessionId: string; index: number }): Promise<unknown>
+  resolveRefToUrl?(ref: unknown): Promise<string>
+}
+
+export type StorageConfig = CloudBaseStorageConfig | CustomStorageProvider
 
 // ============================================================
 // Agent / Session 接口

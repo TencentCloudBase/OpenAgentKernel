@@ -8,9 +8,8 @@
  *
  * 凭证来源优先级（高 → 低）：
  *   1. ModelSpec.apiKey（用户在 AgentConfig.model 里直传）
- *   2. process.env.TCB_API_KEY（CloudBase 环境服务端 APIKey，推荐；也可复用于 AGS 数据面）
- *   3. process.env.CLOUDBASE_API_KEY（兼容别名）
- *   4. 抛错（不再用占位符，避免误用）
+ *   2. process.env.TCB_API_KEY（CloudBase 环境服务端 APIKey；也可复用于 AGS 数据面）
+ *   3. 抛错（不再用占位符，避免误用）
  */
 
 import { ResourceError } from '../internal/errors.js'
@@ -19,7 +18,7 @@ export interface ResolvedApiKey {
   /** 透传给 SDK 的 ANTHROPIC_AUTH_TOKEN 环境变量值 */
   apiKey: string
   /** 凭证来源（用于诊断日志） */
-  source: 'config' | 'env_tcb_api_key' | 'env_cloudbase'
+  source: 'config' | 'env_tcb_api_key'
 }
 
 /**
@@ -34,22 +33,15 @@ export function resolveApiKey(explicitKey?: string): ResolvedApiKey {
     return { apiKey: explicitKey, source: 'config' }
   }
 
-  // 2. 当前主推：CloudBase 环境服务端 APIKey（复用 examples 既有 TCB_API_KEY）
+  // 2. CloudBase 环境服务端 APIKey
   const tcbApiKey = process.env.TCB_API_KEY
   if (typeof tcbApiKey === 'string' && tcbApiKey.length > 0) {
     return { apiKey: tcbApiKey, source: 'env_tcb_api_key' }
   }
 
-  // 3. 兼容别名：CloudBase 环境服务端 APIKey
-  const cloudbaseKey = process.env.CLOUDBASE_API_KEY
-  if (typeof cloudbaseKey === 'string' && cloudbaseKey.length > 0) {
-    return { apiKey: cloudbaseKey, source: 'env_cloudbase' }
-  }
-
   throw new ResourceError(
     'No API key found. Set one of:\n' +
-      '  - process.env.TCB_API_KEY (CloudBase environment server APIKey, recommended)\n' +
-      '  - process.env.CLOUDBASE_API_KEY (compatible alias)\n' +
+      '  - process.env.TCB_API_KEY (CloudBase environment server APIKey)\n' +
       '  - AgentConfig.model.apiKey (programmatic)\n' +
       '\n' +
       'Get a CloudBase server APIKey from the CloudBase environment settings.',

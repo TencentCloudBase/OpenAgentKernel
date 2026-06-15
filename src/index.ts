@@ -27,7 +27,6 @@ export type {
   AttachmentInput,
   // 配置
   AgentConfig,
-  ResourceConfig,
   PlatformCredentials,
   ModelInput,
   ModelSpec,
@@ -45,6 +44,9 @@ export type {
   SessionConfig,
   SessionStoreProvider,
   CloudBaseSessionDatabase,
+  CloudBaseStorageConfig,
+  CustomStorageProvider,
+  StorageConfig,
   UserMemoryConfig,
   // Hooks
   AgentHooks,

@@ -1,66 +1,115 @@
 /**
- * 加载 examples/.env.local 到 process.env。
+ * 加载 examples/config.local.json。
  *
- * 用法1：在 example 顶部 `import './_shared/env.js'`，之后正常 `process.env.XXX` 即可。
- *        （自动在 module load 时执行）
- *
- * 用法2：显式调用 `loadEnv()`。
- *
- * 加载规则（dotenv 默认）：
- *   - 已 export 到 process.env 的真实环境变量优先（不被覆盖）
- *   - .env.local 不存在时静默跳过（不报错，避免妨碍纯 shell export 的用法）
+ * 用法：在 example 顶部 `import { getEnvId, getModel, ... } from './_shared/env.js'`
+ *       helper 会在首次调用时读取配置，并把 `tcbApiKey` 写入 `process.env.TCB_API_KEY`
+ *       供 SDK 默认模型网关使用。
  */
 
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import * as dotenv from 'dotenv'
 import type { PlatformCredentials } from '@cloudbase/open-agent-kernel'
 
-const envLocalPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', '.env.local')
+const configLocalPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'config.local.json')
 
-export function loadEnv(): void {
-  if (existsSync(envLocalPath)) {
-    dotenv.config({ path: envLocalPath })
-    // eslint-disable-next-line no-console
-    console.log('[env] loaded local example env')
+interface ExampleConfig {
+  envId: string
+  model?: string
+  tcbApiKey: string
+  credentials?: {
+    secretId: string
+    secretKey: string
+    sessionToken?: string
+  }
+  examples?: {
+    resumeConversationId?: string
+    storage?: string
+    imagePath?: string
+    debug?: boolean
   }
 }
 
-// Auto-load on import
-loadEnv()
+let cachedConfig: ExampleConfig | null = null
+
+function loadConfig(): ExampleConfig {
+  if (cachedConfig) return cachedConfig
+
+  if (!existsSync(configLocalPath)) {
+    throw new Error(
+      'examples/config.local.json is required. Copy config.example.json to config.local.json and fill in your values.',
+    )
+  }
+
+  const config = JSON.parse(readFileSync(configLocalPath, 'utf8')) as ExampleConfig
+
+  if (!config.envId) {
+    throw new Error('config.local.json: envId is required')
+  }
+  if (!config.tcbApiKey) {
+    throw new Error('config.local.json: tcbApiKey is required')
+  }
+
+  process.env.TCB_API_KEY = config.tcbApiKey
+  if (config.examples?.debug === true) {
+    process.env.OAK_DEBUG = '1'
+  }
+
+  cachedConfig = config
+  // eslint-disable-next-line no-console
+  console.log('[env] loaded config.local.json')
+  return config
+}
+
+export function loadEnv(): void {
+  loadConfig()
+}
 
 export function getEnvId(): string {
-  const envId = process.env.TCB_ENV_ID
-  if (!envId) {
-    throw new Error('TCB_ENV_ID is required (set it in examples/.env.local)')
-  }
-  return envId
+  return loadConfig().envId
+}
+
+export function getModel(defaultModel = 'glm-5.1'): string {
+  return loadConfig().model ?? defaultModel
 }
 
 export function getPlatformCredentials(): PlatformCredentials {
-  const envId = getEnvId()
-  const secretId = process.env.TENCENTCLOUD_SECRETID ?? process.env.TCB_SECRET_ID
-  const secretKey = process.env.TENCENTCLOUD_SECRETKEY ?? process.env.TCB_SECRET_KEY
-  const sessionToken = process.env.TENCENTCLOUD_SESSIONTOKEN ?? process.env.TCB_TOKEN
+  const config = loadConfig()
+  const credentials = config.credentials
 
-  if (!secretId || !secretKey) {
-    throw new Error('TENCENTCLOUD_SECRETID and TENCENTCLOUD_SECRETKEY are required')
+  if (!credentials?.secretId || !credentials.secretKey) {
+    throw new Error('config.local.json: credentials.secretId and credentials.secretKey are required')
   }
 
   return {
-    envId,
-    secretId,
-    secretKey,
-    ...(sessionToken ? { sessionToken } : {}),
+    envId: config.envId,
+    secretId: credentials.secretId,
+    secretKey: credentials.secretKey,
+    ...(credentials.sessionToken ? { sessionToken: credentials.sessionToken } : {}),
   }
 }
 
+export function getResumeConversationId(): string | undefined {
+  const id = loadConfig().examples?.resumeConversationId
+  return id && id.length > 0 ? id : undefined
+}
+
+export function getExampleStorage(): string | undefined {
+  const storage = loadConfig().examples?.storage
+  return storage && storage.length > 0 ? storage : undefined
+}
+
+export function getExampleImagePath(): string | undefined {
+  const imagePath = loadConfig().examples?.imagePath
+  return imagePath && imagePath.length > 0 ? imagePath : undefined
+}
+
 export function getSandboxApiKey(): string {
+  loadConfig()
   const apiKey = process.env.TCB_API_KEY
   if (!apiKey) {
-    throw new Error('TCB_API_KEY is required for AgsStatefulSandbox examples')
+    throw new Error('config.local.json: tcbApiKey is required')
   }
   return apiKey
 }

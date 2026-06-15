@@ -11,8 +11,9 @@
  *   - Example 11：单进程内 InMemoryPermissionStore（审批状态在内存）
  *   - Example 13：跨实例 CloudBasePermissionStore（审批状态跨进程持久化）
  *
- * 凭证（examples/.env.local）：
- *   TCB_API_KEY、TCB_ENV_ID、TENCENTCLOUD_SECRETID、TENCENTCLOUD_SECRETKEY
+ * 配置：
+ *   - examples/config.local.json
+ *   - examples/config.local.json: envId / model / credentials
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/13-hitl-distributed-cloudbase.ts
@@ -20,7 +21,7 @@
  * 验证 DB：
  *   在 CloudBase 控制台 → 数据库 → 看 oak_state 集合（pending / decided 都会落到这里）
  */
-import { getEnvId, getPlatformCredentials } from './_shared/env.js'
+import { getEnvId, getModel, getPlatformCredentials } from './_shared/env.js'
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
@@ -50,7 +51,7 @@ async function main(): Promise<void> {
   const agentA = createAgent({
     envId,
     credentials,
-    model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
+    model: getModel(),
     systemPrompt:
       'You are a helpful assistant with one tool: ' +
       'mcp__fs__deleteFile. ' +
@@ -103,7 +104,7 @@ async function main(): Promise<void> {
   const agentB = createAgent({
     envId,
     credentials,
-    model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
+    model: getModel(),
     systemPrompt:
       'You are a helpful assistant with one tool: ' +
       'mcp__fs__deleteFile. ' +

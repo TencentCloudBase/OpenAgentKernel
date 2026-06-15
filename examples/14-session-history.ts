@@ -10,13 +10,13 @@
  *   6. clearHistory() 清除消息索引
  *
  * 前置条件：
- *   - TCB_API_KEY（CloudBase AI gateway + 沙箱数据面 JWT）
- *   - TCB_ENV_ID + TENCENTCLOUD_SECRETID + TENCENTCLOUD_SECRETKEY（CloudBase 控制面）
+ *   - examples/config.local.json
+ *   - examples/config.local.json: envId / model / credentials
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/14-session-history.ts
  */
-import { getEnvId, getPlatformCredentials } from './_shared/env.js'
+import { getEnvId, getModel, getPlatformCredentials } from './_shared/env.js'
 
 import { randomUUID } from 'node:crypto'
 import { createAgent } from '@cloudbase/open-agent-kernel'
@@ -71,7 +71,7 @@ const credentials = getPlatformCredentials()
 const agent = createAgent({
   envId,
   credentials,
-  model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
+  model: getModel(),
   systemPrompt:
     'You are a helpful coding assistant working inside a sandbox.\n' +
     'You have access to sandbox tools:\n' +

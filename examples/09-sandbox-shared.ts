@@ -6,12 +6,12 @@
  *      第一个 session 写入的文件，第二个 session 能直接读到（实例共享）
  *   2. **新工具**：edit / glob / grep 在沙箱里做精确编辑 + 文件检索 + 内容搜索
  *
- * 凭证写在 examples/.env.local（同 example 08）。
+ * 配置：examples/config.local.json（同 example 08）。
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/09-sandbox-shared.ts
  */
-import { getEnvId, getPlatformCredentials } from './_shared/env.js'
+import { getEnvId, getModel, getPlatformCredentials } from './_shared/env.js'
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
 import type { SessionEvent } from '@cloudbase/open-agent-kernel'
@@ -46,7 +46,7 @@ async function main(): Promise<void> {
   const agent = createAgent({
     envId,
     credentials,
-    model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
+    model: getModel(),
     systemPrompt:
       'You are a helpful coding assistant working inside a sandbox. ' +
       'You have access to bash / read / write / edit / glob / grep tools (mcp__sandbox__*). ' +

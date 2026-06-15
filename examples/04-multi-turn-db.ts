@@ -7,8 +7,7 @@
  *   3. 跨进程 resume：第二次运行时配置 OAK_RESUME_CONVERSATION_ID=<id>
  *      把上次的 conversationId 传入，agent.resumeSession 从 DB 拉历史继续
  *
- * 凭证写在 examples/.env.local（从 .env.example 复制）：
- *   TCB_API_KEY、TCB_ENV_ID、TENCENTCLOUD_SECRETID、TENCENTCLOUD_SECRETKEY
+ * 配置：examples/config.local.json（见 config.example.json）
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/04-multi-turn-db.ts
@@ -16,7 +15,7 @@
  * 验证 DB：
  *   在 CloudBase 控制台 → 数据库 → 看 oak_sessions / oak_session_entries / oak_session_summaries
  */
-import { getEnvId, getPlatformCredentials } from './_shared/env.js'
+import { getEnvId, getModel, getPlatformCredentials, getResumeConversationId } from './_shared/env.js'
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
 
@@ -27,20 +26,20 @@ async function main(): Promise<void> {
   const agent = createAgent({
     envId,
     credentials,
-    model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
+    model: getModel(),
     systemPrompt: 'You are a helpful assistant. Reply concisely in Chinese. ' + 'Remember details across turns.',
     // 不配置 session 时，credentials 存在会默认启用 CloudBase FlexDB session store。
     // 如需自定义表前缀：session: { tablePrefix: 'my_agent_' }
   })
 
-  const resumeId = process.env.OAK_RESUME_CONVERSATION_ID
+  const resumeId = getResumeConversationId()
   const session = resumeId ? await agent.resumeSession(resumeId) : await agent.startSession({ userId: 'demo-user' })
 
   if (resumeId) {
     console.log(`[resume] continuing conversation=${resumeId}`)
   } else {
     console.log(`[start] new conversation=${session.id}`)
-    console.log(`  → 下次跑可以在 .env.local 加 OAK_RESUME_CONVERSATION_ID=${session.id} 来 resume`)
+    console.log(`  → 下次跑可在 config.local.json 的 examples.resumeConversationId 填入 ${session.id} 来 resume`)
   }
 
   // ── 第一轮 ─────────────────────────────────────────────────

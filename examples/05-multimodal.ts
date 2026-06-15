@@ -5,33 +5,31 @@
  *   方式 A（默认）：传入 credentials 后，createAgent 自动使用 CloudBase Storage
  *   方式 B（调试）：OAK_STORAGE=memory 时显式使用 InMemoryStorage
  *
- * 凭证写在 examples/.env.local（从 .env.example 复制）：
- *   - TCB_API_KEY 必需（CloudBase AI gateway）
- *   - 默认还需要 TCB_ENV_ID + TENCENTCLOUD_SECRETID + TENCENTCLOUD_SECRETKEY
+ * 配置：examples/config.local.json（见 config.example.json）
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/05-multimodal.ts
  */
-import { getPlatformCredentials } from './_shared/env.js'
+import { getEnvId, getExampleImagePath, getExampleStorage, getModel, getPlatformCredentials } from './_shared/env.js'
 
 import * as path from 'node:path'
 import { InMemoryStorage, createAgent } from '@cloudbase/open-agent-kernel'
 
 async function main(): Promise<void> {
-  const useInMemoryStorage = process.env.OAK_STORAGE === 'memory'
+  const useInMemoryStorage = getExampleStorage() === 'memory'
   const credentials = useInMemoryStorage ? undefined : getPlatformCredentials()
   const storage = useInMemoryStorage ? new InMemoryStorage() : undefined
   const storageName = useInMemoryStorage ? 'InMemoryStorage' : 'CloudBaseStorage(default)'
 
   // 默认用项目根目录的 screenshot.png（一张产品截图，模型应该能识别出 UI 元素）
   const defaultImage = path.resolve(new URL('./', import.meta.url).pathname, 'cloud.png')
-  const imagePath = process.env.OAK_IMAGE_PATH ?? defaultImage
+  const imagePath = getExampleImagePath() ?? defaultImage
 
   const agent = createAgent({
-    envId: process.env.TCB_ENV_ID ?? 'demo-env',
+    envId: getEnvId(),
     ...(credentials ? { credentials } : {}),
     // 视觉模型：需当前 CloudBase 环境已开通对应多模态模型
-    model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5v-turbo',
+    model: getModel('glm-5v-turbo'),
     systemPrompt: 'You are a helpful image analysis assistant. Reply concisely in Chinese.',
     ...(storage ? { storage } : {}),
   })

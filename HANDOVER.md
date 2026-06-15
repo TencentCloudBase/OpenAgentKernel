@@ -531,7 +531,7 @@ await session.clearHistory()
 默认模型请求走 CloudBase AI gateway：
 
 - `apiBaseUrl`: `https://${TCB_ENV_ID}.api.tcloudbasegateway.com/v1/ai/cloudbase`
-- `apiKey`: 优先读取 `TCB_API_KEY`，兼容 `CLOUDBASE_API_KEY`
+- `apiKey`: 读取 `TCB_API_KEY`
 
 **模型选择规则**（重要）：
 - 默认模型一律使用 `glm-5.1`
@@ -928,7 +928,12 @@ const agent = createAgent({
 2. **有 `credentials` 时默认启用 CloudBase Storage**
    - 用户不显式传 `storage`，且已提供 `credentials` 时，kernel 自动创建 `CloudBaseStorage`。
    - 多模态附件默认上传到 CloudBase 云存储并以签名 URL 发送给模型。
+   - 用户可通过 `storage: { pathPrefix, urlExpiresIn }` 覆盖默认上传路径和签名 URL 有效期。
    - 用户仍可通过 `storage: new InMemoryStorage()` 或自定义 `StorageProvider` 覆盖默认行为。
+
+3. **资源命名入口收敛**
+   - DB 表名统一通过 `session.tablePrefix` / `permissions.tablePrefix` 管理。
+   - `ResourceConfig` 不再暴露未被默认 store 使用的具体 session 集合名入口，避免“配置了但不生效”的误导。
 
 #### 新推荐用法
 
@@ -937,7 +942,8 @@ const agent = createAgent({
   envId,
   credentials: { secretId, secretKey },
   model: 'glm-5v-turbo',
-  // 发送 attachments 时默认使用 CloudBase Storage，无需手动 new CloudBaseStorage
+  // 发送 attachments 时默认使用 CloudBase Storage；也可覆盖上传路径
+  storage: { pathPrefix: 'my-agent/attachments/' },
 })
 ```
 
@@ -1121,10 +1127,10 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 
 ```bash
 # 1. 配置环境变量
-cp packages/open-agent-kernel/examples/.env.example packages/open-agent-kernel/examples/.env.local
-# 编辑 .env.local 填入真实凭证
+cp packages/open-agent-kernel/examples/config.example.json packages/open-agent-kernel/examples/config.local.json
+# 编辑 config.local.json 填入真实凭证
 
-# 2. 运行最简示例
+# 2. 运行快速开始示例
 pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
 
 # 3. 运行带持久化的示例

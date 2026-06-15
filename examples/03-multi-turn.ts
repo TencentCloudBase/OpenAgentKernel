@@ -9,9 +9,9 @@
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/03-multi-turn.ts
  *
- * 凭证写在 examples/.env.local（从 .env.example 复制）。
+ * 配置：examples/config.local.json。
  */
-import './_shared/env.js'
+import { getEnvId, getModel } from './_shared/env.js'
 
 import { CloudBaseSessionStore, InMemoryDriver, createAgent } from '@cloudbase/open-agent-kernel'
 
@@ -20,8 +20,8 @@ async function main(): Promise<void> {
   const store = new CloudBaseSessionStore({ driver })
 
   const agent = createAgent({
-    envId: process.env.TCB_ENV_ID ?? 'demo-env',
-    model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
+    envId: getEnvId(),
+    model: getModel(),
     systemPrompt: 'You are a helpful assistant. Reply concisely in Chinese. ' + 'Remember details across turns.',
     session: { store },
   })

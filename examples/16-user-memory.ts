@@ -16,8 +16,8 @@
  *   4. 模型根据 CLAUDE.md 内容回答问题 → 验证同步真的把内容带进了 prompt
  *
  * 运行前提:
- *   - .env.local 配置 TCB_ENV_ID + TENCENTCLOUD_SECRETID + TENCENTCLOUD_SECRETKEY +
- *     TCB_API_KEY
+ *   - examples/config.local.json
+ *   - examples/config.local.json: envId / credentials
  *   - envId 对应的 CloudBase 已开通 COS
  *
  * Run:
@@ -48,7 +48,7 @@ async function runConversation(prompt: string, userId: string) {
   const envId = getEnvId()
   const credentials = getPlatformCredentials()
   // 模型配置:支持环境变量自带 key + endpoint(测试方便),不传则走 CloudBase 网关默认。
-  // ⚠️ 不要在源码里硬编码 apiKey;.env.local 不该提交到 git。
+  // ⚠️ 不要在源码里硬编码 apiKey；凭证应写在 config.local.json，不要提交到 git。
   const customModelId = process.env.OAK_EXAMPLE_MODEL_ID
   const customApiKey = process.env.OAK_EXAMPLE_MODEL_API_KEY
   const customApiBaseUrl = process.env.OAK_EXAMPLE_MODEL_API_BASE_URL

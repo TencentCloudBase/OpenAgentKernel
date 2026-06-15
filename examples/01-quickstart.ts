@@ -1,24 +1,19 @@
 /**
- * 01-quickstart.ts —— 最小可运行示例
+ * 01-quickstart.ts —— 快速开始
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
  *
- * 必需配置（写在 examples/.env.local，从 .env.example 复制）：
- *   TCB_ENV_ID=your-env-id
- *   TCB_API_KEY=your-cloudbase-server-api-key
- *   CLOUDBASE_AGENT_MODEL=glm-5.1
- *
- * 此 demo 只用 envId + model + systemPrompt（< 10 行配置）。
+ * 配置：examples/config.local.json（见 config.example.json）
  */
-import './_shared/env.js'
+import { getEnvId, getModel } from './_shared/env.js'
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
 
 async function main(): Promise<void> {
   const agent = createAgent({
-    envId: process.env.TCB_ENV_ID ?? 'demo-env',
-    model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
+    envId: getEnvId(),
+    model: getModel(),
     systemPrompt: 'You are a helpful CloudBase assistant. Reply concisely in Chinese.',
   })
 

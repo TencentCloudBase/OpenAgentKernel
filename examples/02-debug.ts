@@ -7,9 +7,9 @@
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/02-debug.ts
  *
- * 凭证写在 examples/.env.local（从 .env.example 复制）。
+ * 配置：examples/config.local.json。
  */
-import './_shared/env.js'
+import { getEnvId, getModel } from './_shared/env.js'
 
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk'
 import { buildClaudeQueryOptions } from '../src/runtime/agent-builder.js'
@@ -17,8 +17,8 @@ import { translateSdkMessage } from '../src/runtime/event-translator.js'
 
 async function main(): Promise<void> {
   const { options } = buildClaudeQueryOptions({
-    envId: process.env.TCB_ENV_ID ?? 'demo-env',
-    model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
+    envId: getEnvId(),
+    model: getModel(),
     systemPrompt: 'You are a helpful assistant. Reply concisely in Chinese.',
   })
 

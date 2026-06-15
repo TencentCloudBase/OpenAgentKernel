@@ -28,7 +28,6 @@ const baseConfig: AgentConfig = {
 // 会让"未启用 userMemory"的断言看到非 undefined 值。
 beforeEach(() => {
   process.env.TCB_API_KEY = 'test-key'
-  delete process.env.CLOUDBASE_API_KEY
   delete process.env.CLAUDE_CONFIG_DIR
 })
 

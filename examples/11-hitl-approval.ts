@@ -11,12 +11,12 @@
  * 这是 PR #7.0 的最小演示：单进程内进行，PermissionStore 走默认 InMemoryPermissionStore。
  * 多节点 / 跨进程 / 跨设备审批见 PR #7.1（需配 CloudBasePermissionStore）。
  *
- * 凭证：复用 example 06 的（仅需要模型 key + envId）。
+ * 配置：复用 example 06 的（仅需要 TCB_API_KEY + config.envId）。
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/11-hitl-approval.ts
  */
-import './_shared/env.js'
+import { getEnvId, getModel } from './_shared/env.js'
 
 import { CloudBaseSessionStore, createAgent, InMemoryDriver } from '@cloudbase/open-agent-kernel'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
@@ -61,8 +61,8 @@ async function promptUser(question: string): Promise<string> {
 
 async function main(): Promise<void> {
   const agent = createAgent({
-    envId: process.env.TCB_ENV_ID ?? 'demo-env',
-    model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
+    envId: getEnvId(),
+    model: getModel(),
     systemPrompt:
       'You are a helpful assistant with two tools: ' +
       'mcp__fs__listFiles (safe) and mcp__fs__deleteFile (DANGEROUS). ' +

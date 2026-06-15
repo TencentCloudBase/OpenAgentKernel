@@ -9,10 +9,9 @@
  *   - 10 在此基础上 **自动**注入 `mcp__cloudbase__*`，agent 可以直接调 CloudBase 资源
  *     （凭证由 kernel 注入，agent 不需要手动 mcporter call）
  *
- * 凭证（examples/.env.local）：
- *   - TCB_API_KEY                     CloudBase AI gateway + 沙箱数据面长期 JWT
- *   - TCB_ENV_ID                      CloudBase 环境
- *   - TENCENTCLOUD_SECRETID / TENCENTCLOUD_SECRETKEY  控制面 AK/SK（同时作为用户租户凭证兜底）
+ * 配置：
+ *   - examples/config.local.json
+ *   - examples/config.local.json: envId / model / credentials
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/10-sandbox-cloudbase-tools.ts
@@ -23,7 +22,7 @@
  *   - 镜像必须自带 mcporter + cloudbase-mcp（默认 OpenVibeCoding 公开 vibecoding 镜像满足）
  *   - 镜像不带这两个工具时，cloudbase tools 自动 degrade（仍能用 sandbox 文件系统工具）
  */
-import { getEnvId, getPlatformCredentials } from './_shared/env.js'
+import { getEnvId, getModel, getPlatformCredentials } from './_shared/env.js'
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
 
@@ -34,7 +33,7 @@ async function main(): Promise<void> {
   const agent = createAgent({
     envId,
     credentials,
-    model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
+    model: getModel(),
     systemPrompt:
       'You are a CloudBase coding assistant working inside a sandbox. ' +
       'You have two tool families:\n' +

@@ -23,6 +23,7 @@ import type {
   Agent,
   AgentConfig,
   ApprovalDecision,
+  CloudBaseStorageConfig,
   MessagePart,
   MessageRecord,
   PermissionStore,
@@ -119,7 +120,7 @@ function normalizeAgentConfig(config: AgentConfig): AgentConfig {
     ...config,
     ...(credentials ? { credentials } : {}),
     sandbox: resolveSandboxConfig(config),
-    storage: config.storage ?? (credentials ? new CloudBaseStorage({ credentials }) : undefined),
+    storage: resolveStorageConfig(config),
   }
 
   return {
@@ -169,6 +170,54 @@ function resolveSandboxConfig(config: AgentConfig): AgentConfig['sandbox'] {
     runtime: new AgsStatefulSandbox({ apiKey }),
     scope: sandbox.scope ?? 'shared',
   }
+}
+
+function isStorageProvider(value: unknown): value is StorageProvider {
+  return typeof value === 'object' && value !== null && typeof (value as { resolveAttachment?: unknown }).resolveAttachment === 'function'
+}
+
+function resolveStorageConfig(config: AgentConfig): StorageProvider | undefined {
+  const storage = config.storage
+  const credentials = resolvePlatformCredentials(config)
+
+  if (storage === undefined) {
+    return credentials ? new CloudBaseStorage({ credentials }) : undefined
+  }
+
+  if (isStorageProvider(storage)) {
+    return storage
+  }
+
+  if (typeof storage !== 'object' || storage === null) {
+    throw new InvalidConfigError('AgentConfig.storage must be a CloudBase storage config object or StorageProvider instance.')
+  }
+
+  const storageConfig = storage as CloudBaseStorageConfig
+
+  if (storageConfig.enabled === false) {
+    return undefined
+  }
+
+  const provider = storageConfig.provider ?? 'cloudbase'
+  if (provider !== 'cloudbase') {
+    throw new InvalidConfigError(
+      `AgentConfig.storage.provider="${provider}" is not supported yet. ` +
+        'The built-in storage currently supports provider="cloudbase". ' +
+        'Pass a custom StorageProvider instance for advanced scenarios.',
+    )
+  }
+
+  if (!credentials) {
+    throw new InvalidConfigError(
+      'AgentConfig.storage provider="cloudbase" requires AgentConfig.credentials for the default CloudBase Storage.',
+    )
+  }
+
+  return new CloudBaseStorage({
+    credentials,
+    pathPrefix: storageConfig.pathPrefix,
+    urlExpiresIn: storageConfig.urlExpiresIn,
+  })
 }
 
 function resolveSessionConfig(config: AgentConfig): AgentConfig['session'] {
@@ -999,9 +1048,7 @@ async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<S
   if (!existing) {
     yield {
       type: 'error',
-      error: new ResourceError(
-        `No pending approval found for toolUseId=${toolUseId}. ` + 'It may have expired or already been resolved.',
-      ),
+      error: new ResourceError('No pending approval found. It may have expired or already been resolved.'),
     }
     yield { type: 'session_idle', reason: 'error' }
     return

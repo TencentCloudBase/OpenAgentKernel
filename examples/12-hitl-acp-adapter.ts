@@ -14,7 +14,7 @@
  * 运行（本 example 不依赖真实 ACP 客户端，模拟一个"Always allow_once" 客户端）：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/12-hitl-acp-adapter.ts
  */
-import './_shared/env.js'
+import { getEnvId, getModel } from './_shared/env.js'
 
 import { CloudBaseSessionStore, createAgent, InMemoryDriver, type SessionEvent } from '@cloudbase/open-agent-kernel'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
@@ -166,8 +166,8 @@ const dangerousTools = createSdkMcpServer({
 
 async function main(): Promise<void> {
   const agent = createAgent({
-    envId: process.env.TCB_ENV_ID ?? 'demo-env',
-    model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
+    envId: getEnvId(),
+    model: getModel(),
     systemPrompt: 'You are a CLI assistant. When the user asks to delete a file, call mcp__fs__deleteFile directly.',
     mcpServers: { fs: dangerousTools },
     session: {
