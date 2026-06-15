@@ -351,7 +351,7 @@ async function ensureCosPathKeep(
 /**
  * 调用 AGS OpenAPI（CreateSandboxTool / StartSandboxInstance / Pause / 等）。
  *
- * @cloudbase/manager-node 是 optional peer dep，使用时按需 require。
+ * @cloudbase/manager-node 按需懒加载。
  */
 async function callAgsApi(
   action: string,
@@ -369,7 +369,8 @@ async function callAgsApi(
     )
   } catch (err) {
     throw new SandboxError(
-      'AgsStatefulSandbox requires @cloudbase/manager-node. ' + 'Install it: pnpm add @cloudbase/manager-node',
+      'AgsStatefulSandbox failed to load @cloudbase/manager-node. ' +
+        'Reinstall @cloudbase/open-agent-kernel or check your node_modules.',
       err,
     )
   }

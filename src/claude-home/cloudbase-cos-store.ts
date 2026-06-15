@@ -14,7 +14,7 @@
  *
  * 凭证由 options.credentials 显式注入；manager-node 不从环境变量兜底读取。
  *
- * `@cloudbase/manager-node` 是 optional peer dep,按需懒加载。
+ * `@cloudbase/manager-node` 按需懒加载。
  */
 
 import * as fs from 'node:fs/promises'
@@ -155,8 +155,8 @@ export class CloudBaseCosClaudeHomeStore implements ClaudeHomeSyncStore {
       return await dynamicImport('@cloudbase/manager-node')
     } catch {
       throw new ResourceError(
-        'CloudBaseCosClaudeHomeStore requires @cloudbase/manager-node. Install via:\n' +
-          '  pnpm add @cloudbase/manager-node',
+        'CloudBaseCosClaudeHomeStore failed to load @cloudbase/manager-node. ' +
+          'Reinstall @cloudbase/open-agent-kernel or check your node_modules.',
       )
     }
   }

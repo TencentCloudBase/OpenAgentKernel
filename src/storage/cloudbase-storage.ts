@@ -9,7 +9,7 @@
  * 路径策略：
  *   `agent-attachments/{envId}/{sessionId}/{timestamp}-{index}.{ext}`
  *
- * `@cloudbase/node-sdk` 是 optional peer dep，按需懒加载（与 CloudBaseDbDriver 一致）。
+ * `@cloudbase/node-sdk` 按需懒加载（与 CloudBaseDbDriver 一致）。
  */
 
 import * as fs from 'node:fs/promises'
@@ -100,7 +100,7 @@ export class CloudBaseStorage implements StorageProvider {
       return await dynamicImport('@cloudbase/node-sdk')
     } catch {
       throw new ResourceError(
-        '@cloudbase/node-sdk is not installed. Add it as a dependency:\n' + '  pnpm add @cloudbase/node-sdk',
+        '@cloudbase/node-sdk failed to load. Reinstall @cloudbase/open-agent-kernel or check your node_modules.',
       )
     }
   }

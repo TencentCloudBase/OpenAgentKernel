@@ -35,6 +35,7 @@ import type { AgentConfig, SandboxConfig, UserMemoryConfig } from '../public/typ
 import { createSandboxMcpServer } from '../sandbox/sandbox-tools.js'
 import type { SandboxInstance, SandboxRuntime } from '../sandbox/types.js'
 import { WorkspaceSnapshotEngine } from '../sandbox/workspace-snapshot/index.js'
+import { PACKAGE_VERSION } from '../version.js'
 import { resolveCredential, type ResolvedCredential } from './credential-factory.js'
 
 /**
@@ -205,7 +206,7 @@ export function buildClaudeQueryOptions(
     ANTHROPIC_API_KEY: undefined,
     API_TIMEOUT_MS: String(DEFAULT_API_TIMEOUT_MS),
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-    CLAUDE_AGENT_SDK_CLIENT_APP: '@cloudbase/open-agent-kernel/0.2.0-alpha.0',
+    CLAUDE_AGENT_SDK_CLIENT_APP: `@cloudbase/open-agent-kernel/${PACKAGE_VERSION}`,
     ...(configDirOverride ? { CLAUDE_CONFIG_DIR: configDirOverride } : {}),
   }
 

@@ -10,6 +10,13 @@ cp config.example.json config.local.json
 # 编辑 config.local.json，填入 envId / model / tcbApiKey / credentials
 ```
 
+在仓库根目录先构建 SDK，再运行示例：
+
+```bash
+pnpm -F @cloudbase/open-agent-kernel build
+pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
+```
+
 `config.local.json` 已被 gitignore，不会被提交。
 
 ## `config.local.json` 字段

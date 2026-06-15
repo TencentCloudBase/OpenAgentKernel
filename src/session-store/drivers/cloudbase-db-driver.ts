@@ -11,8 +11,7 @@
  *   - {prefix}session_summaries 一行 = 一个 session 的 summary
  *   - {prefix}session_messages  一行 = 一条会话消息元数据（PR #4.6：前端分页索引）
  *
- * `@cloudbase/node-sdk` 是 peer dependency，运行时按需加载（避免 InMemoryDriver
- * 用户被强制装 cloudbase 依赖）。
+ * `@cloudbase/node-sdk` 按需懒加载（避免 InMemoryDriver 用户被强制装 cloudbase 依赖）。
  */
 
 import type { SessionKey, SessionStoreEntry, SessionSummaryEntry } from '@anthropic-ai/claude-agent-sdk'
@@ -136,10 +135,7 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
       return await dynamicImport('@cloudbase/node-sdk')
     } catch {
       throw new ResourceError(
-        '@cloudbase/node-sdk is not installed. Add it as a dependency:\n' +
-          '  pnpm add @cloudbase/node-sdk\n' +
-          'It is a peer dependency of @cloudbase/open-agent-kernel and is\n' +
-          'required when using CloudBaseDbDriver.',
+        '@cloudbase/node-sdk failed to load. Reinstall @cloudbase/open-agent-kernel or check your node_modules.',
       )
     }
   }

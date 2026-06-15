@@ -26,7 +26,7 @@
  *   2. (projectKey, type, conversationId, toolName, createdAt desc)  scanRecent
  *   3. (expiresAt)                                              批量 cleanup stale
  *
- * `@cloudbase/node-sdk` 是 peer dependency，运行时按需加载。
+ * `@cloudbase/node-sdk` 按需懒加载。
  */
 
 import { ResourceError } from '../../internal/errors.js'
@@ -157,10 +157,7 @@ export class CloudBaseDbPermissionDriver implements PermissionStoreDriver {
       return await dynamicImport('@cloudbase/node-sdk')
     } catch {
       throw new ResourceError(
-        '@cloudbase/node-sdk is not installed. Add it as a dependency:\n' +
-          '  pnpm add @cloudbase/node-sdk\n' +
-          'It is a peer dependency of @cloudbase/open-agent-kernel and is\n' +
-          'required when using CloudBaseDbPermissionDriver.',
+        '@cloudbase/node-sdk failed to load. Reinstall @cloudbase/open-agent-kernel or check your node_modules.',
       )
     }
   }

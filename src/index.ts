@@ -126,5 +126,7 @@ export {
   SandboxError,
 } from './internal/errors.js'
 
+import { PACKAGE_VERSION } from './version.js'
+
 /** SDK 版本号 */
-export const VERSION = '0.2.0-alpha.0'
+export const VERSION = PACKAGE_VERSION

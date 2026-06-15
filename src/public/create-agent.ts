@@ -43,7 +43,7 @@ type ResolvedPlatformCredentials = NonNullable<AgentConfig['credentials']> & { e
  * MVP 形态：服务端 kernel SDK，跟用户业务代码同进程。
  * 内部底层引擎为 Claude Agent SDK（@anthropic-ai/claude-agent-sdk），完全屏蔽。
  *
- * 当前版本：v0.1.0-alpha.0
+ * 当前版本跟随 package.json（见 src/version.ts）。
  * 已支持：
  *   - startSession / resumeSession / session.send（PR #4）
  *   - 多模态输入（PR #4.5）
@@ -173,7 +173,11 @@ function resolveSandboxConfig(config: AgentConfig): AgentConfig['sandbox'] {
 }
 
 function isStorageProvider(value: unknown): value is StorageProvider {
-  return typeof value === 'object' && value !== null && typeof (value as { resolveAttachment?: unknown }).resolveAttachment === 'function'
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { resolveAttachment?: unknown }).resolveAttachment === 'function'
+  )
 }
 
 function resolveStorageConfig(config: AgentConfig): StorageProvider | undefined {
@@ -189,7 +193,9 @@ function resolveStorageConfig(config: AgentConfig): StorageProvider | undefined 
   }
 
   if (typeof storage !== 'object' || storage === null) {
-    throw new InvalidConfigError('AgentConfig.storage must be a CloudBase storage config object or StorageProvider instance.')
+    throw new InvalidConfigError(
+      'AgentConfig.storage must be a CloudBase storage config object or StorageProvider instance.',
+    )
   }
 
   const storageConfig = storage as CloudBaseStorageConfig
