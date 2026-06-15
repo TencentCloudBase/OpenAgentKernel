@@ -526,12 +526,15 @@ function createSession(deps: SessionDeps): Session {
       return runClientToolResume({
         config,
         conversationId,
+        userId,
         toolUseId: opts.toolUseId,
         output: opts.output,
         isError: opts.isError ?? false,
         abortController,
         ensureSandbox,
         ensureCloudbaseMcp,
+        ensureSnapshotBootstrap,
+        onSnapshotEngine,
         permissionStore,
         clientToolNames,
         clientToolStore,
@@ -551,11 +554,14 @@ function createSession(deps: SessionDeps): Session {
       return runAskUserResume({
         config,
         conversationId,
+        userId,
         toolUseId: opts.toolUseId,
         answer: opts.answer,
         abortController,
         ensureSandbox,
         ensureCloudbaseMcp,
+        ensureSnapshotBootstrap,
+        onSnapshotEngine,
         permissionStore,
         clientToolNames,
         clientToolStore,
@@ -1212,12 +1218,15 @@ async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<S
 interface RunClientToolResumeArgs {
   config: AgentConfig
   conversationId: string
+  userId: string
   toolUseId: string
   output: unknown
   isError: boolean
   abortController: AbortController
   ensureSandbox: () => Promise<SandboxInstance | undefined>
   ensureCloudbaseMcp: (sandbox: SandboxInstance) => Promise<SdkMcpServerConfig | undefined>
+  ensureSnapshotBootstrap: (engine: WorkspaceSnapshotEngine, sandbox: SandboxInstance) => Promise<void>
+  onSnapshotEngine: (engine: WorkspaceSnapshotEngine | undefined) => void
   permissionStore?: PermissionStore
   clientToolNames: ReadonlySet<string>
   clientToolStore?: ClientToolResultStore
@@ -1228,12 +1237,15 @@ async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerat
   const {
     config,
     conversationId,
+    userId,
     toolUseId,
     output,
     isError,
     abortController,
     ensureSandbox,
     ensureCloudbaseMcp,
+    ensureSnapshotBootstrap,
+    onSnapshotEngine,
     permissionStore,
     clientToolNames,
     clientToolStore,
@@ -1293,9 +1305,12 @@ async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerat
     abortController,
     sessionId: conversationId,
     conversationId,
+    userId,
     isContinuation: true,
     ensureSandbox,
     ensureCloudbaseMcp,
+    ensureSnapshotBootstrap,
+    onSnapshotEngine,
     permissionStore,
     clientToolNames,
     clientToolStore,
@@ -1310,11 +1325,14 @@ async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerat
 interface RunAskUserResumeArgs {
   config: AgentConfig
   conversationId: string
+  userId: string
   toolUseId: string
   answer: string
   abortController: AbortController
   ensureSandbox: () => Promise<SandboxInstance | undefined>
   ensureCloudbaseMcp: (sandbox: SandboxInstance) => Promise<SdkMcpServerConfig | undefined>
+  ensureSnapshotBootstrap: (engine: WorkspaceSnapshotEngine, sandbox: SandboxInstance) => Promise<void>
+  onSnapshotEngine: (engine: WorkspaceSnapshotEngine | undefined) => void
   permissionStore?: PermissionStore
   clientToolNames: ReadonlySet<string>
   clientToolStore?: ClientToolResultStore
@@ -1325,11 +1343,14 @@ async function* runAskUserResume(args: RunAskUserResumeArgs): AsyncGenerator<Ses
   const {
     config,
     conversationId,
+    userId,
     toolUseId,
     answer,
     abortController,
     ensureSandbox,
     ensureCloudbaseMcp,
+    ensureSnapshotBootstrap,
+    onSnapshotEngine,
     permissionStore,
     clientToolNames,
     clientToolStore,
@@ -1368,9 +1389,12 @@ async function* runAskUserResume(args: RunAskUserResumeArgs): AsyncGenerator<Ses
     abortController,
     sessionId: conversationId,
     conversationId,
+    userId,
     isContinuation: true,
     ensureSandbox,
     ensureCloudbaseMcp,
+    ensureSnapshotBootstrap,
+    onSnapshotEngine,
     permissionStore,
     clientToolNames,
     clientToolStore,
