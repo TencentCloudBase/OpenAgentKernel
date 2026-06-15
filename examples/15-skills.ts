@@ -11,7 +11,7 @@
  *       OAK 启用 skills 时会把 'Skill' 工具加到 allowedTools(spec §4.1)。
  *
  * 运行前提:
- *   - .env.local 配置 TCB_ENV_ID + TENCENTCLOUD_TOKENHUB_API_KEY
+ *   - .env.local 配置 TCB_ENV_ID + TCB_API_KEY
  *
  * Run:
  *   pnpm dlx tsx packages/open-agent-kernel/examples/15-skills.ts

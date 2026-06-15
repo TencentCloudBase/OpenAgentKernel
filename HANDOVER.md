@@ -177,7 +177,7 @@ src/
 │   ├── event-translator.ts          # SDKMessage → SessionEvent 翻译
 │   └── prompt-builder.ts            # system prompt 构建
 ├── resources/
-│   ├── credential-provider.ts       # TokenHub 凭证加载
+│   ├── credential-provider.ts       # CloudBase AI gateway APIKey 加载
 │   └── name-resolver.ts             # envId → 集合名/函数名/网关 URL 派生
 ├── session-store/
 │   ├── cloudbase-session-store.ts   # CloudBaseSessionStore（SDK 协议层适配）
@@ -501,13 +501,12 @@ await session.clearHistory()
 | 变量 | 说明 |
 |---|---|
 | `TCB_ENV_ID` | CloudBase 环境 ID |
-| `TENCENTCLOUD_TOKENHUB_API_KEY` | 模型凭证（TokenHub） |
+| `TCB_API_KEY` | CloudBase 服务端 APIKey，用于模型网关；沙箱场景也复用为数据面长期 JWT |
 
 ### 可选
 
 | 变量 | 说明 |
 |---|---|
-| `TCB_API_KEY` | 沙箱数据面长期 JWT |
 | `TCB_REGION` | 区域（默认 `ap-shanghai`） |
 | `OAK_DEBUG` | 设为 `1` 启用调试日志 |
 | `CLOUDBASE_AGENT_MODEL` | 覆盖默认模型 |
@@ -529,11 +528,13 @@ await session.clearHistory()
 
 ### 凭证模式
 
-TokenHub Anthropic 协议接入文档：https://cloud.tencent.com/document/product/1823/130079
+默认模型请求走 CloudBase AI gateway：
+
+- `apiBaseUrl`: `https://${TCB_ENV_ID}.api.tcloudbasegateway.com/v1/ai/cloudbase`
+- `apiKey`: 优先读取 `TCB_API_KEY`，兼容 `CLOUDBASE_API_KEY`
 
 **模型选择规则**（重要）：
 - 默认模型一律使用 `glm-5.1`
-- 实测在 TokenHub Anthropic 协议下请求不通的模型：`deepseek-v3.1-terminus`、`deepseek-r1-0528`
 
 ---
 
@@ -820,7 +821,7 @@ createAgent({ credentials })
 
 #### 不改变的部分
 
-- `src/resources/credential-provider.ts` — 处理 TokenHub 模型 API Key，与 CloudBase 凭证无关，保持不变
+- `src/resources/credential-provider.ts` — 处理模型网关 API Key，默认优先复用 `TCB_API_KEY`
 - `src/sandbox/cloudbase-mcp.ts` — `injectCredentials()` 发送到 sandbox 的 HTTP body 已使用标准 key 名 `TENCENTCLOUD_SECRETID/SECRETKEY/SESSIONTOKEN`，保持不变
 - `src/sandbox/workspace-snapshot/init-client.ts` — 内部逻辑不变，但传入的 credential key 名需统一为标准名
 

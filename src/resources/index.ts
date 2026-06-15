@@ -7,7 +7,7 @@
 export {
   resolveResources,
   type ResolvedResources,
-  DEFAULT_TOKENHUB_BASE_URL,
+  defaultCloudBaseAiBaseUrl,
   DEFAULT_COLLECTION_PREFIX,
   DEFAULT_SANDBOX_FUNCTION_NAME,
 } from './name-resolver.js'

@@ -17,7 +17,7 @@
  *
  * 运行前提:
  *   - .env.local 配置 TCB_ENV_ID + TENCENTCLOUD_SECRETID + TENCENTCLOUD_SECRETKEY +
- *     TENCENTCLOUD_TOKENHUB_API_KEY
+ *     TCB_API_KEY
  *   - envId 对应的 CloudBase 已开通 COS
  *
  * Run:

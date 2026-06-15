@@ -27,7 +27,8 @@ const baseConfig: AgentConfig = {
 // 同时清除 host 可能存在的 CLAUDE_CONFIG_DIR(开发机会设),否则 ...process.env
 // 会让"未启用 userMemory"的断言看到非 undefined 值。
 beforeEach(() => {
-  process.env.TENCENTCLOUD_TOKENHUB_API_KEY = 'test-key'
+  process.env.TCB_API_KEY = 'test-key'
+  delete process.env.CLOUDBASE_API_KEY
   delete process.env.CLAUDE_CONFIG_DIR
 })
 

@@ -39,7 +39,7 @@ import { resolveCredential, type ResolvedCredential } from './credential-factory
 
 /**
  * 默认 API 超时（10 分钟）。
- * TokenHub 官方推荐值，避免长输出时被默认超时打断。
+ * CloudBase AI gateway 推荐值，避免长输出时被默认超时打断。
  * 参考：https://cloud.tencent.com/document/product/1823/130079
  */
 const DEFAULT_API_TIMEOUT_MS = 600_000

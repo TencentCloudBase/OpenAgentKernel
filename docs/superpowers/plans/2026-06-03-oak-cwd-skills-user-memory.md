@@ -1834,7 +1834,7 @@ git commit -m "feat(oak): hook userMemory sync engine into session.send/respondA
  *   3. agent 启动后该 skill 自动加载到 system prompt,可被 / 调用或被 LLM 选用
  *
  * 运行前提:
- *   - .env.local 配置 TCB_ENV_ID + TENCENTCLOUD_TOKENHUB_API_KEY
+ *   - .env.local 配置 TCB_ENV_ID + TCB_API_KEY
  *
  * Run:
  *   pnpm dlx tsx packages/open-agent-kernel/examples/15-skills.ts
@@ -1930,7 +1930,7 @@ git commit -m "docs(oak): add example 15 — skills via cwd"
  *   4. 创建第二个 conversation(同 userId)→ pull 拿到 memory → agent 主动想起咪咪
  *
  * 运行前提:
- *   - .env.local 配置 TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY + TENCENTCLOUD_TOKENHUB_API_KEY
+ *   - .env.local 配置 TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY + TCB_API_KEY
  *   - 该 envId 对应的 CloudBase 已开通 COS
  *
  * Run:

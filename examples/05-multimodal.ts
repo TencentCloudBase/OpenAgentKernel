@@ -6,7 +6,7 @@
  *   方式 B（调试）：OAK_STORAGE=memory 时显式使用 InMemoryStorage
  *
  * 凭证写在 examples/.env.local（从 .env.example 复制）：
- *   - TENCENTCLOUD_TOKENHUB_API_KEY 必需
+ *   - TCB_API_KEY 必需（CloudBase AI gateway）
  *   - 默认还需要 TCB_ENV_ID + TENCENTCLOUD_SECRETID + TENCENTCLOUD_SECRETKEY
  *
  * 运行：
@@ -30,7 +30,7 @@ async function main(): Promise<void> {
   const agent = createAgent({
     envId: process.env.TCB_ENV_ID ?? 'demo-env',
     ...(credentials ? { credentials } : {}),
-    // 视觉模型：glm-5v-turbo 已实测在 TokenHub Anthropic 协议下支持图片
+    // 视觉模型：需当前 CloudBase 环境已开通对应多模态模型
     model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5v-turbo',
     systemPrompt: 'You are a helpful image analysis assistant. Reply concisely in Chinese.',
     ...(storage ? { storage } : {}),

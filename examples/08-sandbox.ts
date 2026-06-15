@@ -7,8 +7,7 @@
  *   3. 让 agent 读回 README.md 验证
  *
  * 凭证写在 examples/.env.local（从 .env.example 复制）：
- *   - TENCENTCLOUD_TOKENHUB_API_KEY  模型凭证
- *   - TCB_API_KEY                     沙箱数据面长期 JWT
+ *   - TCB_API_KEY                     CloudBase AI gateway + 沙箱数据面长期 JWT
  *   - TCB_ENV_ID                      CloudBase 环境
  *   - TENCENTCLOUD_SECRETID / TENCENTCLOUD_SECRETKEY  控制面 AK/SK
  *

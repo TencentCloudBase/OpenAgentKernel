@@ -8,7 +8,7 @@
  *      把上次的 conversationId 传入，agent.resumeSession 从 DB 拉历史继续
  *
  * 凭证写在 examples/.env.local（从 .env.example 复制）：
- *   TENCENTCLOUD_TOKENHUB_API_KEY、TCB_ENV_ID、TENCENTCLOUD_SECRETID、TENCENTCLOUD_SECRETKEY
+ *   TCB_API_KEY、TCB_ENV_ID、TENCENTCLOUD_SECRETID、TENCENTCLOUD_SECRETKEY
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/04-multi-turn-db.ts

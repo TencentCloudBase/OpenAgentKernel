@@ -3,12 +3,8 @@
  *
  * v1.0 主方案 §6.1 派生规则的最小实现。
  *
- * 当前阶段（CloudBase 网关 Anthropic 协议未完全上线）：
- *   - 模型路由暂时走 **腾讯云 TokenHub**（https://tokenhub.tencentmaas.com）
- *   - envId 仅用于派生 CloudBase DB 集合名 / SCF 沙箱函数名
- *   - 等 CloudBase 网关 Anthropic 协议上线后，会切换到
- *     `https://${envId}.api.tcloudbasegateway.com/v1/anthropic`，
- *     用户代码零改动
+ * 模型路由走 CloudBase AI gateway：
+ *   `https://${envId}.api.tcloudbasegateway.com/v1/ai/cloudbase`
  *
  * 设计原则：
  *   - 所有派生规则集中在此模块，便于切换网关时改一处
@@ -18,14 +14,11 @@
 import type { ResourceConfig } from '../public/types.js'
 
 /**
- * 模型网关 baseURL —— 当前阶段固定走 TokenHub Anthropic 协议端点。
- *
- * TokenHub 文档：https://cloud.tencent.com/document/product/1823/130079
- *
- * @internal 等 CloudBase 网关上线后，改为 envId 派生：
- *   `https://${envId}.api.tcloudbasegateway.com/v1/anthropic`
+ * 模型网关 baseURL。
  */
-export const DEFAULT_TOKENHUB_BASE_URL = 'https://tokenhub.tencentmaas.com'
+export function defaultCloudBaseAiBaseUrl(envId: string): string {
+  return `https://${envId}.api.tcloudbasegateway.com/v1/ai/cloudbase`
+}
 
 /**
  * 默认 CloudBase DB 集合前缀
@@ -60,7 +53,7 @@ export function resolveResources(envId: string, overrides?: ResourceConfig): Res
   }
 
   return {
-    modelGatewayBaseUrl: overrides?.modelGatewayBaseUrl ?? DEFAULT_TOKENHUB_BASE_URL,
+    modelGatewayBaseUrl: overrides?.modelGatewayBaseUrl ?? defaultCloudBaseAiBaseUrl(envId),
     conversationCollection: overrides?.conversationCollection ?? `${DEFAULT_COLLECTION_PREFIX}_conversations`,
     messageCollection: overrides?.messageCollection ?? `${DEFAULT_COLLECTION_PREFIX}_messages`,
     sandboxFunctionName: overrides?.sandboxFunctionName ?? DEFAULT_SANDBOX_FUNCTION_NAME,

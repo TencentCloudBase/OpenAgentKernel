@@ -2,20 +2,19 @@
  * Credential factory: 把 AgentConfig 中的 envId + model + resources 派生为
  * Claude Agent SDK 启动子进程所需的环境变量。
  *
- * PR #3 阶段（CloudBase 网关 Anthropic 协议未完全上线）：
- *   - 模型路由走腾讯云 TokenHub（https://tokenhub.tencentmaas.com）
- *   - API Key 从 ModelSpec.apiKey / 环境变量加载
+ * 当前默认模型路由走 CloudBase AI gateway：
+ *   - baseURL = https://${envId}.api.tcloudbasegateway.com/v1/ai/cloudbase
+ *   - API Key 从 ModelSpec.apiKey / TCB_API_KEY 加载
  *
  * Claude Agent SDK 要求通过环境变量配置网关（不接受 options 直接传 baseURL/apiKey）：
- *   - `ANTHROPIC_BASE_URL`   ← TokenHub baseURL
- *   - `ANTHROPIC_AUTH_TOKEN` ← TokenHub API Key（注意不是 `ANTHROPIC_API_KEY`）
- *   - `API_TIMEOUT_MS`       ← 长输出超时（TokenHub 文档推荐 600_000）
+ *   - `ANTHROPIC_BASE_URL`   ← CloudBase AI gateway baseURL
+ *   - `ANTHROPIC_AUTH_TOKEN` ← CloudBase 环境服务端 APIKey（注意不是 `ANTHROPIC_API_KEY`）
+ *   - `API_TIMEOUT_MS`       ← 长输出超时（推荐 600_000）
  *   - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` ← 关闭非必要流量
  *
  * 设计原则：
  *   - 凭证流转仅在 kernel 内部，用户 API 不暴露 baseURL/apiKey 复杂度
- *   - envId 当前只用于资源命名派生（DB 集合 / SCF 函数等），
- *     未来切换到 CloudBase 网关时，envId 还会派生出 modelGatewayBaseUrl
+ *   - envId 用于资源命名派生，也用于默认 modelGatewayBaseUrl 派生
  */
 
 import type { ModelInput, ModelSpec, ResourceConfig } from '../public/types.js'
@@ -29,7 +28,7 @@ export interface ResolvedCredential {
   /** API key，通过 ANTHROPIC_AUTH_TOKEN 注入 */
   apiKey: string
   /** 凭证来源（诊断日志用） */
-  apiKeySource: 'config' | 'env_tokenhub' | 'env_cloudbase'
+  apiKeySource: 'config' | 'env_tcb_api_key' | 'env_cloudbase'
 }
 
 /**

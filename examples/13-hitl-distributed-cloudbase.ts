@@ -12,7 +12,7 @@
  *   - Example 13：跨实例 CloudBasePermissionStore（审批状态跨进程持久化）
  *
  * 凭证（examples/.env.local）：
- *   TENCENTCLOUD_TOKENHUB_API_KEY、TCB_ENV_ID、TENCENTCLOUD_SECRETID、TENCENTCLOUD_SECRETKEY
+ *   TCB_API_KEY、TCB_ENV_ID、TENCENTCLOUD_SECRETID、TENCENTCLOUD_SECRETKEY
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/13-hitl-distributed-cloudbase.ts

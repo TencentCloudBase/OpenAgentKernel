@@ -10,9 +10,8 @@
  *   6. clearHistory() 清除消息索引
  *
  * 前置条件：
- *   - TENCENTCLOUD_TOKENHUB_API_KEY（模型凭证）
+ *   - TCB_API_KEY（CloudBase AI gateway + 沙箱数据面 JWT）
  *   - TCB_ENV_ID + TENCENTCLOUD_SECRETID + TENCENTCLOUD_SECRETKEY（CloudBase 控制面）
- *   - TCB_API_KEY（沙箱数据面 JWT）
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/14-session-history.ts

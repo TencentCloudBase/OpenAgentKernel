@@ -366,11 +366,10 @@ const history = await session.getHistory({ limit: 20 })
 | 变量 | 说明 | 必需 |
 |------|------|:----:|
 | `TCB_ENV_ID` | CloudBase 环境 ID | ✅ |
-| `TENCENTCLOUD_TOKENHUB_API_KEY` | 模型凭证（TokenHub） | ✅ |
+| `TCB_API_KEY` | CloudBase 服务端 APIKey；用于模型网关，使用沙箱时也复用为数据面 JWT | ✅ |
 | `TENCENTCLOUD_SECRETID` | CloudBase AK | 使用 DB/沙箱/userMemory 时 |
 | `TENCENTCLOUD_SECRETKEY` | CloudBase SK | 使用 DB/沙箱/userMemory 时 |
 | `TENCENTCLOUD_SESSIONTOKEN` | 临时凭证 token | 使用 STS 临时凭证时 |
-| `TCB_API_KEY` | 沙箱数据面 JWT | 使用沙箱时 |
 | `OAK_DEBUG` | 设为 `1` 启用调试日志 | |
 
 ## CloudBase DB 集合
