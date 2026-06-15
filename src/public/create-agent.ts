@@ -9,18 +9,25 @@ import {
   InMemoryPermissionStore,
   type AskUserStore,
   type ClientToolResultStore,
+  CloudBaseDbPermissionDriver,
+  CloudBasePermissionStore,
   type PreToolUseHookLocalState,
 } from '../permissions/index.js'
 import { buildClaudeQueryOptions } from '../runtime/agent-builder.js'
 import { createTranslatorState, translateSdkMessage } from '../runtime/event-translator.js'
 import { buildPromptAsync } from '../runtime/prompt-builder.js'
 import { createCloudBaseMcpServer, type CloudBaseUserCredentials } from '../sandbox/cloudbase-mcp.js'
+import { AgsStatefulSandbox } from '../sandbox/index.js'
 import type { SandboxInstance, SandboxRuntime } from '../sandbox/types.js'
+import type { WorkspaceSnapshotEngine } from '../sandbox/workspace-snapshot/index.js'
+import { CloudBaseDbDriver, CloudBaseSessionStore } from '../session-store/index.js'
+import { CloudBaseStorage } from '../storage/cloudbase-storage.js'
 import type { StorageProvider } from '../storage/types.js'
 import type {
   Agent,
   AgentConfig,
   ApprovalDecision,
+  CloudBaseStorageConfig,
   MessagePart,
   MessageRecord,
   PermissionStore,
@@ -32,13 +39,15 @@ import type {
   SessionSummary,
 } from './types.js'
 
+type ResolvedPlatformCredentials = NonNullable<AgentConfig['credentials']> & { envId: string }
+
 /**
  * 创建 CloudBase Open Agent 实例。
  *
  * MVP 形态：服务端 kernel SDK，跟用户业务代码同进程。
  * 内部底层引擎为 Claude Agent SDK（@anthropic-ai/claude-agent-sdk），完全屏蔽。
  *
- * 当前版本：v0.1.0-alpha.0
+ * 当前版本跟随 package.json（见 src/version.ts）。
  * 已支持：
  *   - startSession / resumeSession / session.send（PR #4）
  *   - 多模态输入（PR #4.5）
@@ -64,6 +73,8 @@ export function createAgent(config: AgentConfig): Agent {
       }
     }
   }
+
+  config = normalizeAgentConfig(config)
 
   const agentId = randomUUID()
   const sessionsManagement = createSessionsManagement(config)
@@ -107,6 +118,188 @@ export function createAgent(config: AgentConfig): Agent {
   return agent
 }
 
+function normalizeAgentConfig(config: AgentConfig): AgentConfig {
+  const credentials = resolvePlatformCredentials(config)
+  const normalizedConfig: AgentConfig = {
+    ...config,
+    ...(credentials ? { credentials } : {}),
+    sandbox: resolveSandboxConfig(config),
+    storage: resolveStorageConfig(config),
+  }
+
+  return {
+    ...normalizedConfig,
+    permissions: resolvePermissionConfig(normalizedConfig),
+    session: resolveSessionConfig(normalizedConfig),
+  }
+}
+
+function resolvePlatformCredentials(config: AgentConfig): ResolvedPlatformCredentials | undefined {
+  const credentials = config.credentials
+  if (!credentials) return undefined
+
+  return {
+    ...credentials,
+    envId: credentials.envId ?? config.envId,
+  }
+}
+
+function resolveSandboxConfig(config: AgentConfig): AgentConfig['sandbox'] {
+  const sandbox = config.sandbox
+  if (!sandbox || sandbox.enabled === false) return undefined
+
+  if (sandbox.runtime) return sandbox
+
+  const provider = sandbox.provider ?? 'ags-stateful'
+  if (provider !== 'ags-stateful') {
+    throw new InvalidConfigError(
+      `AgentConfig.sandbox.provider="${provider}" is not supported yet. ` +
+        'The built-in sandbox currently supports provider="ags-stateful". ' +
+        'Pass a custom SandboxRuntime via AgentConfig.sandbox.runtime for advanced scenarios.',
+    )
+  }
+
+  const apiKey = sandbox.apiKey ?? process.env.TCB_API_KEY ?? process.env.OAK_SANDBOX_API_KEY
+  if (!apiKey) {
+    throw new InvalidConfigError(
+      'AgentConfig.sandbox.enabled=true requires sandbox.apiKey, TCB_API_KEY, or OAK_SANDBOX_API_KEY ' +
+        'for the default AgsStatefulSandbox runtime.',
+    )
+  }
+
+  return {
+    ...sandbox,
+    enabled: true,
+    provider,
+    runtime: new AgsStatefulSandbox({ apiKey }),
+    scope: sandbox.scope ?? 'shared',
+  }
+}
+
+function isStorageProvider(value: unknown): value is StorageProvider {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { resolveAttachment?: unknown }).resolveAttachment === 'function'
+  )
+}
+
+function resolveStorageConfig(config: AgentConfig): StorageProvider | undefined {
+  const storage = config.storage
+  const credentials = resolvePlatformCredentials(config)
+
+  if (storage === undefined) {
+    return credentials ? new CloudBaseStorage({ credentials }) : undefined
+  }
+
+  if (isStorageProvider(storage)) {
+    return storage
+  }
+
+  if (typeof storage !== 'object' || storage === null) {
+    throw new InvalidConfigError(
+      'AgentConfig.storage must be a CloudBase storage config object or StorageProvider instance.',
+    )
+  }
+
+  const storageConfig = storage as CloudBaseStorageConfig
+
+  if (storageConfig.enabled === false) {
+    return undefined
+  }
+
+  const provider = storageConfig.provider ?? 'cloudbase'
+  if (provider !== 'cloudbase') {
+    throw new InvalidConfigError(
+      `AgentConfig.storage.provider="${provider}" is not supported yet. ` +
+        'The built-in storage currently supports provider="cloudbase". ' +
+        'Pass a custom StorageProvider instance for advanced scenarios.',
+    )
+  }
+
+  if (!credentials) {
+    throw new InvalidConfigError(
+      'AgentConfig.storage provider="cloudbase" requires AgentConfig.credentials for the default CloudBase Storage.',
+    )
+  }
+
+  return new CloudBaseStorage({
+    credentials,
+    pathPrefix: storageConfig.pathPrefix,
+    urlExpiresIn: storageConfig.urlExpiresIn,
+  })
+}
+
+function resolveSessionConfig(config: AgentConfig): AgentConfig['session'] {
+  const session = config.session
+  if (session?.enabled === false) return undefined
+
+  if (session?.store) {
+    return session
+  }
+
+  const shouldEnable = session?.enabled === true || config.credentials !== undefined
+  if (!shouldEnable) return session
+
+  const provider = session?.provider ?? 'cloudbase'
+  if (provider !== 'cloudbase') {
+    throw new InvalidConfigError(
+      `AgentConfig.session.provider="${provider}" is not supported yet. ` +
+        'The built-in session store currently supports CloudBase resources only. ' +
+        'Pass a custom SessionStore via AgentConfig.session.store for advanced scenarios.',
+    )
+  }
+  const database = session?.database ?? 'flexdb'
+  if (database !== 'flexdb') {
+    throw new InvalidConfigError(
+      `AgentConfig.session.database="${database}" is reserved for future CloudBase support. ` +
+        'The built-in session store currently supports database="flexdb".',
+    )
+  }
+  const credentials = resolvePlatformCredentials(config)
+  if (!credentials) {
+    throw new InvalidConfigError(
+      'AgentConfig.session.enabled=true requires AgentConfig.credentials for the default CloudBase FlexDB session store.',
+    )
+  }
+
+  const projectKey = session?.projectKey ?? config.envId
+  const store = new CloudBaseSessionStore({
+    driver: new CloudBaseDbDriver({
+      credentials,
+      collectionPrefix: session?.tablePrefix,
+    }),
+    projectKey,
+  })
+
+  return {
+    ...session,
+    provider,
+    database,
+    projectKey,
+    store,
+  }
+}
+
+function resolvePermissionConfig(config: AgentConfig): AgentConfig['permissions'] {
+  const permissions = config.permissions
+  if (!permissions || permissions.requireApproval === undefined || permissions.store) return permissions
+
+  const credentials = resolvePlatformCredentials(config)
+  if (!credentials) return permissions
+
+  return {
+    ...permissions,
+    store: new CloudBasePermissionStore({
+      projectKey: config.envId,
+      driver: new CloudBaseDbPermissionDriver({
+        credentials,
+        collectionPrefix: permissions.tablePrefix,
+      }),
+    }),
+  }
+}
+
 // ============================================================
 // 内部：Session 实现
 // ============================================================
@@ -131,7 +324,15 @@ function createSession(deps: SessionDeps): Session {
   let cloudbaseMcpServer: SdkMcpServerConfig | undefined
   let cloudbaseMcpPromise: Promise<SdkMcpServerConfig | undefined> | undefined
 
-  // PR #7.0：审批 store（默认 InMemoryPermissionStore，进程内单例）。
+  // Spec B(Task 8):workspace snapshot engine 由 buildClaudeQueryOptions 在
+  // 第一次 send 时构造并通过本闭包变量记录。bootstrap 仅执行一次(首次 acquire 之后)。
+  // 注意:engine 本身是无状态构造,跨 send 持有同一个实例没有副作用。
+  let sessionSnapshotEngine: WorkspaceSnapshotEngine | undefined
+  let snapshotBootstrapped = false
+  let snapshotBootstrapPromise: Promise<void> | undefined
+
+  // PR #7.0/7.1：审批 store 已在 normalizeAgentConfig 中按 credentials 默认 CloudBase 化；
+  // 未提供 credentials 时仍回落到进程内单例。
   // 仅在用户配了 requireApproval 时启用；不配则 hook 整体不注入。
   const permissionStore: PermissionStore | undefined =
     config.permissions?.requireApproval !== undefined
@@ -159,7 +360,9 @@ function createSession(deps: SessionDeps): Session {
     if (!sandboxAcquirePromise) {
       sandboxAcquirePromise = sandboxRuntime.acquire({
         envId: config.envId,
+        credentials: config.credentials,
         conversationId,
+        userId,
         scope: config.sandbox?.scope ?? 'session',
         onProgress: (msg) => {
           if (process.env.OAK_DEBUG === '1') {
@@ -205,6 +408,48 @@ function createSession(deps: SessionDeps): Session {
     return cloudbaseMcpServer
   }
 
+  /**
+   * Spec B(Task 8):workspace snapshot 首次 bootstrap。
+   *
+   * - 仅当 buildClaudeQueryOptions 返回了 snapshotEngine(spec resolves to enabled)时执行
+   * - 仅在首次 send 触发(snapshotBootstrapped flag),后续 send 跳过
+   * - 凭证形态对齐 cloudbase-mcp.ts 的 PUT /api/workspace/env(Spec B 镜像端把这份 env
+   *   持久化为 .workspace-env.json,init body 的 env 必须跟它语义一致)
+   *
+   * 失败处理:bootstrap 抛出(SandboxRestoreFailed / 网络错误)时让异常向上冒,
+   * 由 runClaudeQuery 的 catch 块翻译为 'error' 事件 + session_idle('error')。
+   * 这是 spec §6.2"restore failed → 视为致命"行为。
+   */
+  async function ensureSnapshotBootstrap(engine: WorkspaceSnapshotEngine, sandbox: SandboxInstance): Promise<void> {
+    if (snapshotBootstrapped) return
+    if (!snapshotBootstrapPromise) {
+      snapshotBootstrapPromise = (async () => {
+        const creds = await resolveUserCredentials(config)
+        const envBag: Record<string, string> = {
+          CLOUDBASE_ENV_ID: creds.envId,
+          TENCENTCLOUD_SECRETID: creds.secretId,
+          TENCENTCLOUD_SECRETKEY: creds.secretKey,
+          TENCENTCLOUD_SESSIONTOKEN: creds.sessionToken ?? '',
+        }
+        await engine.bootstrap(sandbox, { credentials: envBag })
+        snapshotBootstrapped = true
+      })()
+    }
+    try {
+      await snapshotBootstrapPromise
+    } catch (err) {
+      // 失败一次后清理 promise,允许下次 send 重试(graceful)
+      snapshotBootstrapPromise = undefined
+      throw err
+    }
+  }
+
+  function onSnapshotEngine(engine: WorkspaceSnapshotEngine | undefined): void {
+    if (engine && !sessionSnapshotEngine) {
+      sessionSnapshotEngine = engine
+    }
+  }
+
   const session: Session = {
     id: conversationId,
     userId,
@@ -219,9 +464,12 @@ function createSession(deps: SessionDeps): Session {
         abortController,
         sessionId: conversationId,
         conversationId,
+        userId,
         isContinuation,
         ensureSandbox,
         ensureCloudbaseMcp,
+        ensureSnapshotBootstrap,
+        onSnapshotEngine,
         permissionStore,
         ...(clientToolNames.size > 0 ? { clientToolNames } : {}),
         ...(clientToolStore ? { clientToolStore } : {}),
@@ -244,11 +492,14 @@ function createSession(deps: SessionDeps): Session {
       return runApprovalResume({
         config,
         conversationId,
+        userId,
         toolUseId: opts.toolUseId,
         decision: opts.decision,
         abortController,
         ensureSandbox,
         ensureCloudbaseMcp,
+        ensureSnapshotBootstrap,
+        onSnapshotEngine,
         permissionStore,
         ...(clientToolNames.size > 0 ? { clientToolNames } : {}),
         ...(clientToolStore ? { clientToolStore } : {}),
@@ -408,6 +659,56 @@ function createSession(deps: SessionDeps): Session {
         sandboxInstance = undefined
         sandboxAcquirePromise = undefined
       }
+    },
+
+    /**
+     * Spec B 新增。手动触发一次 workspace snapshot。
+     *
+     * - workspaceSnapshot 未启用 / 沙箱尚未 acquire → 返回 { ms: 0, skipped: true }
+     * - 启用且沙箱已就绪 → 转发到 WorkspaceSnapshotEngine.snapshot(inst)
+     *
+     * 失败一律向上抛(业务方主动调用,理应感知错误);自动 send-end snapshot 失败
+     * 则在 generator 内 yield warning(见 runClaudeQuery finally 块)。
+     */
+    async snapshotWorkspace(): Promise<{ ms: number; skipped?: boolean }> {
+      if (!sessionSnapshotEngine || !sandboxInstance) {
+        return { ms: 0, skipped: true }
+      }
+      return sessionSnapshotEngine.snapshot(sandboxInstance)
+    },
+
+    /**
+     * Spec B 新增。查询本 session 启动时的 restore 状态。
+     *
+     * **调用时机**：必须在 send() 之后调用（sandbox / snapshotEngine 为懒初始化）。
+     * send() 前调用始终返回 null。
+     *
+     * - sandbox 未就绪 / snapshotEngine 未创建 → null
+     * - /health 暂不可用或 restoreStatus 字段为空 → null(graceful)
+     */
+    async getRestoreStatus(): Promise<'full' | 'fresh' | 'partial' | 'failed' | null> {
+      if (!sessionSnapshotEngine) {
+        if (process.env.OAK_DEBUG === '1') {
+          // eslint-disable-next-line no-console
+          console.error(
+            '[oak][getRestoreStatus] NULL PATH ①: sessionSnapshotEngine not yet created — call send() first',
+          )
+        }
+        return null
+      }
+      if (!sandboxInstance) {
+        if (process.env.OAK_DEBUG === '1') {
+          // eslint-disable-next-line no-console
+          console.error('[oak][getRestoreStatus] NULL PATH ①: sandboxInstance not yet acquired — call send() first')
+        }
+        return null
+      }
+      const status = await sessionSnapshotEngine.getRestoreStatus(sandboxInstance)
+      if (process.env.OAK_DEBUG === '1') {
+        // eslint-disable-next-line no-console
+        console.error(`[oak][getRestoreStatus] result=${status}`)
+      }
+      return status
     },
   }
 
@@ -653,9 +954,14 @@ interface RunClaudeQueryArgs {
   abortController: AbortController
   sessionId: string
   conversationId: string
+  userId: string
   isContinuation: boolean
   ensureSandbox: () => Promise<SandboxInstance | undefined>
   ensureCloudbaseMcp: (sandbox: SandboxInstance) => Promise<SdkMcpServerConfig | undefined>
+  /** Spec B(Task 8):首次 send 时执行 snapshot bootstrap(restore)*/
+  ensureSnapshotBootstrap: (engine: WorkspaceSnapshotEngine, sandbox: SandboxInstance) => Promise<void>
+  /** Spec B(Task 8):把 buildClaudeQueryOptions 拿到的 engine 上抛给 session 闭包 */
+  onSnapshotEngine: (engine: WorkspaceSnapshotEngine | undefined) => void
   permissionStore?: PermissionStore
   /** PR #7.1: names of user-defined client-side tools (config.tools[].name set). */
   clientToolNames?: ReadonlySet<string>
@@ -672,9 +978,12 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
     abortController,
     sessionId,
     conversationId,
+    userId,
     isContinuation,
     ensureSandbox,
     ensureCloudbaseMcp,
+    ensureSnapshotBootstrap,
+    onSnapshotEngine,
     permissionStore,
     clientToolNames,
     clientToolStore,
@@ -682,8 +991,15 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
   } = args
 
   let q: ReturnType<typeof claudeQuery> | undefined
+  let syncEngine: ReturnType<typeof buildClaudeQueryOptions>['syncEngine']
+  let snapshotEngine: ReturnType<typeof buildClaudeQueryOptions>['snapshotEngine']
+  let sandbox: SandboxInstance | undefined
+  // Spec B(Task 8):仅当 snapshot bootstrap 成功完成(或无需 bootstrap)时才置 true。
+  // 若 bootstrap 抛错(SandboxRestoreFailed / 网络),finally 必须跳过 send-end snapshot,
+  // 否则会在 broken state 上再花 30s timeout 做 snapshot,可能把不完整状态推上 COS。
+  let bootstrapOk = false
   try {
-    const sandbox = await ensureSandbox()
+    sandbox = await ensureSandbox()
     const cloudbaseMcp = sandbox ? await ensureCloudbaseMcp(sandbox) : undefined
 
     // PR #7.0：构造一轮的 hook 本地状态（同 query 内闭包共享）
@@ -693,7 +1009,7 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
     const effectivePermissions = config.permissions ? { ...config.permissions, store: permissionStore } : undefined
     const effectiveConfig = effectivePermissions ? { ...config, permissions: effectivePermissions } : config
 
-    const { options } = buildClaudeQueryOptions(effectiveConfig, {
+    const built = buildClaudeQueryOptions(effectiveConfig, {
       sandboxInstance: sandbox,
       extraMcpServers: cloudbaseMcp ? { cloudbase: cloudbaseMcp } : undefined,
       conversationId,
@@ -701,7 +1017,36 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
       ...(clientToolNames ? { clientToolNames } : {}),
       ...(clientToolStore ? { clientToolStore } : {}),
       ...(askUserStore ? { askUserStore } : {}),
+      userId,
     })
+    const options = built.options
+    syncEngine = built.syncEngine
+    snapshotEngine = built.snapshotEngine
+    onSnapshotEngine(snapshotEngine)
+
+    // ── Spec B(Task 8):workspace snapshot bootstrap(首次 send + 启用时)───
+    // 必须在 claudeQuery() 之前执行,否则模型可能在 restore 完成前就读到空 cwd。
+    // 失败(SandboxRestoreFailed / 网络错误)向上冒,被外层 catch 翻成 error 事件;
+    // bootstrapOk 保持 false,finally 跳过 send-end snapshot。
+    if (snapshotEngine && sandbox) {
+      await ensureSnapshotBootstrap(snapshotEngine, sandbox)
+      bootstrapOk = true
+    } else {
+      // 没有 engine 或没有 sandbox = 没有 bootstrap 要做,后续 finally 的
+      // snapshot 分支条件本身也会被跳过,这里置 true 仅为语义自洽。
+      bootstrapOk = true
+    }
+
+    // ── userMemory: send-start pull(失败不抛,记 warning)───
+    if (syncEngine) {
+      try {
+        await syncEngine.pullOnSendStart()
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[oak/userMemory] pullOnSendStart failed:', (err as Error)?.message)
+      }
+    }
+
     const storage = extractStorageProvider(config)
     const promptStream = buildPromptAsync({
       input,
@@ -729,6 +1074,39 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
       error: err instanceof Error ? err : new Error(String(err)),
     }
     yield { type: 'session_idle', reason: 'error' }
+  } finally {
+    // ── userMemory: send-end push(abort/异常都触发,失败不抛)───
+    if (syncEngine) {
+      try {
+        await syncEngine.pushOnSendEnd()
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[oak/userMemory] pushOnSendEnd failed:', (err as Error)?.message)
+      }
+    }
+
+    // ── Spec B(Task 8):send-end workspace snapshot(失败 yield warning,不抹答案)──
+    // Spec §6.1 提到 oak_workspace_snapshot_duration_ms metric;OAK 当前还没 metrics
+    // 框架,留 TODO 等专门 PR 接入(写到 console.error 用于诊断)。
+    // bootstrapOk 守门:若 bootstrap 抛了错,沙箱状态可能不完整,继续 snapshot 会把
+    // 残缺状态推上 COS,且白白花 30s 网络 timeout。
+    if (snapshotEngine && sandbox && bootstrapOk) {
+      try {
+        const result = await snapshotEngine.snapshot(sandbox)
+        if (process.env.OAK_DEBUG === '1') {
+          // eslint-disable-next-line no-console
+          console.error(`[oak][workspace-snapshot] ms=${result.ms}`)
+        }
+        // TODO(metrics):emit oak_workspace_snapshot_duration_ms histogram(spec §6.1)
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err)
+        // OAK SessionEvent union 暂无独立 'warning' 成员;复用 'error' 事件传递,
+        // 用确定性错误名让上层(协议适配 / 业务 logger)能识别为非致命快照警告。
+        const warning = new Error(`workspace_snapshot_failed: ${reason}`)
+        warning.name = 'WorkspaceSnapshotFailedWarning'
+        yield { type: 'error', error: warning }
+      }
+    }
   }
 }
 
@@ -739,11 +1117,14 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
 interface RunApprovalResumeArgs {
   config: AgentConfig
   conversationId: string
+  userId: string
   toolUseId: string
   decision: ApprovalDecision
   abortController: AbortController
   ensureSandbox: () => Promise<SandboxInstance | undefined>
   ensureCloudbaseMcp: (sandbox: SandboxInstance) => Promise<SdkMcpServerConfig | undefined>
+  ensureSnapshotBootstrap: (engine: WorkspaceSnapshotEngine, sandbox: SandboxInstance) => Promise<void>
+  onSnapshotEngine: (engine: WorkspaceSnapshotEngine | undefined) => void
   permissionStore?: PermissionStore
   clientToolNames?: ReadonlySet<string>
   clientToolStore?: ClientToolResultStore
@@ -754,11 +1135,14 @@ async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<S
   const {
     config,
     conversationId,
+    userId,
     toolUseId,
     decision,
     abortController,
     ensureSandbox,
     ensureCloudbaseMcp,
+    ensureSnapshotBootstrap,
+    onSnapshotEngine,
     permissionStore,
     clientToolNames,
     clientToolStore,
@@ -781,9 +1165,7 @@ async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<S
   if (!existing) {
     yield {
       type: 'error',
-      error: new ResourceError(
-        `No pending approval found for toolUseId=${toolUseId}. ` + 'It may have expired or already been resolved.',
-      ),
+      error: new ResourceError('No pending approval found. It may have expired or already been resolved.'),
     }
     yield { type: 'session_idle', reason: 'error' }
     return
@@ -810,9 +1192,12 @@ async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<S
     abortController,
     sessionId: conversationId,
     conversationId,
+    userId,
     isContinuation: true,
     ensureSandbox,
     ensureCloudbaseMcp,
+    ensureSnapshotBootstrap,
+    onSnapshotEngine,
     permissionStore,
     ...(clientToolNames ? { clientToolNames } : {}),
     ...(clientToolStore ? { clientToolStore } : {}),
@@ -1077,25 +1462,22 @@ async function resolveUserCredentials(config: AgentConfig): Promise<CloudBaseUse
     }
   }
 
-  const envSecretId = process.env.TCB_SECRET_ID ?? process.env.TENCENTCLOUD_SECRET_ID ?? ''
-  const envSecretKey = process.env.TCB_SECRET_KEY ?? process.env.TENCENTCLOUD_SECRET_KEY ?? ''
-  const envSessionToken = process.env.TCB_TOKEN ?? process.env.TENCENTCLOUD_SESSIONTOKEN
-  const envEnvId = process.env.TCB_ENV_ID ?? config.envId
+  const platformCreds = config.credentials
 
-  if (!envSecretId || !envSecretKey) {
+  if (!platformCreds?.secretId || !platformCreds.secretKey) {
     throw new InvalidConfigError(
       'CloudBase MCP tools require user credentials. ' +
         'Either set AgentConfig.sandbox.userCredentials, ' +
-        'or set process.env TCB_SECRET_ID + TCB_SECRET_KEY. ' +
+        'or pass AgentConfig.credentials. ' +
         'To disable cloudbase tools entirely, pass `sandbox: { cloudbaseTools: false }`.',
     )
   }
 
   return {
-    envId: envEnvId,
-    secretId: envSecretId,
-    secretKey: envSecretKey,
-    sessionToken: envSessionToken,
+    envId: platformCreds.envId || config.envId,
+    secretId: platformCreds.secretId,
+    secretKey: platformCreds.secretKey,
+    sessionToken: platformCreds.sessionToken,
   }
 }
 

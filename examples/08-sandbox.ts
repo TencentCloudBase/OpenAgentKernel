@@ -6,11 +6,9 @@
  *   2. 让 agent 跑 `ls` 列目录
  *   3. 让 agent 读回 README.md 验证
  *
- * 凭证写在 examples/.env.local（从 .env.example 复制）：
- *   - TENCENTCLOUD_TOKENHUB_API_KEY  模型凭证
- *   - TCB_API_KEY                     沙箱数据面长期 JWT
- *   - TCB_ENV_ID                      CloudBase 环境
- *   - TCB_SECRET_ID / TCB_SECRET_KEY  控制面 AK/SK
+ * 配置：
+ *   - examples/config.local.json
+ *   - examples/config.local.json: envId / model / credentials
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/08-sandbox.ts
@@ -19,27 +17,26 @@
  *   - 第一次运行会触发 CreateSandboxTool（~30s）+ StartSandboxInstance（~30-60s）
  *   - 之后同一 envId 会复用 ToolId（内存 cache），但每个 session 仍会启新实例
  */
-import './_shared/env.js'
+import { getEnvId, getModel, getPlatformCredentials } from './_shared/env.js'
 
-import { createAgent, AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
+import { createAgent } from '@cloudbase/open-agent-kernel'
 
 async function main(): Promise<void> {
-  const envId = process.env.TCB_ENV_ID
-  if (!envId) {
-    throw new Error('TCB_ENV_ID is required (set it in examples/.env.local)')
-  }
+  const envId = getEnvId()
+  const credentials = getPlatformCredentials()
 
   const agent = createAgent({
     envId,
-    model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
+    credentials,
+    model: getModel(),
     systemPrompt:
       'You are a helpful coding assistant working inside a sandbox. ' +
       'You have access to bash / read / write tools (mcp__sandbox__*). ' +
       'Always use the tools to interact with the filesystem—never fabricate output. ' +
       'Reply concisely in Chinese.',
     sandbox: {
-      runtime: new AgsStatefulSandbox(),
-      // PR #6A 默认 isolated 模式（每个 session 一个独立实例）
+      enabled: true,
+      // 默认使用 AgsStatefulSandbox + scope: 'shared'
     },
   })
 

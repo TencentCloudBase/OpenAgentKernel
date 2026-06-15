@@ -2,36 +2,36 @@
  * 05-multimodal.ts —— 多模态输入演示（图片 + 文字 → 视觉模型）
  *
  * 演示路径：
- *   方式 A（默认）：InMemoryStorage —— 把图片读成 Buffer → base64 → SDK 直接吃
- *   方式 B（生产）：CloudBaseStorage —— 上传到 CloudBase 云存储 → SDK 用签名 URL 引用
+ *   方式 A（默认）：传入 credentials 后，createAgent 自动使用 CloudBase Storage
+ *   方式 B（调试）：OAK_STORAGE=memory 时显式使用 InMemoryStorage
  *
- * 凭证写在 examples/.env.local（从 .env.example 复制）：
- *   - TENCENTCLOUD_TOKENHUB_API_KEY 必需
- *   - OAK_STORAGE=cloudbase 时还需要 TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY
+ * 配置：examples/config.local.json（见 config.example.json）
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/05-multimodal.ts
  */
-import './_shared/env.js'
+import { getEnvId, getExampleImagePath, getExampleStorage, getModel, getPlatformCredentials } from './_shared/env.js'
 
 import * as path from 'node:path'
-import { CloudBaseStorage, InMemoryStorage, createAgent } from '@cloudbase/open-agent-kernel'
+import { InMemoryStorage, createAgent } from '@cloudbase/open-agent-kernel'
 
 async function main(): Promise<void> {
-  const useCloudBaseStorage = process.env.OAK_STORAGE === 'cloudbase'
-  const storage = useCloudBaseStorage ? new CloudBaseStorage() : new InMemoryStorage()
-  const storageName = useCloudBaseStorage ? 'CloudBaseStorage' : 'InMemoryStorage'
+  const useInMemoryStorage = getExampleStorage() === 'memory'
+  const credentials = useInMemoryStorage ? undefined : getPlatformCredentials()
+  const storage = useInMemoryStorage ? new InMemoryStorage() : undefined
+  const storageName = useInMemoryStorage ? 'InMemoryStorage' : 'CloudBaseStorage(default)'
 
   // 默认用项目根目录的 screenshot.png（一张产品截图，模型应该能识别出 UI 元素）
-  const defaultImage = path.resolve(new URL('../../../', import.meta.url).pathname, 'screenshot.png')
-  const imagePath = process.env.OAK_IMAGE_PATH ?? defaultImage
+  const defaultImage = path.resolve(new URL('./', import.meta.url).pathname, 'cloud.png')
+  const imagePath = getExampleImagePath() ?? defaultImage
 
   const agent = createAgent({
-    envId: process.env.TCB_ENV_ID ?? 'demo-env',
-    // 视觉模型：glm-5v-turbo 已实测在 TokenHub Anthropic 协议下支持图片
-    model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5v-turbo',
+    envId: getEnvId(),
+    ...(credentials ? { credentials } : {}),
+    // 视觉模型：需当前 CloudBase 环境已开通对应多模态模型
+    model: getModel('glm-5v-turbo'),
     systemPrompt: 'You are a helpful image analysis assistant. Reply concisely in Chinese.',
-    storage,
+    ...(storage ? { storage } : {}),
   })
 
   console.log(`[storage] using ${storageName}`)

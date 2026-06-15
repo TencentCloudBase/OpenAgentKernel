@@ -5,31 +5,25 @@
  *   - 节点 A（agentA）发起 send → hook 命中 requireApproval → 写 pending entry 到 CloudBase DB → 流终止
  *   - 节点 B（agentB）拿到 toolUseId → respondApproval 写 decision 到同一行 → resume → 工具放行
  *   - agentA 和 agentB 是两个独立的 createAgent 实例，模拟"分布式部署 / 跨节点 / 跨进程"
- *   - 两个 agent 共享同一份 CloudBaseSessionStore（transcript 持久化） + CloudBasePermissionStore
- *     （审批状态持久化），是分布式 HITL 必须的两份外部状态
+ *   - 传入 credentials 后，createAgent 默认启用 CloudBase FlexDB session store 和 permission store
  *
  * 与 Example 11 的关键区别：
  *   - Example 11：单进程内 InMemoryPermissionStore（审批状态在内存）
  *   - Example 13：跨实例 CloudBasePermissionStore（审批状态跨进程持久化）
  *
- * 凭证（examples/.env.local）：
- *   TENCENTCLOUD_TOKENHUB_API_KEY、TCB_ENV_ID、TCB_SECRET_ID、TCB_SECRET_KEY
+ * 配置：
+ *   - examples/config.local.json
+ *   - examples/config.local.json: envId / model / credentials
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/13-hitl-distributed-cloudbase.ts
  *
  * 验证 DB：
- *   在 CloudBase 控制台 → 数据库 → 看 oak_permissions 集合（pending / decided 都会落到这里）
+ *   在 CloudBase 控制台 → 数据库 → 看 oak_state 集合（pending / decided 都会落到这里）
  */
-import './_shared/env.js'
+import { getEnvId, getModel, getPlatformCredentials } from './_shared/env.js'
 
-import {
-  CloudBaseDbDriver,
-  CloudBaseDbPermissionDriver,
-  CloudBasePermissionStore,
-  CloudBaseSessionStore,
-  createAgent,
-} from '@cloudbase/open-agent-kernel'
+import { createAgent } from '@cloudbase/open-agent-kernel'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod'
 
@@ -39,7 +33,7 @@ const dangerousTools = createSdkMcpServer({
   tools: [
     tool(
       'deleteFile',
-      'Delete a file from the filesystem (DANGEROUS — should always require approval).',
+      'Simulate deleting a file from the filesystem. Call this tool when the user asks to delete a file; the platform permission hook handles approval.',
       { path: z.string().describe('Absolute path to the file to delete') },
       async (args) => ({
         content: [{ type: 'text', text: `Deleted ${args.path} (simulated, nothing actually deleted).` }],
@@ -49,36 +43,25 @@ const dangerousTools = createSdkMcpServer({
 })
 
 async function main(): Promise<void> {
-  const envId = process.env.TCB_ENV_ID
-  if (!envId) {
-    throw new Error('TCB_ENV_ID is required (set it in examples/.env.local)')
-  }
-
-  // ─── 共享后端：两个 agent 实例共用同一份 CloudBase DB ──────────────
-  const sessionStore = new CloudBaseSessionStore({
-    driver: new CloudBaseDbDriver(),
-    projectKey: envId,
-  })
-  const permissionStore = new CloudBasePermissionStore({
-    driver: new CloudBaseDbPermissionDriver(),
-    projectKey: envId,
-  })
+  const envId = getEnvId()
+  const credentials = getPlatformCredentials()
 
   // ─── 节点 A：发起 send，触发审批 ──────────────────────────────────
   console.log('=== 节点 A：startSession + send，触发审批 ===\n')
   const agentA = createAgent({
     envId,
-    model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
+    credentials,
+    model: getModel(),
     systemPrompt:
       'You are a helpful assistant with one tool: ' +
-      'mcp__fs__deleteFile (DANGEROUS). ' +
-      'When the user asks to delete files, call deleteFile. ' +
+      'mcp__fs__deleteFile. ' +
+      'When the user asks to delete files, call deleteFile directly. ' +
+      'Do not ask the user for confirmation yourself; the platform permission hook will pause the tool call for approval. ' +
       'Reply concisely in Chinese.',
     mcpServers: { fs: dangerousTools },
-    session: { store: sessionStore },
     permissions: {
       requireApproval: 'mcp__fs__deleteFile',
-      store: permissionStore, // ⚡ PR #7.1 关键：分布式 store
+      // 有 credentials 时默认使用 CloudBase FlexDB 分布式 permission store。
     },
   })
 
@@ -116,29 +99,22 @@ async function main(): Promise<void> {
     return
   }
 
-  // ─── 验证：审批状态确实落到 CloudBase DB ──────────────────────────
-  const dbEntry = await permissionStore.get({
-    conversationId,
-    toolUseId: pendingApproval.toolUseId,
-  })
-  console.log('\n--- 验证：DB 里的 pending entry ---')
-  console.log(JSON.stringify(dbEntry, null, 2))
-
-  // ─── 节点 B：另一个 agent 实例，共享 store，注入决策并 resume ──────
+  // ─── 节点 B：另一个 agent 实例，使用同一 envId 的默认 CloudBase store，注入决策并 resume ──────
   console.log('\n=== 节点 B：另一个 agent 实例 resume + respondApproval ===\n')
   const agentB = createAgent({
     envId,
-    model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
+    credentials,
+    model: getModel(),
     systemPrompt:
       'You are a helpful assistant with one tool: ' +
-      'mcp__fs__deleteFile (DANGEROUS). ' +
-      'When the user asks to delete files, call deleteFile. ' +
+      'mcp__fs__deleteFile. ' +
+      'When the user asks to delete files, call deleteFile directly. ' +
+      'Do not ask the user for confirmation yourself; the platform permission hook will pause the tool call for approval. ' +
       'Reply concisely in Chinese.',
     mcpServers: { fs: dangerousTools },
-    session: { store: sessionStore }, // 共享 transcript
     permissions: {
       requireApproval: 'mcp__fs__deleteFile',
-      store: permissionStore, // 共享审批状态
+      // 默认共享同一 envId/projectKey 下的审批状态
     },
   })
 
@@ -182,7 +158,7 @@ async function main(): Promise<void> {
 
   console.log('\n--- Done ---')
   console.log(
-    `→ 在 CloudBase 控制台 oak_permissions 集合按 conversationId="${conversationId}" 过滤，` +
+    `→ 在 CloudBase 控制台 oak_state 集合按 conversationId="${conversationId}" 过滤，` +
       `可看到本次审批 entry 的全生命周期（pending → decided）。`,
   )
 }

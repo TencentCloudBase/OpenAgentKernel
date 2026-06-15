@@ -27,13 +27,12 @@ export type {
   AttachmentInput,
   // 配置
   AgentConfig,
-  ResourceConfig,
+  PlatformCredentials,
   ModelInput,
   ModelSpec,
   SandboxConfig,
   SandboxCapabilities,
   SandboxUserCredentials,
-  CompactionConfig,
   ToolDefinition,
   ToolContext,
   McpServerConfig,
@@ -43,6 +42,12 @@ export type {
   PendingApproval,
   RequireApprovalRule,
   SessionConfig,
+  SessionStoreProvider,
+  CloudBaseSessionDatabase,
+  CloudBaseStorageConfig,
+  CustomStorageProvider,
+  StorageConfig,
+  UserMemoryConfig,
   // Hooks
   AgentHooks,
   UserMessageContext,
@@ -76,6 +81,16 @@ export {
   type ResolveContext,
   type ImageSource,
 } from './storage/index.js'
+
+// User memory：用户级长期记忆文件管理
+export {
+  writeUserMemoryFiles,
+  deleteUserMemoryFiles,
+  type UserMemoryFile,
+  type UserMemoryFilesOptions,
+  type WriteUserMemoryFilesOptions,
+  type DeleteUserMemoryFilesOptions,
+} from './user-memory/index.js'
 
 // Sandbox：可选用于让 agent 在远程容器里跑文件系统/shell（PR #6A）
 export {
@@ -111,5 +126,7 @@ export {
   SandboxError,
 } from './internal/errors.js'
 
+import { PACKAGE_VERSION } from './version.js'
+
 /** SDK 版本号 */
-export const VERSION = '0.1.0-alpha.0'
+export const VERSION = PACKAGE_VERSION

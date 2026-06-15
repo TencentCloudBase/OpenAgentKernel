@@ -1,0 +1,16 @@
+{
+  "envId": "your-env-id",
+  "model": "glm-5.1",
+  "tcbApiKey": "your-cloudbase-server-api-key",
+  "credentials": {
+    "secretId": "AKIDxxxxxxxxxxxxxxxx",
+    "secretKey": "xxxxxxxxxxxxxxxxxxxx",
+    "sessionToken": ""
+  },
+  "examples": {
+    "resumeConversationId": "",
+    "storage": "",
+    "imagePath": "",
+    "debug": false
+  }
+}

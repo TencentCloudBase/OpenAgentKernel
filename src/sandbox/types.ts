@@ -10,6 +10,8 @@
  * 但做了大幅精简（PR #6A 不需要 prepare/release 的复杂上下文）。
  */
 
+import type { PlatformCredentials } from '../public/types.js'
+
 /**
  * 沙箱实例（acquire 后返回）。
  *
@@ -38,7 +40,15 @@ export interface SandboxInstance {
  * - 内部负责 ensureTool（template）+ StartInstance + warmup readiness probe
  */
 export interface SandboxRuntime {
-  /** 后端标识（用于诊断日志，不参与逻辑） */
+  /**
+   * Runtime 类型标识。诊断日志 + 业务逻辑判定(如 `workspaceSnapshot: 'auto'` 模式)。
+   *
+   * 当前可识别值:
+   * - 'ags-stateful'  → AGS 沙箱 stateful 模式(支持 /api/workspace/snapshot)
+   * - 其他            → workspaceSnapshot='auto' 不启用快照
+   *
+   * 未来扩展:'ags-stateless' / 'docker-local' / 'firecracker' / 'e2b' 等。
+   */
   readonly backend: string
 
   /**
@@ -54,8 +64,17 @@ export interface SandboxRuntime {
 export interface SandboxAcquireContext {
   /** 业务 envId（多租户隔离的根） */
   envId: string
+  /** 平台凭证，由 createAgent({ credentials }) 统一下传给需要控制面能力的 runtime */
+  credentials?: PlatformCredentials
   /** 当前 session 的 conversationId */
   conversationId: string
+  /**
+   * 当前 session 的 userId(Spec B cosMount addendum 必需)。
+   * - 用作 MountOption.SubPath,实现 user 级隔离的 COS 子路径
+   * - 不传时使用 'default'(同 envId 所有 user 共享同一 SubPath,工作区会互相覆盖,
+   *   非生产场景可接受;cosMount 启用且需要严格隔离的应用必须传)
+   */
+  userId?: string
   /**
    * 实例粒度：
    * - 'session'：每个 session 一个独立实例（默认，PR #6A 行为）

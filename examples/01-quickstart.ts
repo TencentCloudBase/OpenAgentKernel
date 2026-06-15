@@ -1,24 +1,19 @@
 /**
- * 01-quickstart.ts —— 最小可运行示例
+ * 01-quickstart.ts —— 快速开始
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
  *
- * 必需配置（写在 examples/.env.local，从 .env.example 复制）：
- *   TENCENTCLOUD_TOKENHUB_API_KEY=sk-xxxxxxxx
- *
- * 此 demo 只用 envId + model + systemPrompt（< 10 行配置）。
+ * 配置：examples/config.local.json（见 config.example.json）
  */
-import './_shared/env.js'
+import { getEnvId, getModel } from './_shared/env.js'
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
 
 async function main(): Promise<void> {
   const agent = createAgent({
-    envId: process.env.TCB_ENV_ID ?? 'demo-env',
-    // TokenHub 已确认支持 Anthropic 协议的模型，参见
-    // https://cloud.tencent.com/document/product/1823/130079
-    model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
+    envId: getEnvId(),
+    model: getModel(),
     systemPrompt: 'You are a helpful CloudBase assistant. Reply concisely in Chinese.',
   })
 

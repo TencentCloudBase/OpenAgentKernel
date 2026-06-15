@@ -10,21 +10,21 @@
  * 该 server 提供一组演示工具（add / echo / longRunningOperation 等），
  * 可以直接给模型调用。
  *
- * 凭证写在 examples/.env.local（从 .env.example 复制）。
+ * 配置：examples/config.local.json。
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/07-mcp-stdio.ts
  *
  * 注意：第一次运行 npx 会拉包，需要 ~10s。
  */
-import './_shared/env.js'
+import { getEnvId, getModel } from './_shared/env.js'
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
 
 async function main(): Promise<void> {
   const agent = createAgent({
-    envId: process.env.TCB_ENV_ID ?? 'demo-env',
-    model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
+    envId: getEnvId(),
+    model: getModel(),
     systemPrompt:
       'You are a helpful assistant. When the user asks you to add numbers ' +
       'or echo text, prefer calling the available tools rather than computing yourself. ' +

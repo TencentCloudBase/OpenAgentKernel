@@ -9,26 +9,21 @@
 import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
 import type { z } from 'zod'
 
-// ============================================================
-// 资源配置（envId 派生 + 用户覆盖）
-// ============================================================
-
 /**
- * 资源命名配置（可选；不传按规则从 envId 派生）
+ * 平台凭证，用于初始化 CloudBase 管理端/服务端 SDK。
  *
- * 派生规则：
- * - conversationCollection: 'agent_conversations'
- * - messageCollection: 'agent_messages'
- * - sandboxFunctionName: 'agent-sandbox'
- * - modelGatewayBaseUrl: 'https://{envId}.api.tcloudbasegateway.com/v1/anthropic'
- *   (走 CloudBase 网关的 Anthropic 协议；如需 OpenAI 协议网关，使用 modelGatewayBaseUrl 覆盖)
+ * kernel 不从 `process.env` 读取平台凭证；示例或业务代码可自行从环境变量加载后，
+ * 通过 `createAgent({ credentials })` 显式传入。
  */
-export interface ResourceConfig {
-  conversationCollection?: string
-  messageCollection?: string
-  sandboxFunctionName?: string
-  /** 自定义模型网关 URL（覆盖默认派生）*/
-  modelGatewayBaseUrl?: string
+export interface PlatformCredentials {
+  /** CloudBase 环境 ID；不传时默认继承 AgentConfig.envId */
+  envId?: string
+  secretId: string
+  secretKey: string
+  /** STS 临时凭证 token（可选） */
+  sessionToken?: string
+  /** 默认 ap-shanghai */
+  region?: string
 }
 
 // ============================================================
@@ -58,18 +53,45 @@ export interface ModelSpec {
 
 export interface SandboxConfig {
   /**
+   * 是否启用默认 sandbox。
+   *
+   * - `true`：使用内置默认 provider（当前为 `ags-stateful`），并补齐默认 runtime/scope
+   * - `false` / 未配置 sandbox：不启用 sandbox
+   *
+   * 如果显式传了 `runtime`，即使不传 `enabled` 也会启用 sandbox。
+   */
+  enabled?: boolean
+  /**
+   * 默认 sandbox 产品类型。当前仅内置 `ags-stateful`。
+   *
+   * 未来可扩展到其他 CloudBase/第三方 sandbox 产品；高级用户也可直接传 `runtime`。
+   */
+  provider?: 'ags-stateful'
+  /**
+   * 默认 AGS 数据面认证 JWT。
+   *
+   * 仅在 `enabled: true` 且未显式传 `runtime` 时用于构造默认 AgsStatefulSandbox。
+   * 不传时读取 `TCB_API_KEY` 或 `OAK_SANDBOX_API_KEY`。
+   */
+  apiKey?: string
+  /**
    * Sandbox 后端实例（由用户从 `@cloudbase/open-agent-kernel/sandbox` 子模块构造，
    * 例如 `new AgsStatefulSandbox()`）。
-   * 不传 `runtime` 时不启用任何沙箱（agent 只能跑模型对话，无文件系统/shell 能力）。
+   * 不传 `runtime` 但 `enabled: true` 时，默认使用 AgsStatefulSandbox。
    *
    * 类型故意宽泛（unknown），避免公共类型层依赖底层实现。
    */
   runtime?: unknown
   /**
-   * 沙箱粒度：
-   * - `'session'`（默认）：每个 startSession 一个独立 AGS 实例，session.abort 时 Pause。
-   * - `'shared'`：同 envId 多个 session 共享一个 AGS 实例，按需 Resume / Stop 漂移实例，
-   *   abort 不 Pause（由 AGS 按 DefaultTimeout 自动回收）。
+   * 沙箱粒度(AGS 实例层):
+   * - `'session'`:每个 startSession 一个独立 AGS 实例,session.abort 时 Pause。
+   *   对应 server feature/stateful-infra 的 `sandboxMode: 'isolated'`。
+   * - `'shared'`(默认):同 envId 多个 session 共享一个 AGS 实例,按需 Resume / Stop 漂移实例,
+   *   abort 不 Pause(由 AGS 按 DefaultTimeout 自动回收)。
+   *   对应 server feature/stateful-infra 的 `sandboxMode: 'shared'`。
+   *
+   * 注意:这两个 scope 是 AGS 实例粒度,与"沙箱内工作区目录"是两层正交关系。
+   * 工作区目录派生由沙箱镜像负责(/home/user/{conversationId}/ 约定),SDK 不感知。
    */
   scope?: 'session' | 'shared'
   /** 沙箱生命周期（秒，传给 AGS Timeout）*/
@@ -93,17 +115,33 @@ export interface SandboxConfig {
   /**
    * 用户租户的 CloudBase 凭证（仅 PR #6.5 cloudbase MCP 工具调用时使用）。
    *
-   * 与 sandbox 控制面凭证（process.env.TCB_SECRET_ID/KEY，由平台持有）**不一定相同**——
+   * 与 sandbox 控制面凭证（AgentConfig.credentials，由平台持有）**不一定相同**——
    * 多租户场景下沙箱本身用平台凭证起，但沙箱内 cloudbase-mcp 操作的是用户自己的资源。
    *
    * 优先级：
    *   1. `userCredentials` 函数（异步回调，每次 acquire 调一次，适合多租户）
    *   2. `userCredentials` 静态对象（适合单租户/本地开发）
-   *   3. `process.env`（兜底）：`TCB_ENV_ID` / `TCB_SECRET_ID` / `TCB_SECRET_KEY` / `TCB_TOKEN`
+   *   3. `AgentConfig.credentials`（单租户/本地开发兜底）
    *
    * 缺凭证时 cloudbase 工具会 degrade（agent 仍能用文件系统 / shell 工具）。
    */
   userCredentials?: SandboxUserCredentials | (() => Promise<SandboxUserCredentials>)
+
+  /**
+   * Spec B 新增。控制 cwd 是否在 send 边界自动快照到 COS。
+   * - 'auto'(默认):runtime.backend === 'ags-stateful' 时启用,其他 runtime 关闭
+   * - 'enabled':强制启用 — 若 runtime 不支持则 startSession 抛 ConfigError
+   * - 'disabled':显式关闭
+   * @default 'auto'
+   * @注意 启用时要求 sandbox.scope === 'shared'(详 Spec B §1.3)
+   */
+  workspaceSnapshot?: 'auto' | 'enabled' | 'disabled'
+
+  /** snapshot HTTP timeout(ms)。默认 30_000。必须 < 600_000(镜像内部限制)*/
+  workspaceSnapshotTimeoutMs?: number
+
+  /** init(含 restore)HTTP timeout(ms)。默认 60_000。必须 < 1_200_000 */
+  workspaceInitTimeoutMs?: number
 }
 
 /**
@@ -122,27 +160,10 @@ export interface SandboxUserCredentials {
 }
 
 export interface SandboxCapabilities {
-  /** 文件系统工具（read/write/edit/ls/glob/grep）*/
+  /** 文件系统工具(read/write/edit/ls/glob/grep)*/
   filesystem?: boolean
-  /** Shell 工具（bash 命令）*/
+  /** Shell 工具(bash 命令)*/
   shell?: boolean
-  /**
-   * Skills（领域知识进阶式披露）
-   * - true: 启用但无内置 skills
-   * - { sources }: 加载指定 SKILL.md 文件
-   */
-  skills?: boolean | { sources: string[] }
-  /** Memory（跨 run 学习）*/
-  memory?: boolean
-  /** Compaction（长会话自动压缩）*/
-  compaction?: boolean | CompactionConfig
-}
-
-export interface CompactionConfig {
-  /** 触发压缩的条目数阈值，默认 10 */
-  threshold?: number
-  /** 自定义判定函数（基于 token 数 / 自定义启发式）*/
-  shouldTrigger?: (ctx: { itemCount: number; tokenCount?: number }) => boolean
 }
 
 // ============================================================
@@ -272,7 +293,8 @@ export interface PendingApproval {
 /**
  * 审批状态外部存储接口（让 HITL 支持分布式扩展）。
  *
- * - 不传 store：kernel 使用进程内 `InMemoryPermissionStore`（单进程可用）
+ * - 不传 store 且已提供 credentials：kernel 默认使用 CloudBase FlexDB 分布式存储
+ * - 不传 store 且未提供 credentials：kernel 使用进程内 `InMemoryPermissionStore`（单进程可用）
  * - 传 store：可跨节点 / 跨进程 resume；同一 conversationId 的请求可路由到任意节点
  *
  * 接口与 SessionStoreDriver 同套路：内置 InMemory（默认）+ CloudBaseDb（生产）+ 用户可自实现。
@@ -315,12 +337,20 @@ export interface PermissionConfig {
   requireApproval?: RequireApprovalRule
 
   /**
-   * 审批状态存储。不传走进程内 `InMemoryPermissionStore`。
+   * 审批状态存储。
    *
-   * 单进程场景下 InMemory 够用；多副本部署 / 云函数 / 跨设备审批需传入分布式实现
-   * （PR #7.1 将提供 `CloudBasePermissionStore`）。
+   * 不传且已提供 credentials：默认使用 CloudBase FlexDB 分布式存储；
+   * 不传且未提供 credentials：走进程内 `InMemoryPermissionStore`。
    */
   store?: PermissionStore
+
+  /**
+   * 默认 CloudBase FlexDB 审批状态集合前缀。
+   *
+   * 最终集合名为 `{tablePrefix}state`；默认 `oak_`。
+   * 仅在未显式传 `store` 且 kernel 自动创建 CloudBase store 时生效。
+   */
+  tablePrefix?: string
 
   /**
    * 审批超时（毫秒）。超过后 `respondApproval` 仍能注入决策（如果 store 还在），
@@ -346,6 +376,17 @@ export interface AgentHooks {
   onSessionStart?: (ctx: SessionContext) => Promise<void> | void
   onSessionEnd?: (ctx: SessionContext) => Promise<void> | void
 }
+
+export type UserMemoryConfig =
+  | boolean
+  | {
+      /**
+       * 是否启用用户级长期记忆。
+       *
+       * `userMemory: true` 是 `{ enabled: true }` 的简写。
+       */
+      enabled?: boolean
+    }
 
 export interface UserMessageContext {
   conversationId: string
@@ -375,6 +416,21 @@ export interface SessionContext {
   envId: string
 }
 
+/**
+ * Session 持久化资源域。
+ *
+ * 当前主路径是 CloudBase 资源；具体使用哪类 CloudBase 数据库由
+ * `SessionConfig.database` 表达。
+ */
+export type SessionStoreProvider = 'cloudbase'
+
+/**
+ * CloudBase 内部可用于 session 持久化的数据资源类型。
+ *
+ * 当前内置实现为 `flexdb`，后续可扩展到 CloudBase Mongo / MySQL / PostgreSQL。
+ */
+export type CloudBaseSessionDatabase = 'flexdb' | 'mongo' | 'mysql' | 'pgsql'
+
 // ============================================================
 // Agent 配置（顶层入口）
 // ============================================================
@@ -387,7 +443,8 @@ export interface AgentConfig {
 
   // ── 资源锚点 ────────────────────────────────────
   envId: string
-  resources?: ResourceConfig
+  /** 平台凭证，用于初始化 CloudBase SDK。不传则依赖下游 SDK 自身行为或按能力报错。 */
+  credentials?: PlatformCredentials
 
   // ── 模型 ────────────────────────────────────────
   model: ModelInput
@@ -424,13 +481,61 @@ export interface AgentConfig {
 
   // ── 多模态附件存储 ──────────────────────────────
   /**
-   * StorageProvider 实例（由 `@cloudbase/open-agent-kernel/storage` 导出）。
-   * 不传：传入 attachments 时抛错（不支持多模态）；
-   * 传：kernel 把 SessionInput.attachments 解析为 image content block 喂给 SDK。
+   * 附件存储配置。
    *
-   * 类型故意宽泛（unknown），避免公共类型层依赖底层实现。
+   * - 不传且已提供 credentials：默认使用 CloudBase Storage
+   * - 传 `{ pathPrefix }`：使用默认 CloudBase Storage，但覆盖上传路径前缀
+   * - 传 StorageProvider 实例：完全自定义附件存储
+   * - 不传且未提供 credentials：传入 attachments 时抛错（不支持多模态）
    */
-  storage?: unknown
+  storage?: StorageConfig
+
+  // ── 平台资产层(宿主机 cwd)──────────────────
+  /**
+   * SDK 加载本机文件型资产的根目录。
+   * 影响:Skills 扫描根、项目级 CLAUDE.md 查找根、SDK 子进程 spawn cwd。
+   * 默认:OAK 自管的纯净 ephemeral 目录(无 skills、无 CLAUDE.md,等价 v0 行为)。
+   * 业务方通常传镜像内的固定路径(如 '/app/skills-bundle')。
+   *
+   * ⚠️ 安全:OAK 内部强制 settingSources 仅含 'project',永远不读 'user'(宿主机 ~/.claude)。
+   * cwd 指向 ~/.claude/ 或其子目录会被 OAK 拒绝。
+   */
+  cwd?: string
+
+  /**
+   * 启用 Claude Agent SDK 的 skills 能力。
+   * SDK 在 cwd/.claude/skills/ 下扫描 SKILL.md,按 enabled 过滤后注入到 system prompt。
+   * 不传或 enabled 未配 → skills 关闭(等价 v0 行为)。
+   *
+   * 仅当同时传了 cwd 且 cwd 下有 .claude/skills/ 目录时才生效。
+   */
+  skills?: {
+    enabled?: 'all' | string[]
+  }
+
+  // ── 用户级长期记忆(SDK 原生 .claude/ 同步)────
+  /**
+   * 用户级长期记忆。启用后:
+   *   1. SDK 子进程的 CLAUDE_CONFIG_DIR 自动按 (envId, userId) 派生到独立目录
+   *   2. 每次 session.send() 开始:从 CloudBase COS 拉取 + 算 SHA-256 baseline
+   *   3. 每次 session.send() 结束(包括 abort):diff baseline → PUT 变化 + DELETE 反向
+   *
+   * 同步范围(spec §3.4):仅 SDK 自动写入的"用户私产"
+   *   - <CLAUDE_CONFIG_DIR>/CLAUDE.md
+   *   - <CLAUDE_CONFIG_DIR>/projects/* /memory/
+   *   - <CLAUDE_CONFIG_DIR>/agent-memory/
+   * 不同步:settings.json / skills / commands / rules / agents / .claude.json 等。
+   *
+   * 默认:disabled(等价 v0 行为)。
+   *
+   * 依赖:启用时该 envId 必须开通 CloudBase COS。COS 不可达时记 warning,
+   * 不阻塞 send(graceful degrade — agent 仍可工作,只是这次不同步)。
+   *
+   * ⚠️ 前提条件(业务方需保证):同一 userId 的请求不能并发处理 —
+   * 即同一时刻不能有两个 SDK 节点同时为 alice 服务。SDK 不在并发场景下做冲突
+   * 防御。但允许 alice 这次落 node1、下次落 node2,只要两次不重叠。
+   */
+  userMemory?: UserMemoryConfig
 
   // ── 钩子 ────────────────────────────────────────
   hooks?: AgentHooks
@@ -439,9 +544,11 @@ export interface AgentConfig {
 /**
  * 会话持久化配置。
  *
- * 不传 `store`：transcript 仅在 SDK 子进程的本地临时目录里（进程退出即丢，
- *               不可跨节点 resume）。
- * 传 `store`：transcript 镜像到外部存储（CloudBase DB / 自定义 driver）。
+ * 默认行为：
+ * - 传了 `AgentConfig.credentials` 且未显式关闭时，自动使用 CloudBase FlexDB
+ *   持久化 session，表前缀默认 `oak_`，projectKey 默认 `envId`。
+ * - 未传 credentials 时保持本地临时 transcript，避免无凭证 quickstart 报错。
+ * - 传 `enabled: false` 可显式关闭默认持久化。
  *
  * 注意：本接口刻意不导出底层 SDK 的 `SessionStore` 类型，避免锁定 runtime。
  *       store 对象通过 `kernel/session-store` 子模块的 `CloudBaseSessionStore`
@@ -449,9 +556,36 @@ export interface AgentConfig {
  */
 export interface SessionConfig {
   /**
+   * 是否启用 session 持久化。
+   *
+   * - `undefined`：有 credentials 时默认启用 CloudBase FlexDB；无 credentials 时不启用
+   * - `false`：显式关闭持久化
+   * - `true`：强制启用；若缺少所需配置会在 createAgent 阶段报错
+   */
+  enabled?: boolean
+
+  /**
+   * 持久化资源域。默认 `cloudbase`。
+   *
+   * 当前主路径是 CloudBase 资源；具体数据库类型由 `database` 指定。
+   */
+  provider?: SessionStoreProvider
+
+  /**
+   * CloudBase session 持久化使用的数据资源类型。默认 `flexdb`。
+   *
+   * 当前内置实现：
+   * - `flexdb`：CloudBase FlexDB，使用默认四张表
+   *
+   * 预留扩展：
+   * - `mongo` / `mysql` / `pgsql`：后续通过对应 driver 实现
+   */
+  database?: CloudBaseSessionDatabase
+
+  /**
    * 兼容 Claude Agent SDK SessionStore 接口的 store 对象。
    *
-   * 推荐用法：
+   * 高级用法：
    *   ```ts
    *   import { CloudBaseSessionStore, CloudBaseDbDriver } from '@cloudbase/open-agent-kernel'
    *   session: { store: new CloudBaseSessionStore({ driver: new CloudBaseDbDriver() }) }
@@ -461,6 +595,16 @@ export interface SessionConfig {
    * 内部 runtime/agent-builder 会做结构性校验后传给 SDK。
    */
   store?: unknown
+
+  /**
+   * 默认 CloudBase FlexDB 后端的表前缀。
+   *
+   * 会生成 `{tablePrefix}sessions` / `{tablePrefix}session_entries` /
+   * `{tablePrefix}session_summaries` / `{tablePrefix}session_messages`。
+   *
+   * @default 'oak_'
+   */
+  tablePrefix?: string
 
   /**
    * Project key（多租户隔离）
@@ -475,6 +619,50 @@ export interface SessionConfig {
    */
   flush?: 'batched' | 'eager'
 }
+
+/**
+ * CloudBase Storage 简化配置。
+ *
+ * 不传 `storage` 且提供 `credentials` 时，SDK 会自动启用默认 CloudBase Storage；
+ * 传此对象时可覆盖默认云存储路径前缀、临时 URL 有效期等资源命名细节。
+ */
+export interface CloudBaseStorageConfig {
+  /**
+   * 是否启用默认 CloudBase Storage。
+   *
+   * - `undefined` / `true`：启用
+   * - `false`：显式关闭默认 storage（传 attachments 时会报错）
+   */
+  enabled?: boolean
+  /** 当前内置 storage provider，仅支持 `cloudbase`。 */
+  provider?: 'cloudbase'
+  /**
+   * 云存储路径前缀。
+   *
+   * 实际上传路径为 `{pathPrefix}{envId}/{sessionId}/{timestamp}-{index}.{ext}`。
+   *
+   * @default 'agent-attachments/'
+   */
+  pathPrefix?: string
+  /**
+   * 临时访问 URL 有效期（秒）。
+   *
+   * @default 3600
+   */
+  urlExpiresIn?: number
+}
+
+/**
+ * 自定义附件存储 provider。
+ *
+ * 高级用户可直接传 `InMemoryStorage` / `CloudBaseStorage` 实例，或实现同形状对象。
+ */
+export interface CustomStorageProvider {
+  resolveAttachment(att: AttachmentInput, ctx: { envId: string; sessionId: string; index: number }): Promise<unknown>
+  resolveRefToUrl?(ref: unknown): Promise<string>
+}
+
+export type StorageConfig = CloudBaseStorageConfig | CustomStorageProvider
 
 // ============================================================
 // Agent / Session 接口
@@ -567,6 +755,12 @@ export interface Session {
 
   /** 中止当前运行 */
   abort(): Promise<void>
+
+  /** Spec B 新增。手动触发一次 workspace snapshot;workspaceSnapshot 未启用时返回 { skipped: true } */
+  snapshotWorkspace?(): Promise<{ ms: number; skipped?: boolean }>
+
+  /** Spec B 新增。查询启动 restore 的状态。null = 未启用或仍在进行中 */
+  getRestoreStatus?(): Promise<'full' | 'fresh' | 'partial' | 'failed' | null>
 }
 
 export interface SessionManagement {

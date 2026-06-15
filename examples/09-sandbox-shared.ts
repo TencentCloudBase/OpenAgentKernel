@@ -6,14 +6,14 @@
  *      第一个 session 写入的文件，第二个 session 能直接读到（实例共享）
  *   2. **新工具**：edit / glob / grep 在沙箱里做精确编辑 + 文件检索 + 内容搜索
  *
- * 凭证写在 examples/.env.local（同 example 08）。
+ * 配置：examples/config.local.json（同 example 08）。
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/09-sandbox-shared.ts
  */
-import './_shared/env.js'
+import { getEnvId, getModel, getPlatformCredentials } from './_shared/env.js'
 
-import { createAgent, AgsStatefulSandbox } from '@cloudbase/open-agent-kernel'
+import { createAgent } from '@cloudbase/open-agent-kernel'
 import type { SessionEvent } from '@cloudbase/open-agent-kernel'
 
 async function streamSession(
@@ -40,23 +40,21 @@ async function streamSession(
 }
 
 async function main(): Promise<void> {
-  const envId = process.env.TCB_ENV_ID
-  if (!envId) {
-    throw new Error('TCB_ENV_ID is required (set it in examples/.env.local)')
-  }
+  const envId = getEnvId()
+  const credentials = getPlatformCredentials()
 
   const agent = createAgent({
     envId,
-    model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
+    credentials,
+    model: getModel(),
     systemPrompt:
       'You are a helpful coding assistant working inside a sandbox. ' +
       'You have access to bash / read / write / edit / glob / grep tools (mcp__sandbox__*). ' +
       'Always use the tools to interact with the filesystem—never fabricate output. ' +
       'Reply concisely in Chinese.',
     sandbox: {
-      runtime: new AgsStatefulSandbox(),
-      // shared 模式：同 envId 多 session 共享一个实例
-      scope: 'shared',
+      enabled: true,
+      // 默认 shared 模式：同 envId 多 session 共享一个实例
     },
   })
 

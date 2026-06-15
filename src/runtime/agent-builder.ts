@@ -17,14 +17,18 @@
  *   - handoffs / agents 注入                    → PR #2+ 后续
  */
 
+import { randomBytes } from 'node:crypto'
+import { mkdirSync, realpathSync } from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import type {
   HookCallback as SdkHookCallback,
   Options as ClaudeOptions,
   McpServerConfig as SdkMcpServerConfig,
   SessionStore,
+  SettingSource,
 } from '@anthropic-ai/claude-agent-sdk'
 import { createSdkMcpServer, tool as sdkTool } from '@anthropic-ai/claude-agent-sdk'
-import { InvalidConfigError } from '../internal/errors.js'
 import {
   createPreToolUsePermissionHook,
   OAK_CLIENT_TOOL_RESULT_KEY,
@@ -32,14 +36,18 @@ import {
   type ClientToolResultStore,
   type AskUserStore,
 } from '../permissions/hooks.js'
-import type { AgentConfig, ToolDefinition } from '../public/types.js'
+import { ClaudeHomeSyncEngine, CloudBaseCosClaudeHomeStore, deriveClaudeConfigDir } from '../claude-home/index.js'
+import { ConfigError, InvalidConfigError } from '../internal/errors.js'
+import type { AgentConfig, SandboxConfig, ToolDefinition, UserMemoryConfig } from '../public/types.js'
 import { createSandboxMcpServer } from '../sandbox/sandbox-tools.js'
-import type { SandboxInstance } from '../sandbox/types.js'
+import type { SandboxInstance, SandboxRuntime } from '../sandbox/types.js'
+import { WorkspaceSnapshotEngine } from '../sandbox/workspace-snapshot/index.js'
+import { PACKAGE_VERSION } from '../version.js'
 import { resolveCredential, type ResolvedCredential } from './credential-factory.js'
 
 /**
  * 默认 API 超时（10 分钟）。
- * TokenHub 官方推荐值，避免长输出时被默认超时打断。
+ * CloudBase AI gateway 推荐值，避免长输出时被默认超时打断。
  * 参考：https://cloud.tencent.com/document/product/1823/130079
  */
 const DEFAULT_API_TIMEOUT_MS = 600_000
@@ -58,6 +66,21 @@ export interface BuiltClaudeQueryParams {
   options: ClaudeOptions
   /** 派生出的凭证信息，调试/日志用 */
   credential: ResolvedCredential
+  /**
+   * 当 userMemory.enabled = true 时返回的同步引擎。
+   * 调用方(create-agent.ts)负责挂到 session.send 两端:
+   *   send-start → syncEngine.pullOnSendStart()
+   *   send-end (含 abort) → syncEngine.pushOnSendEnd()
+   */
+  syncEngine?: ClaudeHomeSyncEngine
+  /**
+   * Spec B 新增。当 sandbox.workspaceSnapshot 解析为启用时返回。
+   * 调用方(create-agent.ts Task 8)负责:
+   *   - startSession 时调用 engine.bootstrap(inst, { credentials })
+   *   - send-end 后调用 engine.snapshot(inst)
+   *   - session.snapshotWorkspace() / getRestoreStatus() 转发到 engine
+   */
+  snapshotEngine?: WorkspaceSnapshotEngine
 }
 
 /**
@@ -87,19 +110,106 @@ export function buildClaudeQueryOptions(
     clientToolStore?: import('../permissions/hooks.js').ClientToolResultStore
     /** askUser: store for pending askUser entries. */
     askUserStore?: AskUserStore
+    /** Task 9 for userMemory:agent.startSession({ userId }) 透传过来 */
+    userId?: string
   } = {},
 ): BuiltClaudeQueryParams {
   const credential = resolveCredential({
     envId: config.envId,
     model: config.model,
-    resources: config.resources,
   })
 
+  // ── cwd / settingSources / userMemory 派生(spec §4.1 + §4.2 + §4.6)─────
+  //
+  // settingSources 决定 SDK 是否扫描文件系统加载资产:
+  //   - 'project' → 扫 <cwd>/.claude/(skills、项目级 CLAUDE.md、rules 等)
+  //   - 'user'    → 扫 ~/.claude/(被 CLAUDE_CONFIG_DIR override)
+  //                 - <CLAUDE_CONFIG_DIR>/CLAUDE.md(用户级偏好)
+  //                 - <CLAUDE_CONFIG_DIR>/projects/<cwd-hash>/memory/(主会话 auto-memory)
+  //                 - <CLAUDE_CONFIG_DIR>/agent-memory/(用户级 subagent memory)
+  //                 这些都在 SYNC_INCLUDES 内(spec §3.4)— 同步到 COS。
+  //   - []        → 完全不读文件系统(v0 isolation)
+  //
+  // 安全:'user' 在我们的部署模型里**不指宿主机 ~/.claude**,因为我们在 userMemory
+  // 启用时把 CLAUDE_CONFIG_DIR 显式 redirect 到 per-user 派生目录。
+  const userCwd = config.cwd
+  if (userCwd) {
+    assertSafeUserCwd(userCwd)
+  }
+
+  // userMemory 启用时,先派生 claudeConfigDir(per-user 稳定路径)。
+  // 也用作 effectiveCwd:让 SDK 的 projects/<cwd-hash>/memory/ 跨节点可复用。
+  let claudeConfigDir: string | undefined
+  let syncEngine: ClaudeHomeSyncEngine | undefined
+  const userMemoryEnabled = isUserMemoryEnabled(config.userMemory)
+  if (userMemoryEnabled && extra.userId) {
+    try {
+      claudeConfigDir = deriveClaudeConfigDir(config.envId, extra.userId)
+      syncEngine = new ClaudeHomeSyncEngine({
+        store: new CloudBaseCosClaudeHomeStore({
+          credentials: config.credentials
+            ? { ...config.credentials, envId: config.credentials.envId ?? config.envId }
+            : undefined,
+        }),
+        ctx: { envId: config.envId, userId: extra.userId },
+        localDir: claudeConfigDir,
+      })
+    } catch (err) {
+      // ResourceError / InvalidConfigError 等 → graceful degrade,本次 send 不同步,继续工作
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[oak/userMemory] failed to construct sync engine, sync disabled this turn:',
+        (err as Error)?.message,
+      )
+      claudeConfigDir = undefined
+      syncEngine = undefined
+    }
+  }
+
+  // effectiveCwd 优先级:
+  //   1) 用户传 cwd → 用 userCwd(平台资产路径,如 /app/skills-bundle)
+  //   2) userMemory 启用 → 用 claudeConfigDir 上一级(确保 SDK projects/<cwd-hash>/ 跨节点稳定)
+  //   3) 都没有 → ephemeral 随机(v0 行为)
+  const effectiveCwd = userCwd ?? (claudeConfigDir !== undefined ? path.dirname(claudeConfigDir) : deriveEphemeralCwd())
+
+  // settingSources 启用条件:任一资产层需要文件加载
+  //   - 用户传 cwd → 'project'(skills、项目 CLAUDE.md)
+  //   - userMemory 启用 → 'user'(SDK auto-memory / 用户级 CLAUDE.md / agent-memory)
+  // 'user' 安全性:CLAUDE_CONFIG_DIR override 让 'user' 指向 per-user 隔离目录,不是宿主机。
+  const settingSources: SettingSource[] = []
+  if (userCwd) settingSources.push('project')
+  if (claudeConfigDir) settingSources.push('user')
+
+  // ── Skills 启用前置校验(spec §4.1.2)──────────
+  // 启用 skills 但未传 cwd → SDK 找不到 SKILL.md(settingSources 没含 'project')
+  // 静默无效易混淆 → 显式 warning(不抛错,不破坏向后兼容)
+  if (config.skills?.enabled !== undefined && !userCwd) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[oak/skills] skills configured but cwd not set — SKILL.md will not be discovered. ' +
+        'Pass `cwd` pointing to a directory containing `.claude/skills/`.',
+    )
+  }
+
   // ── 决定是否启用 SDK 持久化 ──────────────────────────────────────
-  // 注入 sessionStore 时，SDK 强制要求 persistSession=true（dual-write 模式：
-  // 子进程仍写本地 JSONL，store 收到 mirror 副本）。
+  // SDK persistSession=false 会禁用 ~/.claude/projects/<cwd-hash>/ 目录创建,
+  // 连带 SDK auto-memory 写 MEMORY.md 也无处可去(SDK 文档:"Sessions will not
+  // be saved to ~/.claude/projects/ and cannot be resumed later")。
+  //
+  // 启用条件(任一即可):
+  //   1) sessionStore 注入(dual-write 模式 — SDK 强制 persistSession=true)
+  //   2) userMemory.enabled(SDK auto-memory 需要 projects/ 目录承载 MEMORY.md)
+  //   3) 默认走 SDK default(true)— OAK 历史上为了 isolation 强制关,但那导致
+  //      auto-memory 完全失效;现在仅当用户显式不需要任何持久化时由调用方关闭。
   const sessionStore = extractSessionStore(config)
-  const enablePersist = sessionStore !== null
+  const enablePersist = sessionStore !== null || syncEngine !== undefined
+
+  // CLAUDE_CONFIG_DIR 单一来源(优先级):
+  //   1) userMemory.enabled + userId → per-user 派生路径
+  //   2) sessionStore enablePersist → tmpdir(避免污染 host)
+  //   3) 都没有 → 不设置(SDK 用默认)
+  // 显式合并避免依赖 spread 顺序,后续维护更稳。
+  const configDirOverride = claudeConfigDir ?? (enablePersist ? getSessionLocalDir() : undefined)
 
   // 透传给 SDK 子进程的环境变量
   const env: Record<string, string | undefined> = {
@@ -109,9 +219,8 @@ export function buildClaudeQueryOptions(
     ANTHROPIC_API_KEY: undefined,
     API_TIMEOUT_MS: String(DEFAULT_API_TIMEOUT_MS),
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-    CLAUDE_AGENT_SDK_CLIENT_APP: '@cloudbase/open-agent-kernel/0.1.0-alpha.0',
-    // 启用 sessionStore 时把本地 dual-write 路径指到临时目录
-    ...(enablePersist ? { CLAUDE_CONFIG_DIR: getSessionLocalDir() } : {}),
+    CLAUDE_AGENT_SDK_CLIENT_APP: `@cloudbase/open-agent-kernel/${PACKAGE_VERSION}`,
+    ...(configDirOverride ? { CLAUDE_CONFIG_DIR: configDirOverride } : {}),
   }
 
   // 诊断日志（OAK_DEBUG=1 时打开）
@@ -196,11 +305,32 @@ export function buildClaudeQueryOptions(
     }
   })()
 
+  // ── Spec B:workspace snapshot 引擎装配 ──
+  // resolveSnapshotMode 决定是否启用、做 scope 校验,失败抛 ConfigError。
+  // 启用时构造 WorkspaceSnapshotEngine,实际触发(bootstrap / snapshot)由 create-agent
+  // 在 startSession / send-end 时挂载(Task 8)。
+  //
+  // 注意:必须用条件展开避免把 undefined 透到 engine —— `{ ...DEFAULT, ...opts }`
+  // 模式下,显式赋 undefined 会覆盖默认值,导致 setTimeout(undefined) 立即触发,
+  // bootstrap 会以 SandboxRestoreTimeout: init timeout after undefinedms 失败。
+  const snapshotEnabled = resolveSnapshotMode(config.sandbox)
+  const snapshotEngine = snapshotEnabled
+    ? new WorkspaceSnapshotEngine({
+        ...(config.sandbox?.workspaceSnapshotTimeoutMs !== undefined && {
+          snapshotTimeoutMs: config.sandbox.workspaceSnapshotTimeoutMs,
+        }),
+        ...(config.sandbox?.workspaceInitTimeoutMs !== undefined && {
+          initTimeoutMs: config.sandbox.workspaceInitTimeoutMs,
+        }),
+      })
+    : undefined
+
   const options: ClaudeOptions = {
     model: credential.modelId,
     env,
-    // ── 关键：禁用本地配置文件依赖（kernel 是云服务，不依赖本机 ~/.claude 配置） ──
-    settingSources: [],
+    cwd: effectiveCwd,
+    // ── settingSources(spec §4.1):用户传 cwd→['project'];否则 []（v0 isolation）──
+    settingSources,
     strictMcpConfig: true,
     // 持久化策略：注入 store 时必须 true（SDK 强制约束）
     persistSession: enablePersist,
@@ -208,6 +338,8 @@ export function buildClaudeQueryOptions(
     ...(config.session?.flush ? { sessionStoreFlush: config.session.flush } : {}),
     // ── 系统提示 ──
     ...(config.systemPrompt ? { systemPrompt: config.systemPrompt } : {}),
+    // ── Skills 注入(spec §4.1):仅当用户显式配置时透传 ──
+    ...(config.skills?.enabled !== undefined ? { skills: config.skills.enabled } : {}),
     // ── MCP servers（PR #5 + PR #6A） ──
     ...(mergedMcpServers ? { mcpServers: mergedMcpServers } : {}),
     // ── PR #7.0：审批 hooks ──
@@ -221,14 +353,67 @@ export function buildClaudeQueryOptions(
     // 因此始终 bypass SDK 的内置权限系统，让 Hook 全权负责。
     permissionMode: 'bypassPermissions' as const,
     allowDangerouslySkipPermissions: true,
-    // ── 内置工具默认全部禁用（沙箱能力通过上面的 mcpServers 提供） ──
-    tools: [],
+    // ── 内置工具默认全部禁用(沙箱能力通过上面的 mcpServers 提供)──
+    // 例外:启用 skills 时必须保留 'Skill' 工具,否则模型无法 invoke discovered skills
+    // (SDK 文档:"If you also pass an explicit tools list, include 'Skill' in that list
+    //   so Claude can invoke skills.")
+    tools: config.skills?.enabled !== undefined ? ['Skill'] : [],
   }
 
-  return { options, credential }
+  return { options, credential, syncEngine, snapshotEngine }
 }
 
 // ─── 辅助 ────────────────────────────────────────────────────────
+
+function isUserMemoryEnabled(config: UserMemoryConfig | undefined): boolean {
+  return config === true || (typeof config === 'object' && config.enabled === true)
+}
+
+/**
+ * Spec B:解析 workspaceSnapshot 模式 + 校验 scope。
+ *
+ * 决策表(spec §1.3 / §2.4):
+ *   workspaceSnapshot   runtime.backend       结果
+ *   ──────────────────  ────────────────────  ──────────────────────
+ *   'disabled'          *                     不启用
+ *   'auto' / undefined  'ags-stateful'        启用(校验 scope)
+ *   'auto' / undefined  其他                   不启用(silent)
+ *   'enabled'           'ags-stateful'        启用(校验 scope)
+ *   'enabled'           其他                   throw ConfigError
+ *
+ * 启用后 scope 必须是 'shared'(同 envId 共享容器,跨 session 接续 cwd),
+ * 否则 throw ConfigError(包括 scope='session' 和 scope undefined 默认场景)。
+ */
+function resolveSnapshotMode(sandboxConfig: SandboxConfig | undefined): boolean {
+  const mode = sandboxConfig?.workspaceSnapshot ?? 'auto'
+  const scope = sandboxConfig?.scope ?? 'session'
+  const runtime = sandboxConfig?.runtime as SandboxRuntime | undefined
+  const backend = runtime?.backend
+  const supportsSnapshot = backend === 'ags-stateful'
+
+  if (mode === 'disabled') return false
+
+  // mode='enabled' but runtime can't snapshot → 显式抛错(用户主动要求,但能力不匹配)
+  if (mode === 'enabled' && !supportsSnapshot) {
+    throw new ConfigError(
+      `workspaceSnapshot='enabled' but runtime.backend='${backend}' does not support snapshot. ` +
+        `Use AgsStatefulSandbox or set workspaceSnapshot='disabled'.`,
+    )
+  }
+
+  // mode='auto' + 不支持 snapshot 的 runtime → 静默不启用
+  if (mode === 'auto' && !supportsSnapshot) return false
+
+  // 到这里 mode 是 'enabled' 或 'auto',且 backend 支持 snapshot → 必须 scope='shared'
+  if (scope !== 'shared') {
+    throw new ConfigError(
+      `workspaceSnapshot 要求 sandbox.scope='shared'(同 envId 共享容器,跨 session 接续 cwd),` +
+        `当前 scope='${scope}'。改为 createAgent({ sandbox: { scope: 'shared', ... } })。` +
+        `详见 Spec B §1.3。`,
+    )
+  }
+  return true
+}
 
 /**
  * Wrap user-supplied ToolDefinition[] as a single SDK MCP server. The Claude
@@ -449,4 +634,46 @@ function createBuiltinAskUserMcpServer(
     version: '1.0.0',
     tools: [askUserTool],
   })
+}
+
+/*
+ * 派生 OAK 自管的纯净 ephemeral cwd(用户没传 cwd 时使用)。
+ *
+ * 这个目录是空白的,settingSources=[]:SDK 进去什么都读不到,等价 v0 isolation。
+ * 进程级:每个 SDK 进程实例化时生成一次,进程结束时清理(我们不主动清,依赖 OS tmpdir GC)。
+ *
+ * **必须 mkdir**:SDK spawn 子进程时若 cwd 不存在会 ENOENT 崩溃。
+ * 用 crypto.randomBytes 取代 Math.random,避免可预测性(虽然非安全场景)。
+ */
+let ephemeralCwdCache: string | undefined
+function deriveEphemeralCwd(): string {
+  if (ephemeralCwdCache) return ephemeralCwdCache
+  const random = randomBytes(4).toString('hex')
+  ephemeralCwdCache = path.join(os.tmpdir(), `oak-ephemeral-${random}`)
+  mkdirSync(ephemeralCwdCache, { recursive: true })
+  return ephemeralCwdCache
+}
+
+/**
+ * 拒绝用户传 ~/.claude 或其子目录作 cwd(防止误用 + 跨用户读取宿主机配置)。
+ * Spec A §5.1 安全约束。
+ *
+ * 用 realpathSync 解析 symlink,避免 cwd='/data/projects/foo'(符号链接到 ~/.claude)
+ * 绕过校验。如果路径不存在(尚未创建),fall back 到 path.resolve 仅做字面校验。
+ */
+function assertSafeUserCwd(cwd: string): void {
+  let absolute: string
+  try {
+    absolute = realpathSync(cwd)
+  } catch {
+    absolute = path.resolve(cwd)
+  }
+  const home = os.homedir()
+  const homeClaude = path.join(home, '.claude')
+  if (absolute === homeClaude || absolute.startsWith(homeClaude + path.sep)) {
+    throw new InvalidConfigError(
+      `AgentConfig.cwd cannot point at host ~/.claude/ or its subdirectory (got ${cwd}, resolved to ${absolute}). ` +
+        'OAK refuses to share host-level Claude config across multi-tenant requests.',
+    )
+  }
 }

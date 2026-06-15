@@ -1,6 +1,126 @@
 # @cloudbase/open-agent-kernel 交接文档
 
-> 最后更新：2026-05-28 20:30 | 分支：`feat/support-open-agent-kernel` | 版本：`0.1.0-alpha.0`
+> 最后更新：2026-06-12 18:39 | 分支：`feat/support-open-agent-kernel` | 版本：`0.3.0-alpha.0`
+
+---
+
+## v0.2.0 — cwd / skills / userMemory (Spec A)
+
+**新增公共 API**:
+- `AgentConfig.cwd?: string` — 平台资产根目录(skills + 项目 CLAUDE.md)
+- `AgentConfig.skills?: { enabled?: 'all' | string[] }` — SDK skills 透传
+- `AgentConfig.userMemory?: { enabled?: boolean }` — 用户级长期记忆(基于 SDK 原生 `.claude/` + COS 同步)
+
+**破坏性改动**(从未生效字段,可接受):
+- 删除 `SandboxCapabilities.skills` / `.memory` / `.compaction`
+- 删除 `CompactionConfig` interface
+
+**新增 internal 模块**:`src/claude-home/`(同步引擎 / store / 工具)— 不公开 export。
+
+**新增 examples**:`15-skills.ts` / `16-user-memory.ts` / `17-user-memory-distributed.ts`
+
+**测试**:`pnpm test` 跑 5 套单元测试(path-derivation / sync-rules / in-memory-store / sync-engine / agent-builder),共 48 个 case。
+
+**Spec**:`docs/superpowers/specs/2026-06-01-oak-cwd-skills-user-memory-design.md`(commit `2968bdd`)。
+
+**已知限制**(可在 V2 评估补齐):
+- **项目级 subagent memory 不同步**:`<cwd>/.claude/agent-memory/<agent>/MEMORY.md`(SDK `memory: 'project'` 配置)目前不在 SYNC_INCLUDES 范围,跨节点不持久化。需要的业务方暂时改用 `memory: 'user'`(走 `<CLAUDE_CONFIG_DIR>/agent-memory/`,该路径已同步)。
+- **默认 ephemeral cwd 是 process-level 随机的**:不传 `cwd` 时,SDK 把项目级 auto-memory 写到 `<CLAUDE_CONFIG_DIR>/projects/<random-hash>/memory/`。跨节点 hash 不一致,**项目级主会话 auto-memory 跨节点不可复用**。要复用请传一个稳定的 `cwd`(业务镜像内固定路径)。**用户级 CLAUDE.md 与 user-level subagent memory 不受影响,跨节点正常工作**。
+- **CloudBaseCosClaudeHomeStore 缺 mock 单测**:目前仅集成层(example 16/17)验证。建议在 V2 加 mock 单测覆盖 key pattern / assertSafeKey / delete-404。
+- **session.send / runClaudeQuery 缺 sync-hook 集成测**:try/finally 触发 push 这条不变量目前没单测验证,只靠 spec compliance review 确认。建议 V2 加。
+
+---
+
+## v0.3.0 — Workspace Snapshot (Spec B) 
+
+**新增功能**:COS 快照同步 — 沙箱工作区跨进程/跨节点持久化
+
+### 核心实现
+- **AgsStatefulSandbox** 支持 COS mount + workspace snapshot
+- **send-end snapshot**:session.send() 结束自动触发 snapshot 到 COS
+- **manual snapshot**:`session.snapshotWorkspace()` API
+- **restoreFromCos**:新实例启动时自动从 COS 恢复工作区
+- **状态查询**:`session.getRestoreStatus()` 返回 `'full' | 'fresh' | 'partial' | 'failed' | null`
+
+### 验证用例
+- **example 18**:单进程验证(send-end snapshot + cosfs 持久化)
+- **example 19a/19b**:跨进程验证(写阶段 + 手动 stop + 读阶段)
+
+### Spec B 沙箱快照 — 技术架构总结
+
+#### 1. 快照生命周期
+```
+[OAK session.send() 结束] → [send-end snapshot 触发]
+    ↓
+[trw snapshotNow()] → [tar.zst 打包 /home/user] → [上传 COS]
+    ↓
+[新实例启动] → [trw restoreFromCos()] → [下载 snapshot] → [解压到 /home/user]
+    ↓
+[模型读取恢复的文件] → [跨进程数据接续完成]
+```
+
+#### 2. COS 存储结构
+```
+COS bucket/oak-workspaces/
+├── {userId}/                          # 用户隔离命名空间
+│   ├── .keep                          # 目录占位文件
+│   ├── .sync-out-status.json          # snapshot 元数据
+│   └── .snapshot-{timestamp}.tar.zst  # 压缩快照文件
+```
+
+#### 3. 关键文件格式
+
+**`.sync-out-status.json`**(快照元数据):
+```json
+{
+  "syncedAt": "2026-06-10T13:20:03.680Z",
+  "sizeBytes": 17877984,
+  "fileCount": 462,
+  "snapshotKey": ".snapshot-2026-06-10T13-20-03.680Z.tar.zst",
+  "snapshotSha256": "3d2d46bbf94fef6d0442b50c3c28c807918e2652acfb9339304d8662bf29b48a",
+  "snapshotSizeBytes": 4284680,
+  "lastGoodSnapshotKey": ".snapshot-2026-06-10T13-20-09.082Z.tar.zst",
+  "format": "tar.zst",
+  "version": 2
+}
+```
+
+#### 4. 挂载配置
+```json
+{
+  "MountOptions": [{
+    "Name": "oak-cos-workspace",
+    "SubPath": "restore-probe-{userId}"  // COS 子目录
+  }],
+  "CustomConfiguration": {
+    "Env": [{
+      "Name": "COS_MOUNT_DIR", 
+      "Value": "/mnt/workspace"  // 容器内挂载点
+    }]
+  }
+}
+```
+
+#### 5. 状态同步机制
+- **trw `/health`**:返回 `restored: "full" | "fresh" | "partial" | "failed"`
+- **OAK `getRestoreStatus()`**:读取 trw 状态并返回给业务层
+- **时序要求**:startSession 后需等待 trw bootstrap 完成才能读取准确状态
+
+### 已验证功能
+✅ **COS 写入链路**:OAK send-end → trw snapshotNow() → COS bucket/oak-workspaces/{userId}/.snapshot-*.tar.zst  
+✅ **COS 恢复链路**:新实例启动 → trw restoreFromCos() → 从 COS 下载 snapshot → 解压到 /home/user  
+✅ **跨进程数据接续**:新实例读到旧实例写入的文件内容
+✅ **trw 状态同步**:`/health` 正确返回 `restored: "full"`
+
+### 待优化问题
+- **OAK restoreStatus API 误报**:trw `/health` 显示 `"full"` 但 OAK `getRestoreStatus()` 有时返回 `null`(时序问题)
+- **example 19b 验收逻辑**:需要优化以模型读取结果为最终标准
+- **错误处理增强**:snapshot/restore 失败的用户提示
+
+### 技术细节
+- **COS 路径映射**:bucket/oak-workspaces/{userId}/ 正确挂载到 /mnt/workspace/
+- **文件格式**:`.snapshot-*.tar.zst`(压缩快照) + `.sync-out-status.json`(元数据)
+- **触发条件**:`workspaceRoot` ≠ `COS_MOUNT_DIR` 时自动启用 rsync 模式
 
 ---
 
@@ -57,7 +177,7 @@ src/
 │   ├── event-translator.ts          # SDKMessage → SessionEvent 翻译
 │   └── prompt-builder.ts            # system prompt 构建
 ├── resources/
-│   ├── credential-provider.ts       # TokenHub 凭证加载
+│   ├── credential-provider.ts       # CloudBase AI gateway APIKey 加载
 │   └── name-resolver.ts             # envId → 集合名/函数名/网关 URL 派生
 ├── session-store/
 │   ├── cloudbase-session-store.ts   # CloudBaseSessionStore（SDK 协议层适配）
@@ -372,32 +492,49 @@ await session.clearHistory()
 
 ## 九、环境变量
 
+> ⚠️ **凭证环境变量正在规范化中**（见 [十四、当前优化任务 → 优化 1](#优化1凭证环境变量规范化)）。  
+> 最终标准：`TENCENTCLOUD_SECRETID` / `TENCENTCLOUD_SECRETKEY` / `TENCENTCLOUD_SESSIONTOKEN`。  
+> `TCB_SECRET_ID` / `TCB_SECRET_KEY` / `TCB_TOKEN` 仅保留在 `.env.example` / `.env.local` 方便测试注入。
+
 ### 必填
 
 | 变量 | 说明 |
 |---|---|
 | `TCB_ENV_ID` | CloudBase 环境 ID |
-| `TENCENTCLOUD_TOKENHUB_API_KEY` | 模型凭证（TokenHub） |
-| `TCB_SECRET_ID` | CloudBase 控制面 AK |
-| `TCB_SECRET_KEY` | CloudBase 控制面 SK |
+| `TCB_API_KEY` | CloudBase 服务端 APIKey，用于模型网关；沙箱场景也复用为数据面长期 JWT |
 
 ### 可选
 
 | 变量 | 说明 |
 |---|---|
-| `TCB_API_KEY` | 沙箱数据面长期 JWT |
-| `TCB_TOKEN` | STS 临时凭证 token |
 | `TCB_REGION` | 区域（默认 `ap-shanghai`） |
 | `OAK_DEBUG` | 设为 `1` 启用调试日志 |
 | `CLOUDBASE_AGENT_MODEL` | 覆盖默认模型 |
 
+### 凭证相关（下表中变量 kernel 代码不应直接读取）
+
+> Kernel SDK 逻辑中不应存在读取 `TCB_SECRET_ID` / `TCB_SECRET_KEY` / `TCB_TOKEN` /  
+> `TENCENTCLOUD_SECRETID` / `TENCENTCLOUD_SECRETKEY` / `TENCENTCLOUD_SESSIONTOKEN` 等凭证环境变量的代码。  
+> 这些变量仅存在于 `.env.example` / `.env.local`，供测试/示例注入使用。
+
+| 变量 | 说明 |
+|---|---|
+| `TENCENTCLOUD_SECRETID` | 腾讯云标准 SecretId（**正确标准名**） |
+| `TENCENTCLOUD_SECRETKEY` | 腾讯云标准 SecretKey（**正确标准名**） |
+| `TENCENTCLOUD_SESSIONTOKEN` | 腾讯云标准临时 Token（**正确标准名**） |
+| `TCB_SECRET_ID` | ~~旧名，待弃用~~ |
+| `TCB_SECRET_KEY` | ~~旧名，待弃用~~ |
+| `TCB_TOKEN` | ~~旧名，待弃用~~ |
+
 ### 凭证模式
 
-TokenHub Anthropic 协议接入文档：https://cloud.tencent.com/document/product/1823/130079
+默认模型请求走 CloudBase AI gateway：
+
+- `apiBaseUrl`: `https://${TCB_ENV_ID}.api.tcloudbasegateway.com/v1/ai/cloudbase`
+- `apiKey`: 读取 `TCB_API_KEY`
 
 **模型选择规则**（重要）：
 - 默认模型一律使用 `glm-5.1`
-- 实测在 TokenHub Anthropic 协议下请求不通的模型：`deepseek-v3.1-terminus`、`deepseek-r1-0528`
 
 ---
 
@@ -550,7 +687,7 @@ if (process.env.OAK_DEBUG === '1') {
 
 ## 十二、待办事项 / 已知问题
 
-### 待完善
+### v0.2.0 (Spec A) 待完善
 
 1. ~~**`history-store/` 模块**~~ — ✅ 已删除（双写机制已覆盖需求）
 2. ~~**`getHistory()` 分页**~~ — ✅ 已优化（`loadEntriesByMessageIds` 避免全量扫描）
@@ -558,12 +695,364 @@ if (process.env.OAK_DEBUG === '1') {
 4. ~~**`listSessions()` 返回结构**~~ — ✅ 已通过 `registerSession` 持久化 userId
 5. **`resumeSession()` 实现** — 当前 SDK 层 resume 能工作（transcript 由 SDK 加载），但 kernel 层 userId 硬编码为 `'resumed'`、沙箱/权限状态未恢复（低优先级）
 
+### v0.3.0 (Spec B) 待优化
+
+1. **OAK restoreStatus API 误报** — trw `/health` 显示 `"full"` 但 OAK `getRestoreStatus()` 有时返回 `null`（时序同步问题）
+2. **example 19b 验收逻辑** — 需要优化以模型读取结果为最终标准，减少对 `getRestoreStatus()` 的依赖
+3. **错误处理增强** — snapshot/restore 失败的用户提示和 graceful 降级
+4. **性能监控** — snapshot 耗时、成功率等指标收集
+
 ### 技术债
 
 1. `cloudbase-db-driver.ts` 的 `gtCommand()` / `ltCommand()` 每次都动态加载 CloudBase SDK 获取 `db.command`，可缓存
 2. `extractMessageParts()` 中 `sdkMsg.message as { content?: unknown[] | string }` 类型断言链过长，应定义 SDKMessage 类型
+3. **CloudBaseCosClaudeHomeStore mock 单测** — 目前仅集成层验证，建议 V2 加 mock 单测
+4. **session.send / runClaudeQuery sync-hook 集成测** — try/finally 触发 push 的不变量需要单测验证
 
 ---
+
+### 优化 1：凭证环境变量规范化（✅ 已完成）
+
+> **状态**: 已实施。kernel SDK 逻辑中不再读取 CloudBase 凭证类环境变量；示例层负责从 `.env.local` 读取后显式注入 `credentials` / `apiKey`。
+>
+> **验证**: `pnpm format`、`pnpm -F @cloudbase/open-agent-kernel test`、`pnpm -F @cloudbase/open-agent-kernel type-check`、`pnpm -F @cloudbase/open-agent-kernel build`、`pnpm lint` 均通过。
+
+#### 背景
+
+kernel SDK 当前存在凭证环境变量使用不规范的问题：
+- 多处代码读取 `TCB_SECRET_ID` / `TCB_SECRET_KEY` / `TCB_TOKEN` 等非标准变量名
+- 各模块有独立的 `resolveCredentials()` 函数，环境变量 fallback 链不一致
+- 正确标准名：`TENCENTCLOUD_SECRETID` / `TENCENTCLOUD_SECRETKEY` / `TENCENTCLOUD_SESSIONTOKEN`
+
+#### 核心设计原则
+
+1. **kernel SDK 逻辑中不应存在读取凭证环境变量的代码** — 这些变量仅存在于 `.env.example` / `.env.local`，供测试和示例注入使用
+2. **凭证统一通过 `createAgent` 的 `credentials` 参数注入** — 所有下游模块从同一处取值
+3. **当下游 SDK 有内部 env 读取机制时，可不传让它自取；没有时，强制要求传参**
+
+#### 下游 SDK 的凭证行为（关键发现）
+
+| 依赖 | 能否自动读 env？ | 结论 |
+|------|:---:|------|
+| `@cloudbase/node-sdk` | ⚠️ 仅云函数环境 | 云函数内可自动读 `TENCENTCLOUD_SECRETID/SECRETKEY`；通用服务器环境需显式传 `auth.secretId/secretKey` |
+| `@cloudbase/manager-node` | ❌ 无此机制 | 构造函数要求显式传入 `secretId`/`secretKey`/`envId`，文档"云函数内可不填"仅适用于云函数自动注入 |
+| `tencentcloud-sdk-nodejs` | ❌ 代码中未使用 | `AgsStatefulSandbox` 根本不依赖此包，全部走 `@cloudbase/manager-node` 的 `CloudService` 工具类 |
+
+**结论**：
+- `AgsStatefulSandbox` + `CloudBaseCosClaudeHomeStore`（manager-node 用户）→ **必须显式传凭证**，不传直接报错
+- `CloudBaseDbDriver` + `CloudBaseStorage` + `CloudBaseDbPermissionDriver`（node-sdk 用户）→ **建议传凭证**；不传时由 node-sdk 自己处理（非云函数环境会报错）
+
+#### 实施方案
+
+##### 第 0 步：类型定义
+
+在 `src/public/types.ts` 新增统一凭证类型，加入 `AgentConfig`：
+
+```typescript
+/** 平台凭证 — 用于初始化 @cloudbase/node-sdk 和 @cloudbase/manager-node */
+export interface PlatformCredentials {
+  secretId: string
+  secretKey: string
+  sessionToken?: string
+  envId: string
+}
+
+// AgentConfig 新增字段
+export interface AgentConfig {
+  // ...existing fields
+  /** 平台凭证，用于初始化 CloudBase SDK。不传则依赖下游 SDK 自身行为。 */
+  credentials?: PlatformCredentials
+}
+```
+
+`SandboxUserCredentials` 保持不变（用于注入 sandbox MCP 工具），其 JSDoc 需从 `TCB_SECRET_ID` 改为 `TENCENTCLOUD_SECRETID`。
+
+##### 第 1 步：清理 `createAgent()` 中的凭证解析
+
+`src/public/create-agent.ts`:
+- 删除 `resolveUserCredentials()` 中所有 `process.env.TCB_*` / `process.env.TENCENTCLOUD_*` 的 fallback
+- 将 `credentials` 参数传递给所有需要凭证的下游模块
+
+##### 第 2 步：清理各模块的 `resolveCredentials()`
+
+以下 6 处 `resolveCredentials()` 函数需删除 env var fallback，改为从构造参数接收：
+
+| 文件 | 依赖 | 改动 |
+|------|------|------|
+| `src/session-store/drivers/cloudbase-db-driver.ts` | node-sdk | 删除 `resolveCredentials()`，从 `CloudBaseDbDriverOptions` 取 credentials |
+| `src/storage/cloudbase-storage.ts` | node-sdk | 同上 |
+| `src/permissions/drivers/cloudbase-db-driver.ts` | node-sdk | 同上 |
+| `src/claude-home/cloudbase-cos-store.ts` | manager-node | 删除 `resolveCredentials()`，从构造参数取 credentials；缺则报 `InvalidConfigError` |
+| `src/sandbox/ags-stateful-sandbox.ts` | manager-node | 删除 `resolveCredentials()`，从 `AgsStatefulSandboxOptions` 取；缺则报 `InvalidConfigError` |
+| `src/public/create-agent.ts` | - | 删除 `resolveUserCredentials()` 的 env fallback，改为从 `AgentConfig.credentials` 取 |
+
+##### 第 3 步：错误提示
+
+| 模块 | 缺凭证时行为 |
+|------|-------------|
+| manager-node 用户 (sandbox / cos-store) | 抛出 `InvalidConfigError('必须提供 platform credentials')` |
+| node-sdk 用户 (db-driver / storage / permission-driver) | 由 node-sdk 自身报错（其在非云函数环境会抛认证错误） |
+
+##### 第 4 步：更新 `.env.example`
+
+`packages/open-agent-kernel/examples/.env.example`:
+- 变量名改为 `TENCENTCLOUD_SECRETID` / `TENCENTCLOUD_SECRETKEY` / `TENCENTCLOUD_SESSIONTOKEN`
+- 保留旧名注释 + 弃用标记
+
+##### 第 5 步：更新测试文件
+
+以下测试文件通过 `createAgent({ credentials })` 或构造参数传入凭证，不再设置 env：
+
+- `src/sandbox/__tests__/ags-stateful-sandbox.test.ts` — 当前设 `TCB_SECRET_ID/KEY`
+- `src/claude-home/__tests__/cloudbase-cos-store.test.ts` — 当前设 `TCB_SECRET_ID/KEY`
+- `src/runtime/__tests__/agent-builder.test.ts` — 当前设 `TCB_SECRET_ID/KEY`
+- `src/sandbox/workspace-snapshot/__tests__/init-client.test.ts` — 当前用 `TCB_SECRET_ID` 作为 credential key
+
+#### 凭证流转图（改造后）
+
+```
+createAgent({ credentials })
+  ├→ SessionStore (CloudBaseDbDriver)      ← credentials 传入 node-sdk init()
+  ├→ Storage (CloudBaseStorage)            ← credentials 传入 node-sdk init()
+  ├→ PermissionDriver (CloudBaseDbPerm)    ← credentials 传入 node-sdk init()
+  ├→ ClaudeHomeStore (CloudBaseCosStore)   ← credentials 传入 manager-node constructor（必传）
+  └→ Sandbox (AgsStatefulSandbox)          ← credentials 传入 manager-node constructor（必传）
+```
+
+#### 不改变的部分
+
+- `src/resources/credential-provider.ts` — 处理模型网关 API Key，默认优先复用 `TCB_API_KEY`
+- `src/sandbox/cloudbase-mcp.ts` — `injectCredentials()` 发送到 sandbox 的 HTTP body 已使用标准 key 名 `TENCENTCLOUD_SECRETID/SECRETKEY/SESSIONTOKEN`，保持不变
+- `src/sandbox/workspace-snapshot/init-client.ts` — 内部逻辑不变，但传入的 credential key 名需统一为标准名
+
+#### 验收标准
+
+- [x] 所有 `resolveCredentials()` 函数中无 `process.env.TCB_*` / `process.env.TENCENTCLOUD_*` 等凭证 env var 读取
+- [x] `AgentConfig.credentials` 类型定义完整
+- [x] `.env.example` 使用标准变量名
+- [x] 测试文件中无凭证 env var 设置
+- [x] `pnpm build` 通过
+- [x] `pnpm type-check` 通过
+- [x] `pnpm lint` 通过
+- [x] `pnpm test` 通过
+- [x] 更新 `src/public/types.ts` 中 `SandboxUserCredentials` 的 JSDoc 中 env var 引用
+
+#### 确认点（实施前与用户确认）
+
+1. ✅ 统一 `credentials` 到 `AgentConfig` 入口 — 已确认
+2. ✅ manager-node 用户必须传凭证，缺则报错 — 已确认
+3. ✅ node-sdk 用户建议传凭证，不传交由 SDK 自身处理 — 已确认
+4. ✅ `PlatformCredentials` 独立于 `SandboxUserCredentials`（平台控制面凭证 vs 用户租户凭证语义不同）
+
+---
+
+### 优化 2：sessionStore 默认启用与 API 简化（✅ 已完成）
+
+> **状态**: 已实施。面向 SDK 用户的默认路径从
+> `new CloudBaseDbDriver({ credentials })` → `new CloudBaseSessionStore({ driver })` →
+> `createAgent({ session: { store } })` 简化为只传 `createAgent({ credentials })`。
+
+#### 设计结论
+
+1. **默认启用 CloudBase FlexDB session store**
+   - 当 `AgentConfig.credentials` 存在且 `session.enabled !== false` 时，kernel 自动创建默认 `CloudBaseSessionStore`。
+   - 默认 provider 为 `cloudbase`，默认 database 为 `flexdb`，默认表前缀为 `oak_`。
+   - `projectKey` 默认使用 `envId`，避免 SDK cwd 派生 key 导致跨节点 resume 断裂。
+
+2. **保留显式关闭与高级扩展**
+   - `session: { enabled: false }` 显式关闭默认持久化。
+   - `session: { store }` 仍支持完全自定义 SessionStore。
+   - `session.provider` 表达资源域，当前为 `'cloudbase'`。
+   - `session.database` 表达 CloudBase 内部数据资源类型：`'flexdb' | 'mongo' | 'mysql' | 'pgsql'`。
+   - 当前内置实现为 `database: 'flexdb'`；其他 CloudBase 数据库类型预留，使用时会给出明确未支持错误。
+
+3. **允许自定义表前缀**
+   - 新增 `session.tablePrefix`，用于默认 CloudBase FlexDB 后端。
+   - 生成 `{tablePrefix}sessions` / `{tablePrefix}session_entries` /
+     `{tablePrefix}session_summaries` / `{tablePrefix}session_messages`。
+
+#### 新推荐用法
+
+```typescript
+const agent = createAgent({
+  envId,
+  credentials: { secretId, secretKey },
+  model: 'glm-5.1',
+  // 不配置 session 时，credentials 存在会默认启用 CloudBase FlexDB session store
+})
+```
+
+自定义表前缀:
+
+```typescript
+const agent = createAgent({
+  envId,
+  credentials,
+  model: 'glm-5.1',
+  session: { tablePrefix: 'my_agent_' },
+})
+```
+
+关闭默认持久化:
+
+```typescript
+const agent = createAgent({
+  envId,
+  credentials,
+  model: 'glm-5.1',
+  session: { enabled: false },
+})
+```
+
+#### 验证
+
+- `pnpm format`
+- `pnpm -F @cloudbase/open-agent-kernel test`（14 files / 167 tests）
+- `pnpm -F @cloudbase/open-agent-kernel type-check`
+- `pnpm -F @cloudbase/open-agent-kernel build`
+- `pnpm lint`
+
+---
+
+### 优化 3：createAgent 顶层默认资源补齐（✅ 已完成）
+
+> **状态**: 已实施。继续降低 SDK 用户的上手成本，避免在多个 CloudBase 能力里重复传 `envId` 或手动初始化默认资源类。
+
+#### 设计结论
+
+1. **`credentials.envId` 默认继承顶层 `envId`**
+   - `PlatformCredentials.envId` 改为可选。
+   - `createAgent` 内部会把 `credentials.envId ?? AgentConfig.envId` 归一化后再传给默认 CloudBase 资源。
+   - 推荐写法从 `createAgent({ envId, credentials: { envId, secretId, secretKey } })` 简化为 `createAgent({ envId, credentials: { secretId, secretKey } })`。
+
+2. **有 `credentials` 时默认启用 CloudBase Storage**
+   - 用户不显式传 `storage`，且已提供 `credentials` 时，kernel 自动创建 `CloudBaseStorage`。
+   - 多模态附件默认上传到 CloudBase 云存储并以签名 URL 发送给模型。
+   - 用户可通过 `storage: { pathPrefix, urlExpiresIn }` 覆盖默认上传路径和签名 URL 有效期。
+   - 用户仍可通过 `storage: new InMemoryStorage()` 或自定义 `StorageProvider` 覆盖默认行为。
+
+3. **资源命名入口收敛**
+   - DB 表名统一通过 `session.tablePrefix` / `permissions.tablePrefix` 管理。
+   - `ResourceConfig` 不再暴露未被默认 store 使用的具体 session 集合名入口，避免“配置了但不生效”的误导。
+
+#### 新推荐用法
+
+```typescript
+const agent = createAgent({
+  envId,
+  credentials: { secretId, secretKey },
+  model: 'glm-5v-turbo',
+  // 发送 attachments 时默认使用 CloudBase Storage；也可覆盖上传路径
+  storage: { pathPrefix: 'my-agent/attachments/' },
+})
+```
+
+---
+
+### 优化 4：permissions 默认 CloudBase 分布式存储（✅ 已完成）
+
+> **状态**: 已实施。HITL 审批从“默认进程内状态”升级为“有 CloudBase credentials 时默认分布式状态”，降低生产部署和跨节点审批的配置成本。
+
+#### 设计结论
+
+1. **有 `credentials + permissions.requireApproval` 时默认启用 CloudBase permission store**
+   - 用户不显式传 `permissions.store`，且已提供 `credentials` 时，kernel 自动创建：
+     `CloudBasePermissionStore({ driver: new CloudBaseDbPermissionDriver({ credentials }) })`。
+   - `projectKey` 默认使用 `AgentConfig.envId`，保证不同节点用同一 CloudBase 环境时可共享审批状态。
+   - 未提供 `credentials` 时保持原行为：回落到进程内 `InMemoryPermissionStore`。
+
+2. **保留显式覆盖**
+   - `permissions.store` 仍优先级最高，用户可传自定义分布式 store 或测试用 store。
+   - 新增 `permissions.tablePrefix`，仅在默认 CloudBase permission store 生效，集合名为 `{tablePrefix}state`，默认 `oak_state`。
+
+#### 新推荐用法
+
+```typescript
+const agent = createAgent({
+  envId,
+  credentials: { secretId, secretKey },
+  model: 'glm-5.1',
+  permissions: {
+    requireApproval: ['mcp__sandbox__bash', 'mcp__cloudbase__deleteData'],
+    // 无需手动 new CloudBasePermissionStore
+  },
+})
+```
+
+---
+
+### 优化 5：userMemory API 简化（✅ 已完成）
+
+> **状态**: 已实施。保持 userMemory 默认关闭，但显式启用和预置/清理用户记忆的路径更短，不再要求示例或业务方理解内部 COS store。
+
+#### 设计结论
+
+1. **支持 `userMemory: true` 简写**
+   - `userMemory: true` 等价于 `userMemory: { enabled: true }`。
+   - 对象形式保留，用于后续扩展更多 userMemory 配置项。
+   - userMemory 仍不默认开启，因为它会读写 COS，且要求同一 `userId` 请求串行。
+
+2. **新增公开用户记忆文件管理 API**
+   - `writeUserMemoryFiles({ envId, userId, credentials, files })`
+   - `deleteUserMemoryFiles({ envId, userId, credentials, paths })`
+   - 内部复用 CloudBase COS 同步 store，业务方无需 deep-import `src/claude-home/*`。
+   - `credentials.envId` 可省略，默认继承参数中的 `envId`。
+
+#### 新推荐用法
+
+```typescript
+const agent = createAgent({
+  envId,
+  credentials: { secretId, secretKey },
+  model: 'glm-5.1',
+  userMemory: true,
+})
+
+await writeUserMemoryFiles({
+  envId,
+  userId,
+  credentials: { secretId, secretKey },
+  files: [{ path: 'CLAUDE.md', content: '请始终用中文回答。' }],
+})
+```
+
+---
+
+### 优化 6：sandbox 主动开启后的默认 AGS 配置（✅ 已完成）
+
+> **状态**: 已实施。sandbox 仍默认关闭，但用户主动开启后不再需要理解 `new AgsStatefulSandbox`、`getSandboxApiKey()` 和 `scope: 'shared'` 这些默认细节。
+
+#### 设计结论
+
+1. **新增 `sandbox.enabled` 默认路径**
+   - `sandbox: { enabled: true }` 会自动创建默认 `AgsStatefulSandbox`。
+   - 默认 `provider` 为 `ags-stateful`，为后续扩展其他 sandbox 产品预留类型标识。
+   - 默认 `scope` 为 `shared`，匹配 workspace snapshot 和跨 session 接续的主路径。
+
+2. **默认 AGS 数据面凭证**
+   - 优先级：`sandbox.apiKey` → `TCB_API_KEY` → `OAK_SANDBOX_API_KEY`。
+   - 缺失时在 `createAgent` 阶段抛出明确配置错误。
+   - 平台控制面凭证仍通过 `createAgent({ credentials })` 统一下传。
+
+3. **保留高级覆盖**
+   - 用户显式传 `sandbox.runtime` 时，kernel 不会替换为默认 AGS runtime。
+   - `sandbox.cloudbaseTools: false`、`workspaceSnapshot`、timeout 等高级配置继续生效。
+
+4. **修复 shared + cosMount 的 userId 复用隔离**
+   - cosMount 的 `SubPath` 在 `StartSandboxInstance` 阶段绑定到 `userId`。
+   - 旧逻辑按 `envId/toolId` 复用任意 shared 实例，可能把当前用户的 snapshot 写到旧实例所属 userId 的 COS 目录，导致下一次用当前 userId restore 时出现 `restoreStatus=fresh`。
+   - 新逻辑仅复用本进程明确记录 owner 且 owner 相同的 shared 实例；未知 owner 的历史实例不再直接复用，交给 AGS timeout 回收或用户手动停止。
+
+#### 新推荐用法
+
+```typescript
+const agent = createAgent({
+  envId,
+  credentials: { secretId, secretKey },
+  model: 'glm-5.1',
+  sandbox: { enabled: true },
+})
+```
 
 ## 十三、依赖关系
 
@@ -638,10 +1127,10 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 
 ```bash
 # 1. 配置环境变量
-cp packages/open-agent-kernel/examples/.env.example packages/open-agent-kernel/examples/.env.local
-# 编辑 .env.local 填入真实凭证
+cp packages/open-agent-kernel/examples/config.example.json packages/open-agent-kernel/examples/config.local.json
+# 编辑 config.local.json 填入真实凭证
 
-# 2. 运行最简示例
+# 2. 运行快速开始示例
 pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
 
 # 3. 运行带持久化的示例

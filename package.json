@@ -1,51 +1,67 @@
 {
   "name": "@cloudbase/open-agent-kernel",
-  "version": "0.1.0-alpha.0",
+  "version": "0.1.0-beta.0",
   "description": "CloudBase Open Agent Kernel — server-side agentic agent SDK with built-in CloudBase resources",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    }
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
   },
   "files": [
     "dist",
-    "src",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "pnpm run build"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.146",
     "@anthropic-ai/sdk": "^0.93.0",
-    "@modelcontextprotocol/sdk": "^1.29.0"
-  },
-  "peerDependencies": {
-    "@cloudbase/node-sdk": "^3.0.0",
-    "@cloudbase/manager-node": "^4.0.0",
-    "zod": "^4.0.0"
-  },
-  "peerDependenciesMeta": {
-    "@cloudbase/node-sdk": {
-      "optional": true
-    },
-    "@cloudbase/manager-node": {
-      "optional": true
-    }
+    "@cloudbase/manager-node": "^4.10.6",
+    "@cloudbase/node-sdk": "^3.18.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
-    "dotenv": "^17.2.3",
     "tsup": "^8.0.0",
     "typescript": "~5.7.0",
-    "zod": "^4.0.0"
+    "vitest": "^3.2.0"
   },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "cloudbase",
+    "agent",
+    "ai",
+    "sdk",
+    "tencent-cloud",
+    "serverless",
+    "mcp",
+    "sandbox"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TencentCloudBase/OpenVibeCoding.git",
+    "directory": "packages/open-agent-kernel"
+  },
+  "bugs": {
+    "url": "https://github.com/TencentCloudBase/OpenVibeCoding/issues"
+  },
+  "homepage": "https://github.com/TencentCloudBase/OpenVibeCoding/tree/main/packages/open-agent-kernel#readme",
   "publishConfig": {
     "access": "public"
   }

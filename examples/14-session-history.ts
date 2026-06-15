@@ -10,24 +10,16 @@
  *   6. clearHistory() 清除消息索引
  *
  * 前置条件：
- *   - TENCENTCLOUD_TOKENHUB_API_KEY（模型凭证）
- *   - TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY（CloudBase 控制面）
- *   - TCB_API_KEY（沙箱数据面 JWT）
+ *   - examples/config.local.json
+ *   - examples/config.local.json: envId / model / credentials
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/14-session-history.ts
  */
-import './_shared/env.js'
+import { getEnvId, getModel, getPlatformCredentials } from './_shared/env.js'
 
 import { randomUUID } from 'node:crypto'
-import {
-  AgsStatefulSandbox,
-  CloudBaseDbDriver,
-  CloudBaseDbPermissionDriver,
-  CloudBasePermissionStore,
-  CloudBaseSessionStore,
-  createAgent,
-} from '@cloudbase/open-agent-kernel'
+import { createAgent } from '@cloudbase/open-agent-kernel'
 
 // ─── 辅助函数 ──────────────────────────────────────────────────────
 
@@ -73,22 +65,13 @@ function printHistory(history: Awaited<ReturnType<typeof session.getHistory>>): 
 
 // ─── 主流程 ────────────────────────────────────────────────────────
 
-const envId = process.env.TCB_ENV_ID
-if (!envId) {
-  throw new Error('TCB_ENV_ID is required (set it in examples/.env.local)')
-}
-
-const driver = new CloudBaseDbDriver()
-const sessionStore = new CloudBaseSessionStore({ driver, projectKey: envId })
-
-const permissionStore = new CloudBasePermissionStore({
-  projectKey: envId,
-  driver: new CloudBaseDbPermissionDriver(),
-})
+const envId = getEnvId()
+const credentials = getPlatformCredentials()
 
 const agent = createAgent({
   envId,
-  model: process.env.CLOUDBASE_AGENT_MODEL ?? 'glm-5.1',
+  credentials,
+  model: getModel(),
   systemPrompt:
     'You are a helpful coding assistant working inside a sandbox.\n' +
     'You have access to sandbox tools:\n' +
@@ -99,14 +82,12 @@ const agent = createAgent({
     'When asked to list/read files, use glob or read.\n' +
     'Reply concisely in Chinese.',
   sandbox: {
-    runtime: new AgsStatefulSandbox(),
+    enabled: true,
     cloudbaseTools: false, // 只用 sandbox 工具，不启用 cloudbase MCP（简化依赖）
   },
-  session: { store: sessionStore, projectKey: envId },
   permissions: {
     // bash 命令需要审批（危险操作）
     requireApproval: 'mcp__sandbox__bash',
-    store: permissionStore,
   },
 })
 
