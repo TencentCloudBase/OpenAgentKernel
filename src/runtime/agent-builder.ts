@@ -29,6 +29,7 @@ import type {
   SettingSource,
 } from '@anthropic-ai/claude-agent-sdk'
 import { createSdkMcpServer, tool as sdkTool } from '@anthropic-ai/claude-agent-sdk'
+import { z } from 'zod'
 import {
   createPreToolUsePermissionHook,
   OAK_CLIENT_TOOL_RESULT_KEY,
@@ -588,22 +589,13 @@ function createBuiltinAskUserMcpServer(
   const askUserTool = sdkTool(
     'askUser',
     'Ask the user a question and wait for their answer. Use this when you need clarification, confirmation, or a choice from the user.',
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     {
-      type: 'object' as const,
-      properties: {
-        question: {
-          type: 'string' as const,
-          description: 'The question to ask the user',
-        },
-        options: {
-          type: 'array' as const,
-          items: { type: 'string' as const },
-          description: 'Optional predefined answer options for the user to choose from',
-        },
-      },
-      required: ['question'],
-    } as any,
+      question: z.string().describe('The question to ask the user'),
+      options: z
+        .array(z.string())
+        .optional()
+        .describe('Optional predefined answer options for the user to choose from'),
+    },
     async (input: Record<string, unknown>) => {
       // Resume path: check if an answer is already stashed in the store.
       if (conversationId && askUserStore.scanRecent) {
