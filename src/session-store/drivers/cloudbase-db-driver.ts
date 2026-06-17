@@ -325,6 +325,19 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
       }))
   }
 
+  async getSession(projectKey: string, sessionId: string): Promise<{ sessionId: string; mtime: number; userId?: string } | null> {
+    const sessionsCol = await this.getCollection('sessions')
+    const { data } = await sessionsCol.where({ projectKey, sessionId }).get()
+    if (data.length === 0) return null
+    const row = data[0]
+    if (typeof row['sessionId'] !== 'string' || typeof row['mtime'] !== 'number') return null
+    return {
+      sessionId: row['sessionId'] as string,
+      mtime: row['mtime'] as number,
+      userId: typeof row['userId'] === 'string' ? (row['userId'] as string) : undefined,
+    }
+  }
+
   async registerSession(args: {
     projectKey: string
     sessionId: string

@@ -1525,8 +1525,23 @@ function createSessionsManagement(config: AgentConfig): Agent['sessions'] {
         updatedAt: s.mtime,
       }))
     },
-    async get(_conversationId): Promise<SessionSummary | null> {
-      return null
+    async get(conversationId): Promise<SessionSummary | null> {
+      const store = config.session?.store as
+        | {
+            getSession?: (k: string, sid: string) => Promise<{ sessionId: string; mtime: number; userId?: string } | null>
+          }
+        | undefined
+      if (!store?.getSession) return null
+      const projectKey = config.session?.projectKey ?? config.envId
+      const hit = await store.getSession(projectKey, conversationId)
+      if (!hit) return null
+      return {
+        conversationId: hit.sessionId,
+        userId: hit.userId ?? '',
+        status: 'idle' as const,
+        createdAt: hit.mtime,
+        updatedAt: hit.mtime,
+      }
     },
     async delete(conversationId): Promise<void> {
       const store = config.session?.store as

@@ -100,6 +100,13 @@ export interface SessionStoreDriver {
   listSessions(projectKey: string): Promise<Array<{ sessionId: string; mtime: number; userId?: string }>>
 
   /**
+   * 按 (projectKey, sessionId) 查询单个 session。
+   * 比 listSessions + find 更高效：直接走索引，O(1)。
+   * 不存在时返回 null。
+   */
+  getSession(projectKey: string, sessionId: string): Promise<{ sessionId: string; mtime: number; userId?: string } | null>
+
+  /**
    * 列出某个 projectKey 下的所有 session summaries。
    * 实现要求：
    *   - mtime 必须与 listSessions() 同源（保证 staleness 检查正确）

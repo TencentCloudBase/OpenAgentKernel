@@ -132,6 +132,10 @@ export class CloudBaseSessionStore implements SessionStore {
     return this.driver.listSessions(this.mapProjectKey(projectKey))
   }
 
+  async getSession(projectKey: string, sessionId: string): Promise<{ sessionId: string; mtime: number; userId?: string } | null> {
+    return this.driver.getSession(this.mapProjectKey(projectKey), sessionId)
+  }
+
   /**
    * 注册 session 元数据（userId 等）。
    * 在 session 创建时由 kernel 调用，不属于 SDK SessionStore 接口。
