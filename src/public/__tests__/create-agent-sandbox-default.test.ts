@@ -27,7 +27,7 @@ const { createAgent } = await import('../create-agent.js')
 describe('createAgent — default sandbox runtime', () => {
   beforeEach(() => {
     mocks.agsStatefulSandbox.mockClear()
-    delete process.env.TCB_API_KEY
+    delete process.env.CLOUDBASE_APIKEY
     delete process.env.OAK_SANDBOX_API_KEY
   })
 
@@ -44,8 +44,8 @@ describe('createAgent — default sandbox runtime', () => {
     expect(mocks.agsStatefulSandbox).toHaveBeenCalledWith({ apiKey: 'sandbox-api-key' })
   })
 
-  it('reads TCB_API_KEY for the default sandbox runtime', () => {
-    process.env.TCB_API_KEY = 'env-sandbox-api-key'
+  it('reads CLOUDBASE_APIKEY for the default sandbox runtime', () => {
+    process.env.CLOUDBASE_APIKEY = 'env-sandbox-api-key'
 
     createAgent({
       envId: 'env-test',

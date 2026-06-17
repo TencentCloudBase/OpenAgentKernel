@@ -11,7 +11,7 @@
  * 这是 PR #7.0 的最小演示：单进程内进行，PermissionStore 走默认 InMemoryPermissionStore。
  * 多节点 / 跨进程 / 跨设备审批见 PR #7.1（需配 CloudBasePermissionStore）。
  *
- * 配置：复用 example 06 的（仅需要 TCB_API_KEY + config.envId）。
+ * 配置：复用 example 06 的（仅需要 CLOUDBASE_APIKEY + config.envId）。
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/11-hitl-approval.ts

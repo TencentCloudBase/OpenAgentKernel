@@ -2,7 +2,7 @@
  * 加载 examples/config.local.json。
  *
  * 用法：在 example 顶部 `import { getEnvId, getModel, ... } from './_shared/env.js'`
- *       helper 会在首次调用时读取配置，并把 `tcbApiKey` 写入 `process.env.TCB_API_KEY`
+ *       helper 会在首次调用时读取配置，并把 `tcbApiKey` 写入 `process.env.CLOUDBASE_APIKEY`
  *       供 SDK 默认模型网关使用。
  */
 
@@ -51,7 +51,7 @@ function loadConfig(): ExampleConfig {
     throw new Error('config.local.json: tcbApiKey is required')
   }
 
-  process.env.TCB_API_KEY = config.tcbApiKey
+  process.env.CLOUDBASE_APIKEY = config.tcbApiKey
   if (config.examples?.debug === true) {
     process.env.OAK_DEBUG = '1'
   }
@@ -107,7 +107,7 @@ export function getExampleImagePath(): string | undefined {
 
 export function getSandboxApiKey(): string {
   loadConfig()
-  const apiKey = process.env.TCB_API_KEY
+  const apiKey = process.env.CLOUDBASE_APIKEY
   if (!apiKey) {
     throw new Error('config.local.json: tcbApiKey is required')
   }

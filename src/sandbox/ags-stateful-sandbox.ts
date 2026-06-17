@@ -15,7 +15,7 @@
  * 协议参考：
  *   - 控制面：腾讯云 AGS OpenAPI（@cloudbase/manager-node CloudService('ags')）
  *   - 数据面：TRW HTTP gateway，3 个 header：
- *       X-Cloudbase-Authorization: Bearer {TCB_API_KEY}
+ *       X-Cloudbase-Authorization: Bearer {CLOUDBASE_APIKEY}
  *       E2b-Sandbox-Id: {InstanceId}
  *       E2b-Sandbox-Port: 9000  (TRW 默认端口)
  */

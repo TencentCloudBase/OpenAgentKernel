@@ -34,14 +34,14 @@ export function resolveApiKey(explicitKey?: string): ResolvedApiKey {
   }
 
   // 2. CloudBase 环境服务端 APIKey
-  const tcbApiKey = process.env.TCB_API_KEY
+  const tcbApiKey = process.env.CLOUDBASE_APIKEY
   if (typeof tcbApiKey === 'string' && tcbApiKey.length > 0) {
     return { apiKey: tcbApiKey, source: 'env_tcb_api_key' }
   }
 
   throw new ResourceError(
     'No API key found. Set one of:\n' +
-      '  - process.env.TCB_API_KEY (CloudBase environment server APIKey)\n' +
+      '  - process.env.CLOUDBASE_APIKEY (CloudBase environment server APIKey)\n' +
       '  - AgentConfig.model.apiKey (programmatic)\n' +
       '\n' +
       'Get a CloudBase server APIKey from the CloudBase environment settings.',

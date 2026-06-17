@@ -159,10 +159,10 @@ function resolveSandboxConfig(config: AgentConfig): AgentConfig['sandbox'] {
     )
   }
 
-  const apiKey = sandbox.apiKey ?? process.env.TCB_API_KEY ?? process.env.OAK_SANDBOX_API_KEY
+  const apiKey = sandbox.apiKey ?? process.env.CLOUDBASE_APIKEY ?? process.env.OAK_SANDBOX_API_KEY
   if (!apiKey) {
     throw new InvalidConfigError(
-      'AgentConfig.sandbox.enabled=true requires sandbox.apiKey, TCB_API_KEY, or OAK_SANDBOX_API_KEY ' +
+      'AgentConfig.sandbox.enabled=true requires sandbox.apiKey, CLOUDBASE_APIKEY, or OAK_SANDBOX_API_KEY ' +
         'for the default AgsStatefulSandbox runtime.',
     )
   }

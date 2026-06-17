@@ -71,7 +71,7 @@ export interface SandboxConfig {
    * 默认 AGS 数据面认证 JWT。
    *
    * 仅在 `enabled: true` 且未显式传 `runtime` 时用于构造默认 AgsStatefulSandbox。
-   * 不传时读取 `TCB_API_KEY` 或 `OAK_SANDBOX_API_KEY`。
+   * 不传时读取 `CLOUDBASE_APIKEY` 或 `OAK_SANDBOX_API_KEY`。
    */
   apiKey?: string
   /**
