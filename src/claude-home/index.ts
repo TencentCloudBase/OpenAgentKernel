@@ -5,7 +5,15 @@
  * 内部模块(agent-builder / create-agent)从这里 import。
  */
 
-export { deriveClaudeConfigDir, sanitizePathSegment } from './path-derivation.js'
+export {
+  deriveClaudeConfigDir,
+  deriveAgentConfigDir,
+  deriveSyncTmpDir,
+  resolveWorkRoot,
+  getOakRoot,
+  sanitizePathSegment,
+  OAK_ROOT_SEGMENT,
+} from './path-derivation.js'
 export { matchesSyncRule, SYNC_INCLUDES } from './sync-rules.js'
 export { sha256OfBuffer, sha256OfFile } from './dedup.js'
 export { ClaudeHomeSyncEngine, type ClaudeHomeSyncEngineOptions } from './sync-engine.js'

@@ -132,7 +132,10 @@ export class CloudBaseSessionStore implements SessionStore {
     return this.driver.listSessions(this.mapProjectKey(projectKey))
   }
 
-  async getSession(projectKey: string, sessionId: string): Promise<{ sessionId: string; mtime: number; userId?: string } | null> {
+  async getSession(
+    projectKey: string,
+    sessionId: string,
+  ): Promise<{ sessionId: string; mtime: number; userId?: string } | null> {
     return this.driver.getSession(this.mapProjectKey(projectKey), sessionId)
   }
 

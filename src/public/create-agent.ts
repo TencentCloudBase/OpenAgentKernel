@@ -1000,10 +1000,12 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
   let syncEngine: ReturnType<typeof buildClaudeQueryOptions>['syncEngine']
   let snapshotEngine: ReturnType<typeof buildClaudeQueryOptions>['snapshotEngine']
   let sandbox: SandboxInstance | undefined
+  let debugFilePath: string | undefined
   // Spec B(Task 8):仅当 snapshot bootstrap 成功完成(或无需 bootstrap)时才置 true。
   // 若 bootstrap 抛错(SandboxRestoreFailed / 网络),finally 必须跳过 send-end snapshot,
   // 否则会在 broken state 上再花 30s timeout 做 snapshot,可能把不完整状态推上 COS。
   let bootstrapOk = false
+  const debug = process.env.OAK_DEBUG === '1'
   try {
     sandbox = await ensureSandbox()
     const cloudbaseMcp = sandbox ? await ensureCloudbaseMcp(sandbox) : undefined
@@ -1028,6 +1030,7 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
     const options = built.options
     syncEngine = built.syncEngine
     snapshotEngine = built.snapshotEngine
+    debugFilePath = built.debugFilePath
     onSnapshotEngine(snapshotEngine)
 
     // ── Spec B(Task 8):workspace snapshot bootstrap(首次 send + 启用时)───
@@ -1065,6 +1068,22 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
       ...options,
       abortController,
       ...(isContinuation ? { resume: sessionId } : { sessionId }),
+      // ── 诊断:捕获 claude CLI 子进程的 stderr ──────────────────────
+      // 这是定位"收不到 stream event"的头号信号。默认 SDK 把子进程 stderr 设为
+      // "ignore",CLI 若在启动阶段崩溃(HOME 不可写 / root+bypassPermissions 被拒 /
+      // 找不到 executable),错误全被吞掉,上层只看到一个空的消息流。
+      // 注入 stderr 回调后,CLI 的崩溃原文会被打到 server 日志(非 SSE,不泄露给前端)。
+      // 注意:子进程 --debug 的详细输出被 SDK 重定向到 debugFile(由 agent-builder 指定),
+      // 不进 stderr;stderr 只承载真正写到 stderr 的内容(spawn 失败、native crash 等)。
+      // debugFile 内容在 query 结束后由下方逻辑读取打日志。
+      ...(debug
+        ? {
+            stderr: (data: string) => {
+              // eslint-disable-next-line no-console
+              console.error('[oak][claude-cli stderr]', data.trimEnd())
+            },
+          }
+        : {}),
     }
 
     q = claudeQuery({ prompt: promptStream as never, options: sdkOptions })
@@ -1075,6 +1094,11 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
       }
     }
   } catch (err) {
+    if (process.env.OAK_DEBUG === '1') {
+      // eslint-disable-next-line no-console
+      console.error('[oak] query threw during message loop:', err instanceof Error ? err.stack : err)
+      await dumpClaudeDebugFile(debugFilePath)
+    }
     yield {
       type: 'error',
       error: err instanceof Error ? err : new Error(String(err)),
@@ -1528,7 +1552,10 @@ function createSessionsManagement(config: AgentConfig): Agent['sessions'] {
     async get(conversationId): Promise<SessionSummary | null> {
       const store = config.session?.store as
         | {
-            getSession?: (k: string, sid: string) => Promise<{ sessionId: string; mtime: number; userId?: string } | null>
+            getSession?: (
+              k: string,
+              sid: string,
+            ) => Promise<{ sessionId: string; mtime: number; userId?: string } | null>
           }
         | undefined
       if (!store?.getSession) return null
@@ -1563,5 +1590,40 @@ function mapSummary(raw: unknown): SessionSummary {
     createdAt: typeof r.mtime === 'number' ? r.mtime : 0,
     updatedAt: typeof r.mtime === 'number' ? r.mtime : 0,
     metadata: typeof r.data === 'object' && r.data !== null ? (r.data as Record<string, unknown>) : {},
+  }
+}
+
+/**
+ * 读取 claude CLI 的 debug-file 并打到 console.error(OAK_DEBUG 诊断用)。
+ *
+ * SDK 把子进程 --debug 的详细输出写到 debug-file(不进 stderr),这是定位
+ * "子进程 exit code 0 却 0 条消息"这类静默失败的唯一窗口:文件里通常含
+ * spawn 命令行、模型 API 请求/响应、写文件失败、stdin 协议握手等真因。
+ *
+ * 只读尾部(最多 ~16KB),避免日志爆量;读不到文件不报错(graceful)。
+ */
+async function dumpClaudeDebugFile(debugFilePath: string | undefined): Promise<void> {
+  if (!debugFilePath) return
+  try {
+    const { readFile, stat } = await import('node:fs/promises')
+    const st = await stat(debugFilePath).catch(() => undefined)
+    if (!st || st.size === 0) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[oak][claude-debug] debug-file empty or missing at ${debugFilePath} ` +
+          `(size=${st?.size ?? 'n/a'}). 子进程可能在写 debug-file 之前就退出,或该路径不可写。`,
+      )
+      return
+    }
+    const MAX = 16 * 1024
+    const buf = await readFile(debugFilePath)
+    const tail = buf.length > MAX ? buf.subarray(buf.length - MAX).toString('utf8') : buf.toString('utf8')
+    // eslint-disable-next-line no-console
+    console.error(
+      `[oak][claude-debug] ${debugFilePath} (size=${buf.length}B, showing last ${Math.min(buf.length, MAX)}B):\n${tail}`,
+    )
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[oak][claude-debug] failed to read debug-file:', (err as Error)?.message)
   }
 }

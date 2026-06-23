@@ -18,7 +18,7 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, realpathSync } from 'node:fs'
+import { mkdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type {
@@ -37,7 +37,12 @@ import {
   type ClientToolResultStore,
   type AskUserStore,
 } from '../permissions/hooks.js'
-import { ClaudeHomeSyncEngine, CloudBaseCosClaudeHomeStore, deriveClaudeConfigDir } from '../claude-home/index.js'
+import {
+  ClaudeHomeSyncEngine,
+  CloudBaseCosClaudeHomeStore,
+  deriveAgentConfigDir,
+  deriveClaudeConfigDir,
+} from '../claude-home/index.js'
 import { ConfigError, InvalidConfigError } from '../internal/errors.js'
 import type { AgentConfig, SandboxConfig, ToolDefinition, UserMemoryConfig } from '../public/types.js'
 import { createSandboxMcpServer } from '../sandbox/sandbox-tools.js'
@@ -52,15 +57,6 @@ import { resolveCredential, type ResolvedCredential } from './credential-factory
  * 参考：https://cloud.tencent.com/document/product/1823/130079
  */
 const DEFAULT_API_TIMEOUT_MS = 600_000
-
-/**
- * 当启用 sessionStore 时，SDK 仍要求子进程做"本地双写"。
- * 我们把 CLAUDE_CONFIG_DIR 指到操作系统临时目录，避免污染用户 HOME。
- * 启用 sessionStore 时设置 OAK_SESSION_LOCAL_DIR 可覆盖。
- */
-function getSessionLocalDir(): string {
-  return process.env.OAK_SESSION_LOCAL_DIR ?? process.env.TMPDIR ?? '/tmp'
-}
 
 export interface BuiltClaudeQueryParams {
   /** Claude SDK query() 的 options */
@@ -82,6 +78,12 @@ export interface BuiltClaudeQueryParams {
    *   - session.snapshotWorkspace() / getRestoreStatus() 转发到 engine
    */
   snapshotEngine?: WorkspaceSnapshotEngine
+  /**
+   * OAK_DEBUG=1 时返回:我们指定给 SDK 的 claude CLI debug-file 绝对路径。
+   * SDK 把子进程 --debug 的详细输出写到这个文件(而非 stderr),调用方(create-agent)
+   * 在 query 结束后(尤其 0 消息时)读取它,把子进程 init/退出原因打到日志。
+   */
+  debugFilePath?: string
 }
 
 /**
@@ -167,11 +169,28 @@ export function buildClaudeQueryOptions(
     }
   }
 
-  // effectiveCwd 优先级:
+  // effectiveCwd:
   //   1) 用户传 cwd → 用 userCwd(平台资产路径,如 /app/skills-bundle)
-  //   2) userMemory 启用 → 用 claudeConfigDir 上一级(确保 SDK projects/<cwd-hash>/ 跨节点稳定)
-  //   3) 都没有 → ephemeral 随机(v0 行为)
-  const effectiveCwd = userCwd ?? (claudeConfigDir !== undefined ? path.dirname(claudeConfigDir) : deriveEphemeralCwd())
+  //   2) 没传 → process.cwd()(进程实际工作目录)
+  //
+  // 职责边界:cwd 是"运行环境"的事,kernel 不替宿主猜可写目录。没传 cwd 时,最诚实的
+  // 兜底是 process.cwd() —— 不自作主张造 ephemeral 目录(那是越权:kernel 不知道宿主
+  // 哪里可写、session 目录怎么隔离/GC)。需要可写、隔离的工作目录时,由调用方(agent
+  // runtime)显式传 config.cwd(它才掌握运行环境)。
+  const effectiveCwd = userCwd ?? process.cwd()
+
+  // ── cwd 可写性检查(serverless 只读 FS)─────────────────────────────
+  // claude CLI 在 cwd 里会做事(git 检测、写临时文件、--add-dir 等)。cwd 不可写会让
+  // 子进程在 init 阶段静默失败、exit 0 却 0 输出。这里只做"诚实报告":不可写就 warn
+  // 明确指出原因 + 让调用方传可写 config.cwd,但不偷偷换路径(换路径也是越权)。
+  if (probeWritable(effectiveCwd) !== true) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[oak] cwd '${effectiveCwd}' is not writable (serverless read-only FS?). ` +
+        `The claude subprocess may exit silently with 0 output. ` +
+        `Pass a writable AgentConfig.cwd from the caller (it owns the runtime FS layout).`,
+    )
+  }
 
   // settingSources 启用条件:任一资产层需要文件加载
   //   - 用户传 cwd → 'project'(skills、项目 CLAUDE.md)
@@ -207,10 +226,19 @@ export function buildClaudeQueryOptions(
 
   // CLAUDE_CONFIG_DIR 单一来源(优先级):
   //   1) userMemory.enabled + userId → per-user 派生路径
-  //   2) sessionStore enablePersist → tmpdir(避免污染 host)
-  //   3) 都没有 → 不设置(SDK 用默认)
-  // 显式合并避免依赖 spread 顺序,后续维护更稳。
-  const configDirOverride = claudeConfigDir ?? (enablePersist ? getSessionLocalDir() : undefined)
+  //   2) 其余所有情况 → tmpdir(/tmp 下的可写目录)
+  //
+  // 为什么不再用 `enablePersist ? ... : undefined`:
+  //   claude CLI 把 CLAUDE_CONFIG_DIR 当成自己的"home"——配置、sessions、锁文件、
+  //   XDG state/cache 等都落在它下面。不设置时 SDK 回落到宿主 $HOME/.claude。
+  //   在云函数(SCF/CloudRun)里 $HOME 通常指向只读路径(/root 等),CLI 在产出任何
+  //   stream message 之前就因 EROFS/EACCES 崩溃 → 上层收不到任何事件(静默)。
+  //   所以无论是否启用持久化,都把 CLAUDE_CONFIG_DIR 兜底到 Agent 全局配置目录
+  //   <workRoot>/.oak/agent/.claude(workRoot = OAK_SESSION_LOCAL_DIR ?? os.tmpdir())。
+  //   这样不需要去改进程的 HOME 环境变量(那会影响同进程其它库),只用 claude 官方
+  //   推荐的 CLAUDE_CONFIG_DIR 机制做隔离。
+  // 优先级:userMemory 派生的 per-user 目录(.oak/users/<env>/<user>/.claude)> Agent 全局兜底。
+  const configDirOverride = claudeConfigDir ?? deriveAgentConfigDir()
 
   // 透传给 SDK 子进程的环境变量
   const env: Record<string, string | undefined> = {
@@ -221,7 +249,30 @@ export function buildClaudeQueryOptions(
     API_TIMEOUT_MS: String(DEFAULT_API_TIMEOUT_MS),
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     CLAUDE_AGENT_SDK_CLIENT_APP: `@cloudbase/open-agent-kernel/${PACKAGE_VERSION}`,
-    ...(configDirOverride ? { CLAUDE_CONFIG_DIR: configDirOverride } : {}),
+    // claude CLI 的"home":配置/sessions/锁文件/XDG state 等都落在这里。
+    // 始终设置,避免回落到云函数里只读的宿主 $HOME/.claude(见 configDirOverride 注释)。
+    CLAUDE_CONFIG_DIR: configDirOverride,
+    // OAK_DEBUG 时打开 SDK 自身的内部 logger(M6):它会把 spawn 命令行、子进程 exit
+    // 原因、"Non-JSON stdout: ..."、transcript-mirror 写失败等关键诊断打到 stderr。
+    // 这是"子进程 exit code 0 却 0 条消息"这类静默失败的唯一窗口 —— --debug 只让
+    // 子进程更啰嗦,而 DEBUG_CLAUDE_AGENT_SDK 让父进程 SDK 把 spawn/exit 细节吐出来。
+    ...(process.env.OAK_DEBUG === '1' ? { DEBUG_CLAUDE_AGENT_SDK: '1' } : {}),
+  }
+
+  // ── OAK_DEBUG:指定 claude CLI 的 debug-file ────────────────────────
+  // 重要:SDK 在没传 debugFile 时会自己派生一个默认 debug-file 路径,把子进程 --debug
+  // 的详细输出全写进去(不进 stderr)——这就是 stderr 回调收不到东西的原因。
+  // 我们主动指定到可写的 CLAUDE_CONFIG_DIR/debug/ 下,且把路径回传给 create-agent,
+  // 让它在 query 结束后(尤其 0 消息时)读取并打到日志 —— 拿到子进程 init/退出真因。
+  let debugFilePath: string | undefined
+  if (process.env.OAK_DEBUG === '1') {
+    try {
+      const debugDir = path.join(configDirOverride, 'debug')
+      mkdirSync(debugDir, { recursive: true })
+      debugFilePath = path.join(debugDir, `oak-${Date.now()}-${randomBytes(3).toString('hex')}.txt`)
+    } catch {
+      debugFilePath = undefined // mkdir 失败就算了,回退到 SDK 默认行为
+    }
   }
 
   // 诊断日志（OAK_DEBUG=1 时打开）
@@ -235,6 +286,8 @@ export function buildClaudeQueryOptions(
       apiKeySource: credential.apiKeySource,
       apiKeyPreview: keyPreview,
       sessionStore: enablePersist ? 'enabled' : 'disabled',
+      cwd: effectiveCwd,
+      claudeConfigDir: configDirOverride,
     })
   }
 
@@ -330,6 +383,8 @@ export function buildClaudeQueryOptions(
     model: credential.modelId,
     env,
     cwd: effectiveCwd,
+    // ── OAK_DEBUG:把子进程 --debug 详细输出写到我们指定的可写文件(create-agent 会读它)──
+    ...(debugFilePath ? { debugFile: debugFilePath } : {}),
     // ── settingSources(spec §4.1):用户传 cwd→['project'];否则 []（v0 isolation）──
     settingSources,
     strictMcpConfig: true,
@@ -361,7 +416,7 @@ export function buildClaudeQueryOptions(
     tools: config.skills?.enabled !== undefined ? ['Skill'] : [],
   }
 
-  return { options, credential, syncEngine, snapshotEngine }
+  return { options, credential, syncEngine, snapshotEngine, ...(debugFilePath ? { debugFilePath } : {}) }
 }
 
 // ─── 辅助 ────────────────────────────────────────────────────────
@@ -628,22 +683,22 @@ function createBuiltinAskUserMcpServer(
   })
 }
 
-/*
- * 派生 OAK 自管的纯净 ephemeral cwd(用户没传 cwd 时使用)。
- *
- * 这个目录是空白的,settingSources=[]:SDK 进去什么都读不到,等价 v0 isolation。
- * 进程级:每个 SDK 进程实例化时生成一次,进程结束时清理(我们不主动清,依赖 OS tmpdir GC)。
- *
- * **必须 mkdir**:SDK spawn 子进程时若 cwd 不存在会 ENOENT 崩溃。
- * 用 crypto.randomBytes 取代 Math.random,避免可预测性(虽然非安全场景)。
+/**
+ * 探测一个目录是否可写(诊断用,不抛错)。
+ * 返回 true / false / 'missing'(目录不存在或探测异常)。
  */
-let ephemeralCwdCache: string | undefined
-function deriveEphemeralCwd(): string {
-  if (ephemeralCwdCache) return ephemeralCwdCache
-  const random = randomBytes(4).toString('hex')
-  ephemeralCwdCache = path.join(os.tmpdir(), `oak-ephemeral-${random}`)
-  mkdirSync(ephemeralCwdCache, { recursive: true })
-  return ephemeralCwdCache
+function probeWritable(dir: string): true | false | 'missing' {
+  try {
+    mkdirSync(dir, { recursive: true })
+    const probe = path.join(dir, `.oak-write-probe-${randomBytes(3).toString('hex')}`)
+    // 用同步 fs 直接试写删 —— 避免引入额外异步链路
+    writeFileSync(probe, 'x')
+    unlinkSync(probe)
+    return true
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return 'missing'
+    return false
+  }
 }
 
 /**

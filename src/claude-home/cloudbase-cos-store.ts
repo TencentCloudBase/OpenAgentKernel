@@ -18,10 +18,10 @@
  */
 
 import * as fs from 'node:fs/promises'
-import * as os from 'node:os'
 import * as path from 'node:path'
 import { InvalidConfigError, ResourceError } from '../internal/errors.js'
 import { sha256OfBuffer } from './dedup.js'
+import { deriveSyncTmpDir } from './path-derivation.js'
 import type { ClaudeHomeContext, ClaudeHomeSyncStore, RelativePath } from './types.js'
 
 const KEY_PREFIX_TPL = (userId: string) => `oak/users/${userId}/claude-home/`
@@ -207,7 +207,11 @@ export class CloudBaseCosClaudeHomeStore implements ClaudeHomeSyncStore {
     // 我们要传 Buffer,所以走"临时文件桥接"。COS 上传后立即清理 tmp 文件。
     // 这是标准做法,几 KB 文档的 IO 开销可以忽略;避免依赖 manager-node 的
     // private getCos() 实现。
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'oak-claude-home-put-'))
+    // ④ COS 同步临时区:<workRoot>/.oak/sync/put-<rand>(统一 .oak 布局)。
+    // mkdtemp 要求父目录存在,先确保 .oak/sync 在。
+    const syncRoot = deriveSyncTmpDir()
+    await fs.mkdir(syncRoot, { recursive: true })
+    const tmpDir = await fs.mkdtemp(path.join(syncRoot, 'put-'))
     const tmpFile = path.join(tmpDir, 'payload')
     try {
       await fs.writeFile(tmpFile, content)

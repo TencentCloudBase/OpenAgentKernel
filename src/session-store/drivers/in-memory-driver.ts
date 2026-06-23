@@ -105,7 +105,10 @@ export class InMemoryDriver implements SessionStoreDriver {
     return result
   }
 
-  async getSession(projectKey: string, sessionId: string): Promise<{ sessionId: string; mtime: number; userId?: string } | null> {
+  async getSession(
+    projectKey: string,
+    sessionId: string,
+  ): Promise<{ sessionId: string; mtime: number; userId?: string } | null> {
     const sk = `${projectKey}|${sessionId}`
     const record = this.sessions.get(sk)
     if (!record || record.subpath !== undefined) return null

@@ -104,7 +104,10 @@ export interface SessionStoreDriver {
    * 比 listSessions + find 更高效：直接走索引，O(1)。
    * 不存在时返回 null。
    */
-  getSession(projectKey: string, sessionId: string): Promise<{ sessionId: string; mtime: number; userId?: string } | null>
+  getSession(
+    projectKey: string,
+    sessionId: string,
+  ): Promise<{ sessionId: string; mtime: number; userId?: string } | null>
 
   /**
    * 列出某个 projectKey 下的所有 session summaries。
