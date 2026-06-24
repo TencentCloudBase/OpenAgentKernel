@@ -39,9 +39,84 @@ async function* fixtureMessages(): AsyncIterable<SDKMessage> {
   } as unknown as SDKMessage
 
   yield {
+    type: 'stream_event',
+    event: {
+      type: 'content_block_start',
+      index: 1,
+      content_block: { type: 'tool_use', id: 'toolu_fixture_2', name: 'mcp__demo__write', input: {} },
+    },
+  } as unknown as SDKMessage
+
+  yield {
+    type: 'stream_event',
+    event: {
+      type: 'content_block_delta',
+      index: 1,
+      delta: { type: 'input_json_delta', partial_json: '{"path":' },
+    },
+  } as unknown as SDKMessage
+
+  yield {
+    type: 'stream_event',
+    event: {
+      type: 'content_block_delta',
+      index: 1,
+      delta: { type: 'input_json_delta', partial_json: '"/tmp/demo.txt"}' },
+    },
+  } as unknown as SDKMessage
+
+  yield {
+    type: 'stream_event',
+    event: {
+      type: 'content_block_stop',
+      index: 1,
+    },
+  } as unknown as SDKMessage
+
+  yield {
     type: 'user',
     message: {
       content: [{ type: 'tool_result', tool_use_id: 'toolu_fixture_1', content: 'echo: hello' }],
+    },
+  } as unknown as SDKMessage
+
+  yield {
+    type: 'user',
+    message: {
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'toolu_fixture_2',
+          is_error: true,
+          content: JSON.stringify({
+            __OAK_INTERRUPT__: true,
+            conversationId: 'conv_fixture',
+            toolUseId: 'toolu_fixture_2',
+            toolName: 'mcp__demo__write',
+            toolInput: { path: '/tmp/demo.txt' },
+          }),
+        },
+      ],
+    },
+  } as unknown as SDKMessage
+
+  yield {
+    type: 'user',
+    message: {
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: 'toolu_fixture_ask',
+          is_error: true,
+          content: JSON.stringify({
+            __OAK_ASK_USER__: true,
+            conversationId: 'conv_fixture',
+            toolUseId: 'toolu_fixture_ask',
+            question: '是否继续？',
+            options: ['继续', '停止'],
+          }),
+        },
+      ],
     },
   } as unknown as SDKMessage
 
