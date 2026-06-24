@@ -10,6 +10,30 @@
 
 // 公共 API：唯一的入口点
 export { createAgent } from './public/create-agent.js'
+export { AcpStreamAdapter } from './adapters/index.js'
+
+export type { AcpStreamAdapterOptions, StreamAdapter, StreamAdapterContext } from './adapters/index.js'
+export type {
+  AcpSessionUpdate,
+  AcpTextBlock,
+  AgentMessageChunkUpdate,
+  AgentThoughtChunkUpdate,
+  ToolCallUpdate,
+  ToolCallStatusUpdate,
+  AvailableCommandsUpdate,
+  LogUpdate,
+  TaskProgressUpdate,
+  FileChangeUpdate,
+  ThinkingUpdate,
+  AskUserUpdate,
+  ToolConfirmUpdate,
+  ArtifactUpdate,
+  HistoryMessage,
+  HistoryMessagePart,
+  HistoryPageUpdate,
+  AgentPhaseName,
+  AgentPhaseUpdate,
+} from './acp/index.js'
 
 // 公共类型：完整对外契约
 export type {
