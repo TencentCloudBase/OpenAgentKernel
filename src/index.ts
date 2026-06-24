@@ -45,7 +45,6 @@ export type {
   SessionSummary,
   // 输入 / 事件
   SessionInput,
-  SessionEvent,
   MessageRecord,
   MessagePart,
   AttachmentInput,

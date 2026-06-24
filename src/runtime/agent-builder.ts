@@ -390,6 +390,8 @@ export function buildClaudeQueryOptions(
     strictMcpConfig: true,
     // 持久化策略：注入 store 时必须 true（SDK 强制约束）
     persistSession: enablePersist,
+    // ACP adapter consumes SDK stream_event messages for token/tool input streaming.
+    includePartialMessages: true,
     ...(sessionStore ? { sessionStore } : {}),
     ...(config.session?.flush ? { sessionStoreFlush: config.session.flush } : {}),
     // ── 系统提示 ──

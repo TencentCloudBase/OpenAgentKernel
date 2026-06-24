@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk'
 import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
+import { AcpStreamAdapter } from '../adapters/index.js'
+import type { AcpSessionUpdate } from '../acp/index.js'
 import { InvalidConfigError, ResourceError } from '../internal/errors.js'
 import {
   createHookLocalState,
@@ -14,7 +16,6 @@ import {
   type PreToolUseHookLocalState,
 } from '../permissions/index.js'
 import { buildClaudeQueryOptions } from '../runtime/agent-builder.js'
-import { createTranslatorState, translateSdkMessage } from '../runtime/event-translator.js'
 import { buildPromptAsync } from '../runtime/prompt-builder.js'
 import { createCloudBaseMcpServer, type CloudBaseUserCredentials } from '../sandbox/cloudbase-mcp.js'
 import { AgsStatefulSandbox } from '../sandbox/index.js'
@@ -33,7 +34,6 @@ import type {
   PermissionStore,
   SandboxUserCredentials,
   Session,
-  SessionEvent,
   SessionInput,
   SessionStartOptions,
   SessionSummary,
@@ -454,7 +454,7 @@ function createSession(deps: SessionDeps): Session {
     id: conversationId,
     userId,
 
-    send(input: string | SessionInput): AsyncIterable<SessionEvent> {
+    send(input: string | SessionInput): AsyncIterable<AcpSessionUpdate> {
       abortController = new AbortController()
       const isContinuation = hasStarted
       hasStarted = true
@@ -487,7 +487,7 @@ function createSession(deps: SessionDeps): Session {
      *
      * 调用方不需要持有"那次 send 的 generator"——业务可在任意进程 / 节点（store 共享前提下）调本方法。
      */
-    respondApproval(opts: { toolUseId: string; decision: ApprovalDecision }): AsyncIterable<SessionEvent> {
+    respondApproval(opts: { toolUseId: string; decision: ApprovalDecision }): AsyncIterable<AcpSessionUpdate> {
       abortController = new AbortController()
       return runApprovalResume({
         config,
@@ -521,7 +521,7 @@ function createSession(deps: SessionDeps): Session {
      *      the transcript but is harmless because the hook's deny outcome
      *      already aborted that branch of reasoning.
      */
-    respondToolUse(opts: { toolUseId: string; output: unknown; isError?: boolean }): AsyncIterable<SessionEvent> {
+    respondToolUse(opts: { toolUseId: string; output: unknown; isError?: boolean }): AsyncIterable<AcpSessionUpdate> {
       abortController = new AbortController()
       return runClientToolResume({
         config,
@@ -549,7 +549,7 @@ function createSession(deps: SessionDeps): Session {
      *   1. 把回答写入 askUserStore
      *   2. 起一轮 SDK query（resume）→ 模型重发 askUser 工具 → hook 从 store 读到回答 → 放行
      */
-    respondAskUser(opts: { toolUseId: string; answer: string }): AsyncIterable<SessionEvent> {
+    respondAskUser(opts: { toolUseId: string; answer: string }): AsyncIterable<AcpSessionUpdate> {
       abortController = new AbortController()
       return runAskUserResume({
         config,
@@ -977,7 +977,7 @@ interface RunClaudeQueryArgs {
   askUserStore?: AskUserStore
 }
 
-async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<SessionEvent, void, unknown> {
+async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<AcpSessionUpdate, void, unknown> {
   const {
     config,
     input,
@@ -1087,23 +1087,20 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
     }
 
     q = claudeQuery({ prompt: promptStream as never, options: sdkOptions })
-    const translatorState = createTranslatorState()
-    for await (const sdkMsg of q) {
-      for (const event of translateSdkMessage(sdkMsg, translatorState)) {
-        yield event
-      }
-    }
+    const adapter = config.streamAdapter ?? new AcpStreamAdapter()
+    yield* adapter.adapt(q, {
+      conversationId,
+      sessionId,
+      userId,
+      turnId: randomUUID(),
+    })
   } catch (err) {
     if (process.env.OAK_DEBUG === '1') {
       // eslint-disable-next-line no-console
       console.error('[oak] query threw during message loop:', err instanceof Error ? err.stack : err)
       await dumpClaudeDebugFile(debugFilePath)
     }
-    yield {
-      type: 'error',
-      error: err instanceof Error ? err : new Error(String(err)),
-    }
-    yield { type: 'session_idle', reason: 'error' }
+    yield* createErrorUpdates('Agent run failed')
   } finally {
     // ── userMemory: send-end push(abort/异常都触发,失败不抛)───
     if (syncEngine) {
@@ -1129,14 +1126,29 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
         }
         // TODO(metrics):emit oak_workspace_snapshot_duration_ms histogram(spec §6.1)
       } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err)
-        // OAK SessionEvent union 暂无独立 'warning' 成员;复用 'error' 事件传递,
-        // 用确定性错误名让上层(协议适配 / 业务 logger)能识别为非致命快照警告。
-        const warning = new Error(`workspace_snapshot_failed: ${reason}`)
-        warning.name = 'WorkspaceSnapshotFailedWarning'
-        yield { type: 'error', error: warning }
+        void err
+        yield {
+          sessionUpdate: 'log',
+          level: 'error',
+          message: 'Workspace snapshot failed',
+          timestamp: Date.now(),
+        }
       }
     }
+  }
+}
+
+function* createErrorUpdates(message: string): Generator<AcpSessionUpdate, void, unknown> {
+  yield {
+    sessionUpdate: 'log',
+    level: 'error',
+    message,
+    timestamp: Date.now(),
+  }
+  yield {
+    sessionUpdate: 'agent_phase',
+    phase: 'idle',
+    timestamp: Date.now(),
   }
 }
 
@@ -1161,7 +1173,7 @@ interface RunApprovalResumeArgs {
   askUserStore?: AskUserStore
 }
 
-async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<SessionEvent, void, unknown> {
+async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<AcpSessionUpdate, void, unknown> {
   const {
     config,
     conversationId,
@@ -1180,32 +1192,17 @@ async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<S
   } = args
 
   if (!permissionStore) {
-    yield {
-      type: 'error',
-      error: new InvalidConfigError(
-        'session.respondApproval requires AgentConfig.permissions.requireApproval to be configured. ' +
-          'Without permissions config, no approval flow exists to resume.',
-      ),
-    }
-    yield { type: 'session_idle', reason: 'error' }
+    yield* createErrorUpdates('Approval resume is not configured')
     return
   }
 
   const existing = await permissionStore.get({ conversationId, toolUseId })
   if (!existing) {
-    yield {
-      type: 'error',
-      error: new ResourceError('No pending approval found. It may have expired or already been resolved.'),
-    }
-    yield { type: 'session_idle', reason: 'error' }
+    yield* createErrorUpdates('No pending approval found')
     return
   }
   if (existing.decision) {
-    yield {
-      type: 'error',
-      error: new ResourceError(`Approval for toolUseId=${toolUseId} has already been resolved.`),
-    }
-    yield { type: 'session_idle', reason: 'error' }
+    yield* createErrorUpdates('Approval has already been resolved')
     return
   }
 
@@ -1257,7 +1254,7 @@ interface RunClientToolResumeArgs {
   askUserStore?: AskUserStore
 }
 
-async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerator<SessionEvent, void, unknown> {
+async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerator<AcpSessionUpdate, void, unknown> {
   const {
     config,
     conversationId,
@@ -1277,34 +1274,17 @@ async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerat
   } = args
 
   if (!clientToolStore) {
-    yield {
-      type: 'error',
-      error: new InvalidConfigError(
-        'session.respondToolUse requires AgentConfig.tools[] to be configured. ' +
-          'Without client-side tool definitions, no client-tool flow exists to resume.',
-      ),
-    }
-    yield { type: 'session_idle', reason: 'error' }
+    yield* createErrorUpdates('Client tool resume is not configured')
     return
   }
 
   const existing = await clientToolStore.get({ conversationId, toolUseId })
   if (!existing) {
-    yield {
-      type: 'error',
-      error: new ResourceError(
-        `No pending client tool found for toolUseId=${toolUseId}. ` + 'It may have expired or already been resolved.',
-      ),
-    }
-    yield { type: 'session_idle', reason: 'error' }
+    yield* createErrorUpdates('No pending client tool found')
     return
   }
   if (existing.result) {
-    yield {
-      type: 'error',
-      error: new ResourceError(`Client tool result for toolUseId=${toolUseId} has already been resolved.`),
-    }
-    yield { type: 'session_idle', reason: 'error' }
+    yield* createErrorUpdates('Client tool result has already been resolved')
     return
   }
 
@@ -1363,7 +1343,7 @@ interface RunAskUserResumeArgs {
   askUserStore: AskUserStore
 }
 
-async function* runAskUserResume(args: RunAskUserResumeArgs): AsyncGenerator<SessionEvent, void, unknown> {
+async function* runAskUserResume(args: RunAskUserResumeArgs): AsyncGenerator<AcpSessionUpdate, void, unknown> {
   const {
     config,
     conversationId,
@@ -1383,21 +1363,11 @@ async function* runAskUserResume(args: RunAskUserResumeArgs): AsyncGenerator<Ses
 
   const existing = await askUserStore.get({ conversationId, toolUseId })
   if (!existing) {
-    yield {
-      type: 'error',
-      error: new ResourceError(
-        `No pending askUser found for toolUseId=${toolUseId}. ` + 'It may have expired or already been resolved.',
-      ),
-    }
-    yield { type: 'session_idle', reason: 'error' }
+    yield* createErrorUpdates('No pending askUser request found')
     return
   }
   if (existing.result) {
-    yield {
-      type: 'error',
-      error: new ResourceError(`askUser for toolUseId=${toolUseId} has already been resolved.`),
-    }
-    yield { type: 'session_idle', reason: 'error' }
+    yield* createErrorUpdates('askUser request has already been resolved')
     return
   }
 

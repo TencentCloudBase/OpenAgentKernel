@@ -8,6 +8,8 @@
 
 import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
 import type { z } from 'zod'
+import type { AcpSessionUpdate } from '../acp/index.js'
+import type { StreamAdapter } from '../adapters/index.js'
 
 /**
  * 平台凭证，用于初始化 CloudBase 管理端/服务端 SDK。
@@ -539,6 +541,12 @@ export interface AgentConfig {
 
   // ── 钩子 ────────────────────────────────────────
   hooks?: AgentHooks
+
+  /**
+   * @internal 高级覆盖：未传时使用内置 AcpStreamAdapter。
+   * 常规用户无需声明此字段，session.send() 默认输出 ACP session/update。
+   */
+  streamAdapter?: StreamAdapter<AcpSessionUpdate>
 }
 
 /**
@@ -695,7 +703,7 @@ export interface Session {
    * 发送用户消息，返回事件流。
    * 字符串糖：等价于 { type: 'message', content: input }
    */
-  send(input: string | SessionInput): AsyncIterable<SessionEvent>
+  send(input: string | SessionInput): AsyncIterable<AcpSessionUpdate>
 
   /**
    * 响应工具审批（PR #7.0）。
@@ -709,7 +717,7 @@ export interface Session {
    *
    * 注意：调用方应确保同一 toolUseId 不被并发响应；重复响应会用最后一次为准。
    */
-  respondApproval(opts: { toolUseId: string; decision: ApprovalDecision }): AsyncIterable<SessionEvent>
+  respondApproval(opts: { toolUseId: string; decision: ApprovalDecision }): AsyncIterable<AcpSessionUpdate>
 
   /**
    * PR #7.1: 注入客户端工具结果并 resume agent 运行。
@@ -724,7 +732,7 @@ export interface Session {
    * 返回的事件流是"结果注入后"的运行流（可能包含 message_delta / tool_call /
    * tool_result / session_idle 等）。
    */
-  respondToolUse(opts: { toolUseId: string; output: unknown; isError?: boolean }): AsyncIterable<SessionEvent>
+  respondToolUse(opts: { toolUseId: string; output: unknown; isError?: boolean }): AsyncIterable<AcpSessionUpdate>
 
   /**
    * 注入用户对 askUser 提问的回答并 resume agent 运行。
@@ -737,7 +745,7 @@ export interface Session {
    *
    * 返回的事件流是"回答注入后"的运行流。
    */
-  respondAskUser(opts: { toolUseId: string; answer: string }): AsyncIterable<SessionEvent>
+  respondAskUser(opts: { toolUseId: string; answer: string }): AsyncIterable<AcpSessionUpdate>
 
   /** 拉取历史消息 */
   getHistory(opts?: { limit?: number; before?: number }): Promise<MessageRecord[]>
