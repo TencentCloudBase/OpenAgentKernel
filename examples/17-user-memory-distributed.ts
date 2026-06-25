@@ -24,6 +24,7 @@
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
 
+import { printAcpUpdate } from './_shared/acp.js'
 import { getEnvId, getPlatformCredentials, loadEnv } from './_shared/env.js'
 import { clearSeededClaudeHome, seedClaudeHome } from './_shared/seed-claude-home.js'
 
@@ -62,7 +63,7 @@ async function runOnNode(nodeName: string, userId: string, prompt: string) {
   console.log(`[${nodeName}] user: ${prompt}`)
   process.stdout.write(`[${nodeName}] assistant: `)
   for await (const event of session.send(prompt)) {
-    if (event.type === 'message_delta') process.stdout.write(event.text)
+    printAcpUpdate(event)
   }
   console.log(`\n[${nodeName}] aborting (final push)...`)
   await session.abort()

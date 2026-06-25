@@ -11,6 +11,7 @@
  *
  * 配置：examples/config.local.json。
  */
+import { printAcpUpdate } from './_shared/acp.js'
 import { getEnvId, getModel } from './_shared/env.js'
 
 import { CloudBaseSessionStore, InMemoryDriver, createAgent } from '@cloudbase/open-agent-kernel'
@@ -34,12 +35,8 @@ async function main(): Promise<void> {
   console.log('User: 我叫小明，喜欢吃西红柿炒蛋。')
   process.stdout.write('Assistant: ')
   for await (const event of session.send('我叫小明，喜欢吃西红柿炒蛋。')) {
-    if (event.type === 'message_delta') process.stdout.write(event.text)
-    if (event.type === 'session_idle') console.log()
-    if (event.type === 'error') {
-      console.error('[error]', event.error.message)
-      return
-    }
+    printAcpUpdate(event)
+    if (event.sessionUpdate === 'log' && event.level === 'error') return
   }
 
   // 看看 driver 里 SDK 真实派生的 projectKey 是什么样子
@@ -55,12 +52,8 @@ async function main(): Promise<void> {
   console.log('User: 还记得我的名字吗？我喜欢什么菜？')
   process.stdout.write('Assistant: ')
   for await (const event of session.send('还记得我的名字吗？我喜欢什么菜？')) {
-    if (event.type === 'message_delta') process.stdout.write(event.text)
-    if (event.type === 'session_idle') console.log()
-    if (event.type === 'error') {
-      console.error('[error]', event.error.message)
-      return
-    }
+    printAcpUpdate(event)
+    if (event.sessionUpdate === 'log' && event.level === 'error') return
   }
 
   console.log('\n--- Done ---')

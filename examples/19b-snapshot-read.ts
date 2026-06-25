@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url'
 
 import { AgsStatefulSandbox, createAgent } from '@cloudbase/open-agent-kernel'
 
+import { appendAcpAssistantText, writeAcpText } from './_shared/acp.js'
 import { getPlatformCredentials, getSandboxApiKey, loadEnv } from './_shared/env.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -105,26 +106,21 @@ async function main() {
     '请用 cat 命令读取 /home/user/.last-update.txt,把里面的内容(单行 ISO 时间戳)原样复述给我,不要添加任何说明。'
   console.log(`\n[19b] prompt: ${prompt}`)
 
-  let assistantText = ''
+  let assistantText = { text: '' }
   let toolCalls = 0
   for await (const ev of session.send(prompt)) {
-    if (ev.type === 'message_delta') {
-      process.stdout.write(ev.text)
-      assistantText += ev.text
-    }
-    if (ev.type === 'message_complete') assistantText = ev.text
-    if (ev.type === 'tool_call') {
+    writeAcpText(ev)
+    appendAcpAssistantText(ev, assistantText)
+    if (ev.sessionUpdate === 'tool_call') {
       toolCalls += 1
-      console.log(`\n[19b][tool#${toolCalls}] → ${ev.toolName}`)
+      console.log(`\n[19b][tool#${toolCalls}] → ${ev.title}`)
     }
-    if (ev.type === 'tool_result') {
-      const out = JSON.stringify(ev.output)
-      console.log(`[19b][tool#${toolCalls}] ← isError=${ev.isError} ${out.slice(0, 300)}${out.length > 300 ? '…' : ''}`)
+    if (ev.sessionUpdate === 'tool_call_update' && (ev.status === 'completed' || ev.status === 'failed')) {
+      const out = JSON.stringify(ev.result ?? ev.error ?? null)
+      console.log(`[19b][tool#${toolCalls}] ← status=${ev.status} ${out.slice(0, 300)}${out.length > 300 ? '…' : ''}`)
     }
-    if (ev.type === 'error') {
-      console.warn(
-        `\n[19b][error] ${(ev.error as { name?: string }).name}: ${(ev.error as { message?: string }).message}`,
-      )
+    if (ev.sessionUpdate === 'log' && ev.level === 'error') {
+      console.warn(`\n[19b][error] ${ev.message}`)
     }
   }
 
@@ -146,10 +142,10 @@ async function main() {
   }
 
   console.log('\n\n──── 验收 ────')
-  const matched = assistantText.includes(expectedStamp)
+  const matched = assistantText.text.includes(expectedStamp)
   console.log(`[19b] expected stamp 是否出现在模型回答里: ${matched ? '✅ 是' : '❌ 否'}`)
   console.log(`[19b] expected: ${expectedStamp}`)
-  console.log(`[19b] got     : ${JSON.stringify(assistantText.slice(0, 200))}`)
+  console.log(`[19b] got     : ${JSON.stringify(assistantText.text.slice(0, 200))}`)
 
   await session.abort()
 

@@ -31,6 +31,7 @@ pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
 | `examples.resumeConversationId` | example 04 使用；指定上一次输出的 conversationId 做跨进程 resume。 |
 | `examples.storage` | example 05 使用；设为 `memory` 时改用 `InMemoryStorage`。 |
 | `examples.imagePath` | example 05 使用；指定自定义图片路径。 |
+| `examples.visionModel` | example 05 使用；视觉模型 ID（默认 `glm-5v-turbo`，不受顶层 `model` 影响）。 |
 | `examples.debug` | 为 `true` 时打开 `OAK_DEBUG` 调试日志。 |
 
 ## 运行索引
@@ -46,7 +47,7 @@ pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
 | `01-quickstart.ts` | 快速开始 | `pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts` |
 | `02-debug.ts` | 打印调试事件 | `pnpm dlx tsx packages/open-agent-kernel/examples/02-debug.ts` |
 | `03-multi-turn.ts` | 进程内多轮对话 | `pnpm dlx tsx packages/open-agent-kernel/examples/03-multi-turn.ts` |
-| `04-multi-turn-db.ts` | CloudBase session 持久化 / resume | `pnpm dlx tsx packages/open-agent-kernel/examples/04-multi-turn-db.ts` |
+| `04-multi-turn-db.ts` | CloudBase session 持久化 / resume | 第一次跑写入个人信息；把输出的 `conversationId` 填入 `examples.resumeConversationId` 后再跑，验证跨进程回忆 |
 | `05-multimodal.ts` | 图片附件 / Storage | `pnpm dlx tsx packages/open-agent-kernel/examples/05-multimodal.ts` |
 | `06-mcp-sdk-server.ts` | 进程内 MCP | `pnpm dlx tsx packages/open-agent-kernel/examples/06-mcp-sdk-server.ts` |
 | `07-mcp-stdio.ts` | stdio MCP | `pnpm dlx tsx packages/open-agent-kernel/examples/07-mcp-stdio.ts` |

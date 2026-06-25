@@ -38,6 +38,7 @@ import { fileURLToPath } from 'node:url'
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
 
+import { writeAcpText } from './_shared/acp.js'
 import { getPlatformCredentials, loadEnv } from './_shared/env.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -88,19 +89,17 @@ ${stamp}
 
   let toolCalls = 0
   for await (const ev of session.send(prompt)) {
-    if (ev.type === 'message_delta') process.stdout.write(ev.text)
-    if (ev.type === 'tool_call') {
+    writeAcpText(ev)
+    if (ev.sessionUpdate === 'tool_call') {
       toolCalls += 1
-      console.log(`\n[19a][tool#${toolCalls}] → ${ev.toolName}`)
+      console.log(`\n[19a][tool#${toolCalls}] → ${ev.title}`)
     }
-    if (ev.type === 'tool_result') {
-      const out = JSON.stringify(ev.output)
-      console.log(`[19a][tool#${toolCalls}] ← isError=${ev.isError} ${out.slice(0, 200)}${out.length > 200 ? '…' : ''}`)
+    if (ev.sessionUpdate === 'tool_call_update' && (ev.status === 'completed' || ev.status === 'failed')) {
+      const out = JSON.stringify(ev.result ?? ev.error ?? null)
+      console.log(`[19a][tool#${toolCalls}] ← status=${ev.status} ${out.slice(0, 200)}${out.length > 200 ? '…' : ''}`)
     }
-    if (ev.type === 'error') {
-      console.warn(
-        `\n[19a][error] ${(ev.error as { name?: string; message?: string }).name}: ${(ev.error as { message?: string }).message}`,
-      )
+    if (ev.sessionUpdate === 'log' && ev.level === 'error') {
+      console.warn(`\n[19a][error] ${ev.message}`)
     }
   }
   console.log(`\n[19a] write phase done.`)

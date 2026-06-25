@@ -13,6 +13,8 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { CloudBaseDbDriver, CloudBaseSessionStore, createAgent } from '@cloudbase/open-agent-kernel'
 
+import { captureToolConfirm } from './_shared/acp.js'
+
 // ─── 配置 ──────────────────────────────────────────────────────────
 
 const envId = process.env.TCB_ENV_ID!
@@ -48,11 +50,12 @@ const session = await agent.startSession({ userId: 'debug-user', conversationId 
 console.log('=== Step 1: send ===')
 let toolUseId: string | undefined
 for await (const e of session.send('Call get_weather tool with city="Beijing". Do not skip the tool.')) {
-  if (e.type === 'tool_use_required') {
-    console.log(`  tool_use_required: ${e.toolName}, toolUseId=${e.toolUseId}`)
-    toolUseId = e.toolUseId
-  } else if (e.type === 'session_idle') {
-    console.log(`  session_idle: ${e.reason}`)
+  const captured = captureToolConfirm(e)
+  if (captured) {
+    console.log(`  tool_confirm: ${captured.toolName}, toolUseId=${captured.toolUseId}`)
+    toolUseId = captured.toolUseId
+  } else if (e.sessionUpdate === 'agent_phase' && e.phase === 'idle') {
+    console.log('  agent_phase: idle')
   }
 }
 
@@ -64,12 +67,12 @@ if (toolUseId) {
     output: JSON.stringify({ temp: 25, city: 'Beijing', condition: 'sunny' }),
     isError: false,
   })) {
-    if (e.type === 'session_idle') {
-      console.log(`  session_idle: ${e.reason}`)
-    } else if (e.type === 'tool_call') {
-      console.log(`  tool_call: ${e.toolName}`)
-    } else if (e.type === 'tool_result') {
-      console.log(`  tool_result: ${JSON.stringify(e.output).slice(0, 100)}`)
+    if (e.sessionUpdate === 'agent_phase' && e.phase === 'idle') {
+      console.log('  agent_phase: idle')
+    } else if (e.sessionUpdate === 'tool_call') {
+      console.log(`  tool_call: ${e.title}`)
+    } else if (e.sessionUpdate === 'tool_call_update') {
+      console.log(`  tool_call_update: ${JSON.stringify(e.result ?? e.error ?? null).slice(0, 100)}`)
     }
   }
 }

@@ -26,6 +26,7 @@
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
 
+import { printAcpUpdate } from './_shared/acp.js'
 import { getEnvId, getPlatformCredentials, loadEnv } from './_shared/env.js'
 import { clearSeededClaudeHome, seedClaudeHome } from './_shared/seed-claude-home.js'
 
@@ -73,7 +74,7 @@ async function runConversation(prompt: string, userId: string) {
   console.log(`[example] user: ${prompt}`)
   process.stdout.write('[example] assistant: ')
   for await (const event of session.send(prompt)) {
-    if (event.type === 'message_delta') process.stdout.write(event.text)
+    printAcpUpdate(event)
   }
   console.log('\n[example] aborting session...')
   await session.abort()

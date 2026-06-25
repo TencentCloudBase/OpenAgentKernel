@@ -21,6 +21,7 @@
  * 验证 DB：
  *   在 CloudBase 控制台 → 数据库 → 看 oak_state 集合（pending / decided 都会落到这里）
  */
+import { captureToolConfirm, printAcpUpdate, type PendingToolConfirm } from './_shared/acp.js'
 import { getEnvId, getModel, getPlatformCredentials } from './_shared/env.js'
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
@@ -74,23 +75,19 @@ async function main(): Promise<void> {
   console.log(`User: ${prompt}\n`)
   process.stdout.write('Assistant: ')
 
-  let pendingApproval: { toolUseId: string; toolName: string; input: unknown } | undefined
+  let pendingApproval: PendingToolConfirm | undefined
 
   for await (const e of sessionA.send(prompt)) {
-    if (e.type === 'message_delta') {
-      process.stdout.write(e.text)
-    } else if (e.type === 'tool_call') {
-      process.stdout.write(`\n  → ${e.toolName}(${JSON.stringify(e.input).slice(0, 200)})\n  `)
-    } else if (e.type === 'tool_approval_required') {
+    printAcpUpdate(e)
+    const captured = captureToolConfirm(e)
+    if (captured) {
       console.log('\n\n⏸  审批请求（已写入 CloudBase DB）：')
-      console.log(`   工具: ${e.toolName}`)
-      console.log(`   参数: ${JSON.stringify(e.input)}`)
-      console.log(`   toolUseId: ${e.toolUseId}`)
-      pendingApproval = { toolUseId: e.toolUseId, toolName: e.toolName, input: e.input }
-    } else if (e.type === 'session_idle') {
-      console.log(`\n[session_idle: ${e.reason}]`)
-    } else if (e.type === 'error') {
-      console.error('\n[error]', e.error.message)
+      console.log(`   工具: ${captured.toolName}`)
+      console.log(`   参数: ${JSON.stringify(captured.input)}`)
+      console.log(`   toolUseId: ${captured.toolUseId}`)
+      pendingApproval = captured
+    } else if (e.sessionUpdate === 'agent_phase' && e.phase === 'idle') {
+      console.log('\n[agent_phase: idle]')
     }
   }
 
@@ -129,30 +126,21 @@ async function main(): Promise<void> {
     toolUseId: pendingApproval.toolUseId,
     decision: { kind: 'allow', scope: 'once' },
   })) {
-    if (e.type === 'message_delta') {
-      process.stdout.write(e.text)
-    } else if (e.type === 'tool_call') {
-      process.stdout.write(`\n  → ${e.toolName}(${JSON.stringify(e.input).slice(0, 200)})\n  `)
-    } else if (e.type === 'tool_result') {
-      process.stdout.write(`\n  ← ${JSON.stringify(e.output).slice(0, 200)}\n  `)
-    } else if (e.type === 'tool_approval_required') {
-      // 同会话再次触发审批（demo 自动 allow）
-      console.log('\n\n⏸  又一个审批请求（demo 自动 allow）：', e.toolName)
+    printAcpUpdate(e)
+    const captured = captureToolConfirm(e)
+    if (captured) {
+      console.log('\n\n⏸  又一个审批请求（demo 自动 allow）：', captured.toolName)
       for await (const e2 of sessionB.respondApproval({
-        toolUseId: e.toolUseId,
+        toolUseId: captured.toolUseId,
         decision: { kind: 'allow', scope: 'once' },
       })) {
-        if (e2.type === 'message_delta') process.stdout.write(e2.text)
-        else if (e2.type === 'tool_call')
-          process.stdout.write(`\n  → ${e2.toolName}(${JSON.stringify(e2.input).slice(0, 200)})\n  `)
-        else if (e2.type === 'tool_result') process.stdout.write(`\n  ← ${JSON.stringify(e2.output).slice(0, 200)}\n  `)
-        else if (e2.type === 'session_idle') console.log(`\n[session_idle: ${e2.reason}]`)
-        else if (e2.type === 'error') console.error('\n[error]', e2.error.message)
+        printAcpUpdate(e2)
+        if (e2.sessionUpdate === 'agent_phase' && e2.phase === 'idle') {
+          console.log('\n[agent_phase: idle]')
+        }
       }
-    } else if (e.type === 'session_idle') {
-      console.log(`\n[session_idle: ${e.reason}]`)
-    } else if (e.type === 'error') {
-      console.error('\n[error]', e.error.message)
+    } else if (e.sessionUpdate === 'agent_phase' && e.phase === 'idle') {
+      console.log('\n[agent_phase: idle]')
     }
   }
 

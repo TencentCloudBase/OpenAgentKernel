@@ -16,6 +16,7 @@
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/14-session-history.ts
  */
+import { captureToolConfirm, logAcpUpdate, type PendingToolConfirm } from './_shared/acp.js'
 import { getEnvId, getModel, getPlatformCredentials } from './_shared/env.js'
 
 import { randomUUID } from 'node:crypto'
@@ -106,11 +107,7 @@ console.log(`User: ${prompt1}\n`)
 process.stdout.write('Assistant: ')
 
 for await (const e of session.send(prompt1)) {
-  if (e.type === 'message_delta') process.stdout.write(e.text)
-  else if (e.type === 'tool_call') console.log(`\n  → [tool_call] ${e.toolName}(${JSON.stringify(e.input)})`)
-  else if (e.type === 'tool_result') console.log(`  ← [tool_result] ${JSON.stringify(e.output).slice(0, 200)}`)
-  else if (e.type === 'session_idle') console.log(`\n[session_idle: ${e.reason}]`)
-  else if (e.type === 'error') console.error('\n[error]', e.error.message)
+  logAcpUpdate(e)
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -123,20 +120,18 @@ const prompt2 = '请用 bash 工具执行 echo "hello from sandbox" && date 命�
 console.log(`User: ${prompt2}\n`)
 process.stdout.write('Assistant: ')
 
-let pendingApproval: { toolUseId: string; toolName: string; input: unknown } | undefined
+let pendingApproval: PendingToolConfirm | undefined
 
 for await (const e of session.send(prompt2)) {
-  if (e.type === 'message_delta') process.stdout.write(e.text)
-  else if (e.type === 'tool_call') console.log(`\n  → [tool_call] ${e.toolName}(${JSON.stringify(e.input)})`)
-  else if (e.type === 'tool_result') console.log(`  ← [tool_result] ${JSON.stringify(e.output).slice(0, 200)}`)
-  else if (e.type === 'tool_approval_required') {
+  logAcpUpdate(e)
+  const captured = captureToolConfirm(e)
+  if (captured) {
     console.log('\n\n  ⏸  审批请求触发！')
-    console.log(`     工具: ${e.toolName}`)
-    console.log(`     参数: ${JSON.stringify(e.input)}`)
-    console.log(`     toolUseId: ${e.toolUseId}`)
-    pendingApproval = { toolUseId: e.toolUseId, toolName: e.toolName, input: e.input }
-  } else if (e.type === 'session_idle') console.log(`\n[session_idle: ${e.reason}]`)
-  else if (e.type === 'error') console.error('\n[error]', e.error.message)
+    console.log(`     工具: ${captured.toolName}`)
+    console.log(`     参数: ${JSON.stringify(captured.input)}`)
+    console.log(`     toolUseId: ${captured.toolUseId}`)
+    pendingApproval = captured
+  }
 }
 
 // 自动批准
@@ -148,11 +143,7 @@ if (pendingApproval) {
     toolUseId: pendingApproval.toolUseId,
     decision: { kind: 'allow', scope: 'once' },
   })) {
-    if (e.type === 'message_delta') process.stdout.write(e.text)
-    else if (e.type === 'tool_call') console.log(`\n  → [tool_call] ${e.toolName}(${JSON.stringify(e.input)})`)
-    else if (e.type === 'tool_result') console.log(`  ← [tool_result] ${JSON.stringify(e.output).slice(0, 200)}`)
-    else if (e.type === 'session_idle') console.log(`\n[session_idle: ${e.reason}]`)
-    else if (e.type === 'error') console.error('\n[error]', e.error.message)
+    logAcpUpdate(e)
   }
 } else {
   console.log('\n  ⚠️  未触发审批流程（模型可能没有调用 bash 工具）')
