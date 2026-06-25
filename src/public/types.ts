@@ -55,18 +55,33 @@ export interface SandboxConfig {
   /**
    * 是否启用默认 sandbox。
    *
-   * - `true`：使用内置默认 provider（当前为 `ags-stateful`），并补齐默认 runtime/scope
+   * - `true`：使用内置默认 provider（见 `provider` 字段，默认 `ags-stateful`），并补齐默认 runtime/scope
    * - `false` / 未配置 sandbox：不启用 sandbox
    *
    * 如果显式传了 `runtime`，即使不传 `enabled` 也会启用 sandbox。
    */
   enabled?: boolean
   /**
-   * 默认 sandbox 产品类型。当前仅内置 `ags-stateful`。
+   * 沙箱产品类型。当前内置：
+   * - `ags-stateful`（默认）：腾讯云 AGS Agent Sandbox 产品 + TRW 远程数据面
+   * - `local`：OAK 宿主进程本地 FS + Claude SDK 内置工具（过渡方案，AGS 产品化未就绪时使用）
+   *
+   * 选 `local` 时：
+   *   - SDK 内置工具(Bash/Read/Write/Edit/Glob/Grep)默认开启(可被 AgentConfig.localTools 覆盖)
+   *   - 不暴露 HTTP 数据面 —— `SandboxInstance.request()` 会抛 SandboxError
+   *   - cwd 跨请求持久化由 AgentConfig.workspacePersist 负责(独立配置,与 local provider 正交)
    *
    * 未来可扩展到其他 CloudBase/第三方 sandbox 产品；高级用户也可直接传 `runtime`。
    */
-  provider?: 'ags-stateful'
+  provider?: 'local' | 'ags-stateful'
+  /**
+   * local provider 的工作区根目录。未设置时按 session 上下文推导：
+   * `OAK_WORKSPACE_ROOT` 或 `os.tmpdir()/oak-workspaces/{envId}/{userId}/{conversationId}`。
+   *
+   * 与 `AgentConfig.cwd` 必须一致(若两者都设置)——local 模式下 SDK 内置工具以 cwd
+   * 为工作目录,COS 同步同一目录树。
+   */
+  workspaceRoot?: string
   /**
    * 默认 AGS 数据面认证 JWT。
    *

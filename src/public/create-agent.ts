@@ -17,7 +17,7 @@ import { buildClaudeQueryOptions } from '../runtime/agent-builder.js'
 import { createTranslatorState, translateSdkMessage } from '../runtime/event-translator.js'
 import { buildPromptAsync } from '../runtime/prompt-builder.js'
 import { createCloudBaseMcpServer, type CloudBaseUserCredentials } from '../sandbox/cloudbase-mcp.js'
-import { AgsStatefulSandbox } from '../sandbox/index.js'
+import { AgsStatefulSandbox, LocalRuntimeSandbox } from '../sandbox/index.js'
 import type { SandboxInstance, SandboxRuntime } from '../sandbox/types.js'
 import type { WorkspaceSnapshotEngine } from '../sandbox/workspace-snapshot/index.js'
 import { CloudBaseDbDriver, CloudBaseSessionStore } from '../session-store/index.js'
@@ -151,10 +151,24 @@ function resolveSandboxConfig(config: AgentConfig): AgentConfig['sandbox'] {
   if (sandbox.runtime) return sandbox
 
   const provider = sandbox.provider ?? 'ags-stateful'
+  if (provider === 'local') {
+    // local provider:无 AGS 控制面,宿主进程本地 FS + SDK 内置工具。
+    // cwd 跨请求持久化由 AgentConfig.workspacePersist 负责(与 local provider 正交)。
+    return {
+      ...sandbox,
+      enabled: true,
+      provider,
+      runtime: new LocalRuntimeSandbox({
+        ...(sandbox.workspaceRoot ? { workspaceRoot: sandbox.workspaceRoot } : {}),
+        ...(config.cwd ? { cwd: config.cwd } : {}),
+      }),
+    }
+  }
+
   if (provider !== 'ags-stateful') {
     throw new InvalidConfigError(
       `AgentConfig.sandbox.provider="${provider}" is not supported yet. ` +
-        'The built-in sandbox currently supports provider="ags-stateful". ' +
+        'The built-in sandbox currently supports provider="local" | "ags-stateful". ' +
         'Pass a custom SandboxRuntime via AgentConfig.sandbox.runtime for advanced scenarios.',
     )
   }
@@ -1020,6 +1034,9 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
 
     const built = buildClaudeQueryOptions(effectiveConfig, {
       sandboxInstance: sandbox,
+      // sandboxMode hint:local provider 走 'local',有 remote sandboxInstance 走 'remote',
+      // 否则 'none'。决定内置工具默认开关 + cwdPersistEngine 是否互斥。
+      sandboxMode: effectiveConfig.sandbox?.provider === 'local' ? 'local' : sandbox ? 'remote' : 'none',
       extraMcpServers: cloudbaseMcp ? { cloudbase: cloudbaseMcp } : undefined,
       conversationId,
       hookLocalState,

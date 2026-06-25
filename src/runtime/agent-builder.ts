@@ -114,6 +114,14 @@ export function buildClaudeQueryOptions(
   config: AgentConfig,
   extra: {
     sandboxInstance?: SandboxInstance
+    /**
+     * 沙箱模式 hint,决定内置工具默认开关 + cwdPersistEngine 是否互斥。
+     *   - 'local'  : sandbox.provider='local'(宿主进程本地 FS + SDK 内置工具)
+     *   - 'remote' : AGS/TRW 等远程沙箱(有 HTTP 数据面 + 自带 workspaceSnapshot)
+     *   - 'none'   : 无沙箱(纯对话,或 workspacePersist 独立持久化)
+     * 未传时按 sandboxInstance 推断:有 instance → 'remote',否则 'none'。
+     */
+    sandboxMode?: SandboxMode
     extraMcpServers?: Record<string, SdkMcpServerConfig>
     conversationId?: string
     hookLocalState?: PreToolUseHookLocalState
@@ -314,12 +322,19 @@ export function buildClaudeQueryOptions(
   const userHasApprovalConfig =
     (hasApproval || hasClientTools || hasAskUser) && Boolean(extra.conversationId) && Boolean(extra.hookLocalState)
 
+  // sandboxMode hint:决定内置工具默认开关 + sandboxMcpServer 是否注入 + cwdPersistEngine 是否互斥。
+  // local provider → 'local'(SDK 内置工具直接操作本地 cwd,不注入 sandbox MCP);
+  // 有远程 sandboxInstance → 'remote'(走 AGS HTTP 数据面);其余 → 'none'。
+  const sandboxMode: SandboxMode = extra.sandboxMode ?? (extra.sandboxInstance ? 'remote' : 'none')
+
   // ── 合并 mcpServers：用户配置 + 沙箱 MCP（PR #6A）+ 内置 cloudbase MCP（PR #6.5）─
   // 沙箱实例由 create-agent 在 send 前 acquire 好后传入，这里只是注入。
+  // local provider 的实例无 HTTP 数据面(request() 抛错),不注入 sandbox MCP ——
+  // 改由 SDK 内置工具直接操作本地 cwd。
   const mergedMcpServers: Record<string, SdkMcpServerConfig> | undefined = (() => {
     const userServers = config.mcpServers ? validateMcpServers(config.mcpServers) : undefined
     const merged: Record<string, SdkMcpServerConfig> = { ...(userServers ?? {}) }
-    if (extra.sandboxInstance) {
+    if (extra.sandboxInstance && sandboxMode === 'remote') {
       // key 'sandbox' 决定工具名前缀：mcp__sandbox__bash 等
       merged.sandbox = createSandboxMcpServer(extra.sandboxInstance)
     }
@@ -391,16 +406,20 @@ export function buildClaudeQueryOptions(
       })
     : undefined
 
-  // ── workspacePersist:无沙箱时持久化 cwd 到 COS(per-session)──
-  // 与沙箱 snapshot 互斥:启用沙箱(snapshotEngine 或 sandboxInstance)时忽略本配置,
-  // 由沙箱 snapshot 负责容器内 cwd。
-  const sandboxActive = snapshotEnabled || Boolean(extra.sandboxInstance) || config.sandbox?.enabled === true
+  // ── workspacePersist:无 AGS 远程沙箱时持久化 cwd 到 COS(per-session)──
+  // 与 AGS snapshot 互斥:启用远程沙箱 snapshot 时忽略本配置(由沙箱 snapshot 负责)。
+  // **注意**:provider='local' 不算"互斥"——LocalRuntimeSandbox 只创建本地目录,
+  // 没有自己的 COS 同步;workspacePersist 仍需运行以持久化 cwd 跨请求。
+  const agsSnapshotActive =
+    snapshotEnabled ||
+    (sandboxMode === 'remote' && Boolean(extra.sandboxInstance)) ||
+    (sandboxMode !== 'local' && config.sandbox?.enabled === true && config.sandbox?.provider !== 'local')
   const cwdPersistEngine = resolveCwdPersistEngine(config, {
     credential,
     cwd: effectiveCwd,
     sessionId: extra.sessionId,
     userId: extra.userId,
-    sandboxActive,
+    sandboxActive: agsSnapshotActive,
   })
 
   const options: ClaudeOptions = {
@@ -436,10 +455,12 @@ export function buildClaudeQueryOptions(
     // ── 流式:透传 includePartialMessages(默认 true)──
     // SDK 只有此项为 true 才 emit stream_event(增量 chunk);translator 据此发 message_delta。
     includePartialMessages: config.stream !== false,
-    // ── 内置工具(默认禁用)──
-    // 默认 tools=[](或仅 'Skill'):无沙箱时模型无本地文件/命令工具(避免操作 kernel 宿主机)。
-    // config.localTools 显式开放内置工具(单租户/可信场景);沙箱能力另经 mcpServers 提供。
-    tools: resolveBuiltinTools(config),
+    // ── 内置工具(默认禁用,local provider 自动开)──
+    // 默认 tools=[](或仅 'Skill'):避免模型操作 kernel 宿主机 FS。
+    //   - sandbox.provider='local' → 自动开 'claude_code' preset(SDK 全部内置工具)
+    //   - AgentConfig.localTools → 显式覆盖(支持 true/string[] 精细控制)
+    //   - 沙箱(ags-stateful)能力另经 mcpServers 提供
+    tools: resolveBuiltinTools(config, sandboxMode),
   }
 
   return {
@@ -455,21 +476,33 @@ export function buildClaudeQueryOptions(
 // ─── 辅助 ────────────────────────────────────────────────────────
 
 /**
+ * 沙箱模式 hint,影响内置工具默认开关 + cwdPersistEngine 互斥逻辑。
+ * - 'local'  : sandbox.provider='local'(宿主进程本地 FS + SDK 内置工具,无 HTTP 数据面)
+ * - 'remote' : AGS/TRW 等远程沙箱(有 HTTP 数据面 + workspaceSnapshot)
+ * - 'none'   : 无沙箱(纯对话,或 workspacePersist 独立持久化)
+ */
+export type SandboxMode = 'local' | 'remote' | 'none'
+
+/**
  * 解析 SDK 内置工具集(options.tools)。
  *
- *   - localTools 未设/false → 仅在启用 skills 时保留 ['Skill'],否则 []（全禁用)
- *   - localTools === true   → 'claude_code' preset(全部默认内置工具);启用 skills 时
- *     preset 已含 Skill,无需额外加
- *   - localTools 是 string[] → 用该列表;启用 skills 时补 'Skill'(去重)
+ * 优先级(从高到低):
+ *   1. config.localTools 显式覆盖
+ *      - true  → 'claude_code' preset(SDK 全部默认内置工具,含 Skill)
+ *      - []    → 空数组(全禁用,即使 local provider 也不开)
+ *      - string[] → 用该列表(若启用 skills 补 'Skill' 去重)
+ *   2. sandboxMode === 'local' → 'claude_code' preset(local provider 默认开内置工具)
+ *   3. 默认 → [](或仅 'Skill' 若启用 skills)
  *
- * 安全默认:不开 localTools 时模型拿不到本地 Bash/Read/Write,避免操作 kernel 宿主机 FS。
+ * 安全默认:无 local provider 且未开 localTools 时,模型拿不到本地 Bash/Read/Write,
+ * 避免操作 kernel 宿主机 FS。
  */
-function resolveBuiltinTools(config: AgentConfig): ClaudeOptions['tools'] {
+function resolveBuiltinTools(config: AgentConfig, sandboxMode: SandboxMode): ClaudeOptions['tools'] {
   const skillsOn = config.skills?.enabled !== undefined
   const local = config.localTools
 
+  // 显式覆盖优先
   if (local === true) {
-    // 全部默认内置工具(preset 已含 Skill)
     return { type: 'preset', preset: 'claude_code' }
   }
   if (Array.isArray(local)) {
@@ -477,6 +510,17 @@ function resolveBuiltinTools(config: AgentConfig): ClaudeOptions['tools'] {
     if (skillsOn) set.add('Skill')
     return [...set]
   }
+  // 显式 false → 即使 local provider 也不开(用户明确表态)
+  if (local === false) {
+    return skillsOn ? ['Skill'] : []
+  }
+
+  // 未显式配置 localTools:
+  if (sandboxMode === 'local') {
+    // local provider 默认开 SDK 全部内置工具(preset 已含 Skill)
+    return { type: 'preset', preset: 'claude_code' }
+  }
+
   // 默认禁用:仅在启用 skills 时保留 'Skill'
   return skillsOn ? ['Skill'] : []
 }

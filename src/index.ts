@@ -92,10 +92,16 @@ export {
   type DeleteUserMemoryFilesOptions,
 } from './user-memory/index.js'
 
-// Sandbox：可选用于让 agent 在远程容器里跑文件系统/shell（PR #6A）
+// Sandbox：可选用于让 agent 通过 local/AGS runtime 跑文件系统/shell
+//   - provider='ags-stateful'（默认）：腾讯云 AGS Agent Sandbox + TRW 远程数据面
+//   - provider='local'：宿主进程本地 FS + Claude SDK 内置工具（过渡方案）
 export {
   AgsStatefulSandbox,
   type AgsStatefulSandboxOptions,
+  LocalRuntimeSandbox,
+  type LocalRuntimeSandboxOptions,
+  createCloudBaseMcpServerInProcess,
+  type CreateCloudBaseMcpInProcessOptions,
   type SandboxRuntime,
   type SandboxInstance,
   type SandboxAcquireContext,

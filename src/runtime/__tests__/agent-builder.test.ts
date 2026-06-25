@@ -358,6 +358,25 @@ describe('buildClaudeQueryOptions — workspacePersist', () => {
     expect(cwdPersistEngine).toBeUndefined()
   })
 
+  it("sandbox.provider='local' → workspacePersist still active (local has no own COS sync)", () => {
+    // local provider 不自带 COS snapshot,workspacePersist 必须继续工作。
+    // 互斥只针对 AGS 远程沙箱(snapshotEngine / sandboxInstance backend=ags-stateful)。
+    const localRuntime: SandboxRuntime = {
+      backend: 'local',
+      acquire: vi.fn(),
+    } as unknown as SandboxRuntime
+    const { cwdPersistEngine } = buildClaudeQueryOptions(
+      {
+        ...baseConfig,
+        cwd,
+        sandbox: { enabled: true, provider: 'local', runtime: localRuntime },
+        workspacePersist: 'auto',
+      },
+      { sessionId: 'sess-1', sandboxMode: 'local' },
+    )
+    expect(cwdPersistEngine).toBeDefined()
+  })
+
   it('missing credentials → graceful degrade (undefined, no throw)', () => {
     expect(() => {
       const { cwdPersistEngine } = buildClaudeQueryOptions(
@@ -423,5 +442,20 @@ describe('buildClaudeQueryOptions — localTools', () => {
       localTools: ['Read'],
     })
     expect(options.tools).toEqual(['Read', 'Skill'])
+  })
+
+  it("sandboxMode='local' (no localTools) → claude_code preset (provider auto-enables builtins)", () => {
+    const { options } = buildClaudeQueryOptions(baseConfig, { sandboxMode: 'local' })
+    expect(options.tools).toEqual({ type: 'preset', preset: 'claude_code' })
+  })
+
+  it("sandboxMode='local' + localTools=false → tools=[] (explicit override beats provider default)", () => {
+    const { options } = buildClaudeQueryOptions({ ...baseConfig, localTools: false }, { sandboxMode: 'local' })
+    expect(options.tools).toEqual([])
+  })
+
+  it("sandboxMode='local' + localTools=['Read'] → that list (explicit override)", () => {
+    const { options } = buildClaudeQueryOptions({ ...baseConfig, localTools: ['Read'] }, { sandboxMode: 'local' })
+    expect(options.tools).toEqual(['Read'])
   })
 })

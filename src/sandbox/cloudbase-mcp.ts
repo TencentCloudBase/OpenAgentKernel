@@ -76,7 +76,7 @@ export interface CloudBaseMcpBundle {
 
 // ─── JSON Schema → zod raw shape ──────────────────────────────────────
 
-interface JsonSchemaProperty {
+export interface JsonSchemaProperty {
   type?: string
   description?: string
   enum?: string[]
@@ -85,7 +85,7 @@ interface JsonSchemaProperty {
   required?: string[]
 }
 
-interface JsonSchemaObject {
+export interface JsonSchemaObject {
   type?: string
   properties?: Record<string, JsonSchemaProperty>
   required?: string[]
@@ -97,7 +97,9 @@ interface JsonSchemaObject {
  * 直接照搬 stateful-infra 的实现，cloudbase 工具的 schema 都是简单类型（string / number /
  * boolean / array / object / enum），不涉及复杂组合式校验，转换成本低。
  */
-function jsonSchemaToZodRawShape(schema: JsonSchemaObject | undefined): Record<string, z.ZodTypeAny> {
+export function jsonSchemaToZodRawShapeForCloudBaseMcp(
+  schema: JsonSchemaObject | undefined,
+): Record<string, z.ZodTypeAny> {
   if (!schema || schema.type !== 'object' || !schema.properties) return {}
   const shape: Record<string, z.ZodTypeAny> = {}
   const required = new Set(schema.required ?? [])
@@ -492,7 +494,7 @@ export async function createCloudBaseMcpServer(options: CreateCloudBaseMcpOption
   const tools = toolDefs
     .filter((t) => t.name && !SKIP_TOOLS.has(t.name))
     .map((t) => {
-      const zodShape = jsonSchemaToZodRawShape(t.inputSchema)
+      const zodShape = jsonSchemaToZodRawShapeForCloudBaseMcp(t.inputSchema)
       return sdkTool(
         t.name,
         (t.description ?? `CloudBase tool: ${t.name}`) +
