@@ -314,35 +314,30 @@ describe('buildClaudeQueryOptions — workspaceSnapshot', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────
-// workspacePersist(无沙箱 cwd 持久化)
+// cwdPersistEngine(仅 sandboxMode='local' 时启用)
 // ─────────────────────────────────────────────────────────────────
 
-describe('buildClaudeQueryOptions — workspacePersist', () => {
+describe('buildClaudeQueryOptions — cwdPersistEngine', () => {
   const cwd = os.tmpdir() // writable
 
-  it('auto (default) + writable cwd + sessionId → returns cwdPersistEngine', () => {
+  it("sandboxMode='local' + writable cwd + sessionId → returns cwdPersistEngine", () => {
     const { cwdPersistEngine } = buildClaudeQueryOptions(
       { ...baseConfig, cwd },
-      { sessionId: 'sess-1', userId: 'alice' },
+      { sessionId: 'sess-1', userId: 'alice', sandboxMode: 'local' },
     )
     expect(cwdPersistEngine).toBeDefined()
   })
 
-  it('auto + missing sessionId → undefined (silent skip)', () => {
-    const { cwdPersistEngine } = buildClaudeQueryOptions({ ...baseConfig, cwd }, { userId: 'alice' })
-    expect(cwdPersistEngine).toBeUndefined()
-  })
-
-  it("workspacePersist='disabled' → undefined even with sessionId", () => {
+  it("sandboxMode='none' → undefined (no builtin tools, cwd不会被改)", () => {
     const { cwdPersistEngine } = buildClaudeQueryOptions(
-      { ...baseConfig, cwd, workspacePersist: 'disabled' },
-      { sessionId: 'sess-1' },
+      { ...baseConfig, cwd },
+      { sessionId: 'sess-1', sandboxMode: 'none' },
     )
     expect(cwdPersistEngine).toBeUndefined()
   })
 
-  it('sandbox enabled → workspacePersist ignored (mutual exclusion)', () => {
-    const goodRuntime: SandboxRuntime = {
+  it("sandboxMode='remote' → undefined (AGS snapshot 负责)", () => {
+    const agsRuntime: SandboxRuntime = {
       backend: 'ags-stateful',
       acquire: vi.fn(),
     } as unknown as SandboxRuntime
@@ -350,38 +345,26 @@ describe('buildClaudeQueryOptions — workspacePersist', () => {
       {
         ...baseConfig,
         cwd,
-        sandbox: { enabled: true, scope: 'shared', runtime: goodRuntime },
-        workspacePersist: 'auto',
+        sandbox: { enabled: true, scope: 'shared', runtime: agsRuntime },
       },
-      { sessionId: 'sess-1' },
+      { sessionId: 'sess-1', sandboxMode: 'remote' },
     )
     expect(cwdPersistEngine).toBeUndefined()
   })
 
-  it("sandbox.provider='local' → workspacePersist still active (local has no own COS sync)", () => {
-    // local provider 不自带 COS snapshot,workspacePersist 必须继续工作。
-    // 互斥只针对 AGS 远程沙箱(snapshotEngine / sandboxInstance backend=ags-stateful)。
-    const localRuntime: SandboxRuntime = {
-      backend: 'local',
-      acquire: vi.fn(),
-    } as unknown as SandboxRuntime
+  it("sandboxMode='local' + missing sessionId → undefined (warn + skip)", () => {
     const { cwdPersistEngine } = buildClaudeQueryOptions(
-      {
-        ...baseConfig,
-        cwd,
-        sandbox: { enabled: true, provider: 'local', runtime: localRuntime },
-        workspacePersist: 'auto',
-      },
-      { sessionId: 'sess-1', sandboxMode: 'local' },
+      { ...baseConfig, cwd },
+      { userId: 'alice', sandboxMode: 'local' },
     )
-    expect(cwdPersistEngine).toBeDefined()
+    expect(cwdPersistEngine).toBeUndefined()
   })
 
-  it('missing credentials → graceful degrade (undefined, no throw)', () => {
+  it("sandboxMode='local' + missing credentials → graceful degrade (undefined, no throw)", () => {
     expect(() => {
       const { cwdPersistEngine } = buildClaudeQueryOptions(
         { ...baseConfig, credentials: undefined, cwd },
-        { sessionId: 'sess-1' },
+        { sessionId: 'sess-1', sandboxMode: 'local' },
       )
       expect(cwdPersistEngine).toBeUndefined()
     }).not.toThrow()

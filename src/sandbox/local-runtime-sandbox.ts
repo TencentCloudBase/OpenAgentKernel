@@ -45,7 +45,8 @@ export class LocalRuntimeSandbox implements SandboxRuntime {
   async acquire(ctx: SandboxAcquireContext): Promise<SandboxInstance> {
     const workspaceRoot = this.resolveWorkspaceRoot(ctx)
     await fs.mkdir(workspaceRoot, { recursive: true })
-    await this.assertWritable(workspaceRoot)
+    // 可写性检查交给 buildClaudeQueryOptions 里的 probeWritable(基于 fs.access,
+    // 单次 syscall 无 IO 副作用)——不在 acquire 里再写 probe 文件,避免重复 IO。
 
     ctx.onProgress?.({
       phase: 'local_workspace',
@@ -79,18 +80,6 @@ export class LocalRuntimeSandbox implements SandboxRuntime {
       safeSegment(ctx.userId ?? 'default'),
       safeSegment(ctx.conversationId),
     )
-  }
-
-  private async assertWritable(dir: string): Promise<void> {
-    const probe = path.join(dir, `.oak-write-probe-${process.pid}-${Date.now()}`)
-    try {
-      await fs.writeFile(probe, 'ok', { flag: 'wx' })
-      await fs.unlink(probe)
-    } catch (err) {
-      throw new ConfigError(
-        'LocalRuntimeSandbox workspaceRoot is not writable. Set AgentConfig.cwd or sandbox.workspaceRoot to a writable directory.',
-      )
-    }
   }
 }
 

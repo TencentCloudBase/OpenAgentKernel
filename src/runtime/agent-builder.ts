@@ -18,7 +18,7 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
+import { accessSync, constants as fsConstants, mkdirSync, realpathSync } from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type {
@@ -406,21 +406,20 @@ export function buildClaudeQueryOptions(
       })
     : undefined
 
-  // ── workspacePersist:无 AGS 远程沙箱时持久化 cwd 到 COS(per-session)──
-  // 与 AGS snapshot 互斥:启用远程沙箱 snapshot 时忽略本配置(由沙箱 snapshot 负责)。
-  // **注意**:provider='local' 不算"互斥"——LocalRuntimeSandbox 只创建本地目录,
-  // 没有自己的 COS 同步;workspacePersist 仍需运行以持久化 cwd 跨请求。
-  const agsSnapshotActive =
-    snapshotEnabled ||
-    (sandboxMode === 'remote' && Boolean(extra.sandboxInstance)) ||
-    (sandboxMode !== 'local' && config.sandbox?.enabled === true && config.sandbox?.provider !== 'local')
-  const cwdPersistEngine = resolveCwdPersistEngine(config, {
-    credential,
-    cwd: effectiveCwd,
-    sessionId: extra.sessionId,
-    userId: extra.userId,
-    sandboxActive: agsSnapshotActive,
-  })
+  // ── cwd 持久化:仅在 sandboxMode='local' 时启用 ──
+  // 三种模式的"cwd 是否会被模型改 + 谁持久化"矩阵:
+  //   - 'none'   : 模型无内置工具,cwd 不会被改 → 不需要持久化
+  //   - 'local'  : 模型用 SDK 内置工具改 cwd → workspacePersist 必须启用(local 无自己的 COS 同步)
+  //   - 'remote' : AGS snapshot 负责 → 互斥禁用
+  // LocalRuntimeSandbox.acquire 只创建/校验目录,不碰 COS;这里补上 tar.gz 单包持久化。
+  const cwdPersistEngine = sandboxMode === 'local'
+    ? resolveCwdPersistEngine(config, {
+        credential,
+        cwd: effectiveCwd,
+        sessionId: extra.sessionId,
+        userId: extra.userId,
+      })
+    : undefined
 
   const options: ClaudeOptions = {
     model: credential.modelId,
@@ -505,15 +504,17 @@ function resolveBuiltinTools(config: AgentConfig, sandboxMode: SandboxMode): Cla
 }
 
 /**
- * 解析 workspacePersist → 构造 cwd 持久化引擎(无沙箱场景)。
+ * 构造 cwd 持久化引擎(仅 sandboxMode='local' 时调用)。
  *
- * 决策:
- *   - 沙箱激活(snapshot / sandboxInstance / sandbox.enabled)→ undefined(互斥)
- *   - workspacePersist === 'disabled' → undefined
- *   - 'auto'(默认):cwd 可写 + 有 sessionId → 启用;否则静默 undefined
- *   - 对象(显式):启用;cwd 不可写或缺 sessionId → warn + undefined
+ * local provider 没有 AGS 那样的远程 snapshot 数据面;OAK 在 send 边界做 tar.gz 单包
+ * 归档(send-start pull、send-end push),per-session 跨容器/请求恢复 cwd。
  *
- * 构造失败(凭证缺失等)→ warn + undefined(graceful degrade,不阻塞 send)。
+ * 前置条件:
+ *   - cwd 可写(probeWritable)
+ *   - 有 sessionId(用作 COS key 命名空间)
+ *   - 有 credentials(COS 操作走 CAM 签名)
+ *
+ * 任一条件缺失 → graceful degrade(warn + undefined,不阻塞 send)。
  */
 function resolveCwdPersistEngine(
   config: AgentConfig,
@@ -522,27 +523,19 @@ function resolveCwdPersistEngine(
     cwd: string
     sessionId: string | undefined
     userId: string | undefined
-    sandboxActive: boolean
   },
 ): WorkspaceCwdArchiveEngine | undefined {
-  const setting = config.workspacePersist ?? 'auto'
-  if (args.sandboxActive) return undefined
-  if (setting === 'disabled') return undefined
-
-  const explicit = typeof setting === 'object'
-  // userId 兜底:workspacePersist 不要求业务传 userId,缺省用占位(COS key 只用 sessionId)
+  // userId 兜底:不要求业务传 userId,缺省用占位(COS key 只用 sessionId)
   const userId = args.userId ?? 'anonymous'
 
   // 前置条件:cwd 可写 + 有 sessionId
   const cwdWritable = probeWritable(args.cwd) === true
   if (!args.sessionId || !cwdWritable) {
-    if (explicit) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[oak/workspacePersist] enabled but prerequisites missing ` +
-          `(sessionId=${args.sessionId ? 'ok' : 'MISSING'}, cwdWritable=${cwdWritable}); skipping.`,
-      )
-    }
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[oak/workspacePersist] sandbox.provider='local' but prerequisites missing ` +
+        `(sessionId=${args.sessionId ? 'ok' : 'MISSING'}, cwdWritable=${cwdWritable}); skipping cwd persistence.`,
+    )
     return undefined
   }
 
@@ -557,8 +550,6 @@ function resolveCwdPersistEngine(
       userId,
       sessionId: args.sessionId,
       cwd: args.cwd,
-      ...(explicit && setting.exclude ? { extraExcludes: setting.exclude } : {}),
-      ...(explicit && setting.maxFileBytes !== undefined ? { maxFileBytes: setting.maxFileBytes } : {}),
     })
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -835,14 +826,16 @@ function createBuiltinAskUserMcpServer(
 /**
  * 探测一个目录是否可写(诊断用,不抛错)。
  * 返回 true / false / 'missing'(目录不存在或探测异常)。
+ *
+ * 用 fs.accessSync(W_OK) 单次 syscall 检查,不写 probe 文件 —— 避免
+ * 每次 buildClaudeQueryOptions 都做 write+unlink 的 IO 开销。
+ * serverless 场景(SCF/CloudRun,/tmp 标准可写)准确度足够;
+ * 边缘场景(read-only mount / 磁盘满)实际写操作也会失败,由调用方处理。
  */
 function probeWritable(dir: string): true | false | 'missing' {
   try {
     mkdirSync(dir, { recursive: true })
-    const probe = path.join(dir, `.oak-write-probe-${randomBytes(3).toString('hex')}`)
-    // 用同步 fs 直接试写删 —— 避免引入额外异步链路
-    writeFileSync(probe, 'x')
-    unlinkSync(probe)
+    accessSync(dir, fsConstants.W_OK)
     return true
   } catch (err) {
     if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return 'missing'

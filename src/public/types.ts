@@ -63,14 +63,14 @@ export interface SandboxConfig {
   enabled?: boolean
   /**
    * 沙箱产品类型。当前内置：
-   * - `ags-stateful`（默认）：腾讯云 AGS Agent Sandbox 产品 + TRW 远程数据面
-   * - `local`：OAK 宿主进程本地 FS + Claude SDK 内置工具（过渡方案，AGS 产品化未就绪时使用）
+   * - `local`（默认）：OAK 宿主进程本地 FS + Claude SDK 内置工具（过渡方案，AGS 产品化未就绪时的默认）
+   * - `ags-stateful`：腾讯云 AGS Agent Sandbox 产品 + TRW 远程数据面（需要 CLOUDBASE_APIKEY）
    *
    * 选 `local` 时：
    *   - SDK 内置工具(Bash/Read/Write/Edit/Glob/Grep)默认开启(local provider 即用本地 FS,
    *     无需经 mcp__sandbox__* HTTP 数据面)
    *   - 不暴露 HTTP 数据面 —— `SandboxInstance.request()` 会抛 SandboxError
-   *   - cwd 跨请求持久化由 AgentConfig.workspacePersist 负责(独立配置,与 local provider 正交)
+   *   - cwd 跨请求持久化由 kernel 自动驱动(在 send 边界做 tar.gz 单包 COS 同步)
    *
    * 未来可扩展到其他 CloudBase/第三方 sandbox 产品；高级用户也可直接传 `runtime`。
    */
@@ -564,28 +564,6 @@ export interface AgentConfig {
    * 防御。但允许 alice 这次落 node1、下次落 node2,只要两次不重叠。
    */
   userMemory?: UserMemoryConfig
-
-  /**
-   * 无沙箱场景:把本地 cwd 工作目录在 send 边界持久化到 COS(send-start 拉取、
-   * send-end diff 推送),per-session。这是沙箱 workspaceSnapshot 的"本地版":
-   * 不开沙箱时让 claude 在 cwd 产生的产物跨容器/请求可恢复。
-   *
-   * - 'auto'(默认):未开沙箱 + effectiveCwd 可写 + 有 sessionId 时自动启用,否则静默跳过
-   * - 'disabled':显式关闭
-   * - 对象:显式启用并配置排除项 / 单文件上限
-   *
-   * 启用沙箱时本配置被忽略(沙箱 snapshot 负责容器内 cwd)。
-   * 不持久化 .claude(配置/记忆,与沙箱场景一致都不持久);对话历史由 sessionStore 负责。
-   */
-  workspacePersist?:
-    | 'auto'
-    | 'disabled'
-    | {
-        /** 追加排除项:目录名(如 'tmp')或后缀('*.log')。 */
-        exclude?: string[]
-        /** 跳过大于此字节数的文件。默认 5_000_000(5MB)。 */
-        maxFileBytes?: number
-      }
 
   // ── 钩子 ────────────────────────────────────────
   hooks?: AgentHooks

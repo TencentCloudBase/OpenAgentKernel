@@ -150,10 +150,13 @@ function resolveSandboxConfig(config: AgentConfig): AgentConfig['sandbox'] {
 
   if (sandbox.runtime) return sandbox
 
-  const provider = sandbox.provider ?? 'ags-stateful'
+  // 默认 'local':AGS 产品化未就绪前的过渡默认,serverless runtime(SCF/CloudRun)
+  // 开箱即有本地 FS + SDK 内置工具 + workspacePersist 自动持久化 cwd。
+  // 需要使用 AGS 远程沙箱的用户显式配 provider: 'ags-stateful'。
+  const provider = sandbox.provider ?? 'local'
   if (provider === 'local') {
     // local provider:无 AGS 控制面,宿主进程本地 FS + SDK 内置工具。
-    // cwd 跨请求持久化由 AgentConfig.workspacePersist 负责(与 local provider 正交)。
+    // cwd 跨请求持久化由 kernel 自动驱动(see agent-builder.ts cwdPersistEngine)。
     return {
       ...sandbox,
       enabled: true,
@@ -168,7 +171,7 @@ function resolveSandboxConfig(config: AgentConfig): AgentConfig['sandbox'] {
   if (provider !== 'ags-stateful') {
     throw new InvalidConfigError(
       `AgentConfig.sandbox.provider="${provider}" is not supported yet. ` +
-        'The built-in sandbox currently supports provider="local" | "ags-stateful". ' +
+        'The built-in sandbox currently supports provider="local" (default) | "ags-stateful". ' +
         'Pass a custom SandboxRuntime via AgentConfig.sandbox.runtime for advanced scenarios.',
     )
   }
@@ -176,8 +179,9 @@ function resolveSandboxConfig(config: AgentConfig): AgentConfig['sandbox'] {
   const apiKey = sandbox.apiKey ?? process.env.CLOUDBASE_APIKEY ?? process.env.OAK_SANDBOX_API_KEY
   if (!apiKey) {
     throw new InvalidConfigError(
-      'AgentConfig.sandbox.enabled=true requires sandbox.apiKey, CLOUDBASE_APIKEY, or OAK_SANDBOX_API_KEY ' +
-        'for the default AgsStatefulSandbox runtime.',
+      'AgentConfig.sandbox.provider="ags-stateful" requires sandbox.apiKey, CLOUDBASE_APIKEY, or OAK_SANDBOX_API_KEY ' +
+        'for the AgsStatefulSandbox runtime. ' +
+        'If you do not need AGS, drop provider (default is "local").',
     )
   }
 
