@@ -320,7 +320,7 @@ describe('buildClaudeQueryOptions — workspaceSnapshot', () => {
 describe('buildClaudeQueryOptions — workspacePersist', () => {
   const cwd = os.tmpdir() // writable
 
-  it("auto (default) + writable cwd + sessionId → returns cwdPersistEngine", () => {
+  it('auto (default) + writable cwd + sessionId → returns cwdPersistEngine', () => {
     const { cwdPersistEngine } = buildClaudeQueryOptions(
       { ...baseConfig, cwd },
       { sessionId: 'sess-1', userId: 'alice' },

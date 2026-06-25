@@ -250,11 +250,13 @@ export class CloudBaseCosClaudeHomeStore implements ClaudeHomeSyncStore {
     const prefix = this.keyPrefix(ctx)
     const fullKey = prefix + relPath
     assertSafeKey(prefix, fullKey)
-    const urlRes = await manager.storage.getTemporaryUrl([{ cloudPath: fullKey, maxAge: 600 }]).catch((err: unknown) => {
-      // namespace 不存在 / 对象不存在:manager-node 可能抛错而非返空
-      if (isFileNotExistError(err)) return null
-      throw err
-    })
+    const urlRes = await manager.storage
+      .getTemporaryUrl([{ cloudPath: fullKey, maxAge: 600 }])
+      .catch((err: unknown) => {
+        // namespace 不存在 / 对象不存在:manager-node 可能抛错而非返空
+        if (isFileNotExistError(err)) return null
+        throw err
+      })
     if (!urlRes?.[0]?.url) return null
     const resp = await fetch(urlRes[0].url)
     if (resp.status === 404) return null

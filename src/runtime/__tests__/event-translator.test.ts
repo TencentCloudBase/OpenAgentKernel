@@ -41,7 +41,11 @@ describe('event-translator: streaming dedup', () => {
     const state = createTranslatorState(true)
     const out: SessionEvent[] = []
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    for (const m of [streamDelta, { ...streamDelta, event: { ...streamDelta.event, delta: { type: 'text_delta', text: 'lo world' } } }, assistantText] as any[]) {
+    for (const m of [
+      streamDelta,
+      { ...streamDelta, event: { ...streamDelta.event, delta: { type: 'text_delta', text: 'lo world' } } },
+      assistantText,
+    ] as any[]) {
       out.push(...translateSdkMessage(m, state))
     }
     const deltas = out.filter((e) => e.type === 'message_delta').map((e) => (e as { text: string }).text)

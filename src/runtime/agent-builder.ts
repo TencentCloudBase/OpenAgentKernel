@@ -539,7 +539,10 @@ function resolveCwdPersistEngine(
     })
   } catch (err) {
     // eslint-disable-next-line no-console
-    console.warn('[oak/workspacePersist] failed to construct engine, cwd persistence disabled:', (err as Error)?.message)
+    console.warn(
+      '[oak/workspacePersist] failed to construct engine, cwd persistence disabled:',
+      (err as Error)?.message,
+    )
     return undefined
   }
 }
