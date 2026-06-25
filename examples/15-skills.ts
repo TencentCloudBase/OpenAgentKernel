@@ -78,7 +78,7 @@ async function main() {
     printAcpUpdate(event)
     if (isSkillToolCall(event)) {
       sawSkillInvocation = true
-      console.log(`\n[example] ✓ Skill tool invoked with input:`, event.input)
+      console.log(`\n[example] ✓ Skill tool invoked with input:`, event.rawInput)
     }
   }
   console.log('\n[example] done.')

@@ -12,7 +12,7 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { CloudBaseDbDriver, CloudBaseSessionStore, createAgent } from '@cloudbase/open-agent-kernel'
 
-import { captureToolConfirm, logAcpUpdate } from './_shared/acp.js'
+import { captureRequestPermission, logAcpUpdate } from './_shared/acp.js'
 
 // ─── 配置 ──────────────────────────────────────────────────────────
 
@@ -78,7 +78,7 @@ let toolUseId: string | undefined
 process.stdout.write('🤖 Assistant: ')
 for await (const e of session.send(prompt)) {
   logAcpUpdate(e)
-  const captured = captureToolConfirm(e)
+  const captured = captureRequestPermission(e)
   if (captured) {
     console.log(`\n\n  ⏸  client-tool 触发！`)
     console.log(`     工具: ${captured.toolName}`)

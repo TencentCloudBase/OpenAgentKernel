@@ -95,7 +95,7 @@ ${stamp}
       console.log(`\n[19a][tool#${toolCalls}] → ${ev.title}`)
     }
     if (ev.sessionUpdate === 'tool_call_update' && (ev.status === 'completed' || ev.status === 'failed')) {
-      const out = JSON.stringify(ev.result ?? ev.error ?? null)
+      const out = JSON.stringify(ev.rawOutput ?? ev.content ?? null)
       console.log(`[19a][tool#${toolCalls}] ← status=${ev.status} ${out.slice(0, 200)}${out.length > 200 ? '…' : ''}`)
     }
     if (ev.sessionUpdate === 'log' && ev.level === 'error') {

@@ -16,7 +16,7 @@
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/14-session-history.ts
  */
-import { captureToolConfirm, logAcpUpdate, type PendingToolConfirm } from './_shared/acp.js'
+import { captureRequestPermission, logAcpUpdate, type PendingRequestPermission } from './_shared/acp.js'
 import { getEnvId, getModel, getPlatformCredentials } from './_shared/env.js'
 
 import { randomUUID } from 'node:crypto'
@@ -120,11 +120,11 @@ const prompt2 = '请用 bash 工具执行 echo "hello from sandbox" && date 命�
 console.log(`User: ${prompt2}\n`)
 process.stdout.write('Assistant: ')
 
-let pendingApproval: PendingToolConfirm | undefined
+let pendingApproval: PendingRequestPermission | undefined
 
 for await (const e of session.send(prompt2)) {
   logAcpUpdate(e)
-  const captured = captureToolConfirm(e)
+  const captured = captureRequestPermission(e)
   if (captured) {
     console.log('\n\n  ⏸  审批请求触发！')
     console.log(`     工具: ${captured.toolName}`)

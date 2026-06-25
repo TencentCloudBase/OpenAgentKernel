@@ -21,7 +21,7 @@
  * 验证 DB：
  *   在 CloudBase 控制台 → 数据库 → 看 oak_state 集合（pending / decided 都会落到这里）
  */
-import { captureToolConfirm, printAcpUpdate, type PendingToolConfirm } from './_shared/acp.js'
+import { captureRequestPermission, printAcpUpdate, type PendingRequestPermission } from './_shared/acp.js'
 import { getEnvId, getModel, getPlatformCredentials } from './_shared/env.js'
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
@@ -75,11 +75,11 @@ async function main(): Promise<void> {
   console.log(`User: ${prompt}\n`)
   process.stdout.write('Assistant: ')
 
-  let pendingApproval: PendingToolConfirm | undefined
+  let pendingApproval: PendingRequestPermission | undefined
 
   for await (const e of sessionA.send(prompt)) {
     printAcpUpdate(e)
-    const captured = captureToolConfirm(e)
+    const captured = captureRequestPermission(e)
     if (captured) {
       console.log('\n\n⏸  审批请求（已写入 CloudBase DB）：')
       console.log(`   工具: ${captured.toolName}`)
@@ -127,7 +127,7 @@ async function main(): Promise<void> {
     decision: { kind: 'allow', scope: 'once' },
   })) {
     printAcpUpdate(e)
-    const captured = captureToolConfirm(e)
+    const captured = captureRequestPermission(e)
     if (captured) {
       console.log('\n\n⏸  又一个审批请求（demo 自动 allow）：', captured.toolName)
       for await (const e2 of sessionB.respondApproval({

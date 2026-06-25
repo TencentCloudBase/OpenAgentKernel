@@ -14,25 +14,56 @@ export { AcpStreamAdapter } from './adapters/index.js'
 
 export type { AcpStreamAdapterOptions, StreamAdapter, StreamAdapterContext } from './adapters/index.js'
 export type {
+  // Top-level union
   AcpSessionUpdate,
+  // OAK convenience alias
   AcpTextBlock,
-  AgentMessageChunkUpdate,
-  AgentThoughtChunkUpdate,
+  // OAK _meta extension namespace
+  OakMeta,
+  // Standard ACP types (re-exported from @agentclientprotocol/sdk)
+  SessionUpdate,
+  ToolCall,
   ToolCallUpdate,
-  ToolCallStatusUpdate,
+  ToolKind,
+  ToolCallStatus,
+  ToolCallLocation,
+  ToolCallContent,
+  ContentChunk,
+  ContentBlock,
+  TextContent,
+  Plan,
+  PlanEntry,
+  PlanUpdate,
+  PlanRemoved,
+  UsageUpdate,
   AvailableCommandsUpdate,
+  AvailableCommand,
+  CurrentModeUpdate,
+  ConfigOptionUpdate,
+  SessionInfoUpdate,
+  PermissionOption,
+  PermissionOptionKind,
+  PermissionOptionId,
+  RequestPermissionRequest,
+  RequestPermissionOutcome,
+  SelectedPermissionOutcome,
+  Diff,
+  Terminal,
+  Cost,
+  MessageId,
+  // OAK extension variants
   LogUpdate,
-  TaskProgressUpdate,
-  FileChangeUpdate,
-  ThinkingUpdate,
-  AskUserUpdate,
-  ToolConfirmUpdate,
   ArtifactUpdate,
+  HistoryPageUpdate,
+  AgentPhaseUpdate,
+  RequestPermissionUpdate,
+  AskUserUpdate,
+  // OAK history types
   HistoryMessage,
   HistoryMessagePart,
-  HistoryPageUpdate,
+  HistoryMessagePartToolCall,
+  HistoryMessagePartToolResult,
   AgentPhaseName,
-  AgentPhaseUpdate,
 } from './acp/index.js'
 
 // 公共类型：完整对外契约

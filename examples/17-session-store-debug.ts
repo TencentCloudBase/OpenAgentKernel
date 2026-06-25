@@ -13,7 +13,7 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { CloudBaseDbDriver, CloudBaseSessionStore, createAgent } from '@cloudbase/open-agent-kernel'
 
-import { captureToolConfirm } from './_shared/acp.js'
+import { captureRequestPermission } from './_shared/acp.js'
 
 // ─── 配置 ──────────────────────────────────────────────────────────
 
@@ -50,7 +50,7 @@ const session = await agent.startSession({ userId: 'debug-user', conversationId 
 console.log('=== Step 1: send ===')
 let toolUseId: string | undefined
 for await (const e of session.send('Call get_weather tool with city="Beijing". Do not skip the tool.')) {
-  const captured = captureToolConfirm(e)
+  const captured = captureRequestPermission(e)
   if (captured) {
     console.log(`  tool_confirm: ${captured.toolName}, toolUseId=${captured.toolUseId}`)
     toolUseId = captured.toolUseId
@@ -72,7 +72,7 @@ if (toolUseId) {
     } else if (e.sessionUpdate === 'tool_call') {
       console.log(`  tool_call: ${e.title}`)
     } else if (e.sessionUpdate === 'tool_call_update') {
-      console.log(`  tool_call_update: ${JSON.stringify(e.result ?? e.error ?? null).slice(0, 100)}`)
+      console.log(`  tool_call_update: ${JSON.stringify(e.rawOutput ?? e.content ?? null).slice(0, 100)}`)
     }
   }
 }

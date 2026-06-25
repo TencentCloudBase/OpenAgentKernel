@@ -3,7 +3,7 @@
  *
  * 演示：
  *   - `permissions.requireApproval` 把指定工具变成"需审批"
- *   - 事件流出 `tool_confirm` 后流自然结束
+ *   - 事件流出 `request_permission` 后流自然结束
  *   - 业务侧通过 readline 在终端收集用户决定
  *   - `session.respondApproval({ toolUseId, decision })` 注入决策并 resume
  *   - 决策为 allow → 工具执行，agent 继续；deny → 模型收到拒绝并解释
@@ -16,7 +16,7 @@
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/11-hitl-approval.ts
  */
-import { captureToolConfirm, printAcpUpdate, type PendingToolConfirm } from './_shared/acp.js'
+import { captureRequestPermission, printAcpUpdate, type PendingRequestPermission } from './_shared/acp.js'
 import { getEnvId, getModel } from './_shared/env.js'
 
 import { CloudBaseSessionStore, createAgent, InMemoryDriver } from '@cloudbase/open-agent-kernel'
@@ -96,11 +96,11 @@ async function main(): Promise<void> {
   console.log(`User: ${prompt}\n`)
   process.stdout.write('Assistant: ')
 
-  let pendingApproval: PendingToolConfirm | undefined
+  let pendingApproval: PendingRequestPermission | undefined
 
   for await (const e of session.send(prompt)) {
     printAcpUpdate(e)
-    const captured = captureToolConfirm(e)
+    const captured = captureRequestPermission(e)
     if (captured) {
       console.log('\n\n⏸  审批请求：')
       console.log(`   工具: ${captured.toolName}`)
@@ -132,7 +132,7 @@ async function main(): Promise<void> {
       : { kind: 'deny', reason: '用户在 CLI 拒绝', interrupt: false },
   })) {
     printAcpUpdate(e)
-    const captured = captureToolConfirm(e)
+    const captured = captureRequestPermission(e)
     if (captured) {
       console.log('\n\n⏸  又一个审批请求（demo 自动 allow）：', captured.toolName, captured.input)
       for await (const e2 of session.respondApproval({

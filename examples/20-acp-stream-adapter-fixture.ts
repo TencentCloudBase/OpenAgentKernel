@@ -123,6 +123,7 @@ async function* fixtureMessages(): AsyncIterable<SDKMessage> {
   yield {
     type: 'result',
     subtype: 'success',
+    usage: { input_tokens: 100, output_tokens: 50 },
   } as unknown as SDKMessage
 }
 

@@ -236,7 +236,7 @@ export type McpServerConfig = SdkMcpServerConfig
 // ============================================================
 
 /**
- * 审批决策（用户对 ACP tool_confirm 的响应）。
+ * 审批决策（用户对 ACP request_permission 的响应）。
  *
  * 这是协议无关的超集——业务侧的 ACP / AG-UI / 自家 SSE 等协议只需要把
  * 自己的决策枚举映射成下面的字段即可。
@@ -708,12 +708,12 @@ export interface Session {
   /**
    * 响应工具审批（PR #7.0）。
    *
-   * 当 ACP 更新流给出 `tool_confirm` 后，业务收集到用户决策（allow/deny/scope/...）
+   * 当 ACP 更新流给出 `request_permission` 后，业务收集到用户决策（allow/deny/scope/...）
    * 调本方法注入决策。kernel 把决策写入 PermissionStore，然后内部 resume 一次 SDK 运行：
    * Hook 再次触发时从 store 读到决策并放行 / 拒绝，agent 继续往下跑。
    *
    * 返回的事件流是"决策注入后"的 ACP 更新流（可能包含 agent_message_chunk /
-   * tool_call / tool_call_update / 再次的 tool_confirm / agent_phase 等）。
+   * tool_call / tool_call_update / 再次的 request_permission / agent_phase 等）。
    *
    * 注意：调用方应确保同一 toolUseId 不被并发响应；重复响应会用最后一次为准。
    */
@@ -722,7 +722,7 @@ export interface Session {
   /**
    * PR #7.1: 注入客户端工具结果并 resume agent 运行。
    *
-   * 配套 ACP `tool_confirm` 使用：业务侧在客户端执行完 AgentConfig.tools[]
+   * 配套 ACP `request_permission` 使用：业务侧在客户端执行完 AgentConfig.tools[]
    * 中声明的工具后，调本方法把结果回灌给 kernel：
    *   1. kernel 把结果写入内部 client-tool store
    *   2. 起一轮 SDK query（resume）→ 模型重发同名工具 → PreToolUse hook 这次

@@ -116,7 +116,7 @@ async function main() {
       console.log(`\n[19b][tool#${toolCalls}] → ${ev.title}`)
     }
     if (ev.sessionUpdate === 'tool_call_update' && (ev.status === 'completed' || ev.status === 'failed')) {
-      const out = JSON.stringify(ev.result ?? ev.error ?? null)
+      const out = JSON.stringify(ev.rawOutput ?? ev.content ?? null)
       console.log(`[19b][tool#${toolCalls}] ← status=${ev.status} ${out.slice(0, 300)}${out.length > 300 ? '…' : ''}`)
     }
     if (ev.sessionUpdate === 'log' && ev.level === 'error') {
