@@ -18,7 +18,7 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import { accessSync, constants as fsConstants, mkdirSync, realpathSync } from 'node:fs'
+import { mkdirSync, realpathSync } from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type {
@@ -198,19 +198,6 @@ export function buildClaudeQueryOptions(
   // 哪里可写、session 目录怎么隔离/GC)。需要可写、隔离的工作目录时,由调用方(agent
   // runtime)显式传 config.cwd(它才掌握运行环境)。
   const effectiveCwd = userCwd ?? process.cwd()
-
-  // ── cwd 可写性检查(serverless 只读 FS)─────────────────────────────
-  // claude CLI 在 cwd 里会做事(git 检测、写临时文件、--add-dir 等)。cwd 不可写会让
-  // 子进程在 init 阶段静默失败、exit 0 却 0 输出。这里只做"诚实报告":不可写就 warn
-  // 明确指出原因 + 让调用方传可写 config.cwd,但不偷偷换路径(换路径也是越权)。
-  if (probeWritable(effectiveCwd) !== true) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[oak] cwd '${effectiveCwd}' is not writable (serverless read-only FS?). ` +
-        `The claude subprocess may exit silently with 0 output. ` +
-        `Pass a writable AgentConfig.cwd from the caller (it owns the runtime FS layout).`,
-    )
-  }
 
   // settingSources 启用条件:任一资产层需要文件加载
   //   - 用户传 cwd → 'project'(skills、项目 CLAUDE.md)
@@ -412,14 +399,15 @@ export function buildClaudeQueryOptions(
   //   - 'local'  : 模型用 SDK 内置工具改 cwd → workspacePersist 必须启用(local 无自己的 COS 同步)
   //   - 'remote' : AGS snapshot 负责 → 互斥禁用
   // LocalRuntimeSandbox.acquire 只创建/校验目录,不碰 COS;这里补上 tar.gz 单包持久化。
-  const cwdPersistEngine = sandboxMode === 'local'
-    ? resolveCwdPersistEngine(config, {
-        credential,
-        cwd: effectiveCwd,
-        sessionId: extra.sessionId,
-        userId: extra.userId,
-      })
-    : undefined
+  const cwdPersistEngine =
+    sandboxMode === 'local'
+      ? resolveCwdPersistEngine(config, {
+          credential,
+          cwd: effectiveCwd,
+          sessionId: extra.sessionId,
+          userId: extra.userId,
+        })
+      : undefined
 
   const options: ClaudeOptions = {
     model: credential.modelId,
@@ -510,11 +498,12 @@ function resolveBuiltinTools(config: AgentConfig, sandboxMode: SandboxMode): Cla
  * 归档(send-start pull、send-end push),per-session 跨容器/请求恢复 cwd。
  *
  * 前置条件:
- *   - cwd 可写(probeWritable)
  *   - 有 sessionId(用作 COS key 命名空间)
  *   - 有 credentials(COS 操作走 CAM 签名)
  *
- * 任一条件缺失 → graceful degrade(warn + undefined,不阻塞 send)。
+ * 缺 sessionId → graceful degrade(warn + undefined,不阻塞 send)。
+ * cwd 不可写不在此检查 —— 实际写操作(pullOnSendStart 解包 tar.gz)会 fail-fast,
+ * 错误信息更准确(具体到哪一步、什么 errno)。
  */
 function resolveCwdPersistEngine(
   config: AgentConfig,
@@ -528,13 +517,10 @@ function resolveCwdPersistEngine(
   // userId 兜底:不要求业务传 userId,缺省用占位(COS key 只用 sessionId)
   const userId = args.userId ?? 'anonymous'
 
-  // 前置条件:cwd 可写 + 有 sessionId
-  const cwdWritable = probeWritable(args.cwd) === true
-  if (!args.sessionId || !cwdWritable) {
+  if (!args.sessionId) {
     // eslint-disable-next-line no-console
     console.warn(
-      `[oak/workspacePersist] sandbox.provider='local' but prerequisites missing ` +
-        `(sessionId=${args.sessionId ? 'ok' : 'MISSING'}, cwdWritable=${cwdWritable}); skipping cwd persistence.`,
+      `[oak/workspacePersist] sandbox.provider='local' but sessionId missing; skipping cwd persistence.`,
     )
     return undefined
   }
@@ -821,26 +807,6 @@ function createBuiltinAskUserMcpServer(
     version: '1.0.0',
     tools: [askUserTool],
   })
-}
-
-/**
- * 探测一个目录是否可写(诊断用,不抛错)。
- * 返回 true / false / 'missing'(目录不存在或探测异常)。
- *
- * 用 fs.accessSync(W_OK) 单次 syscall 检查,不写 probe 文件 —— 避免
- * 每次 buildClaudeQueryOptions 都做 write+unlink 的 IO 开销。
- * serverless 场景(SCF/CloudRun,/tmp 标准可写)准确度足够;
- * 边缘场景(read-only mount / 磁盘满)实际写操作也会失败,由调用方处理。
- */
-function probeWritable(dir: string): true | false | 'missing' {
-  try {
-    mkdirSync(dir, { recursive: true })
-    accessSync(dir, fsConstants.W_OK)
-    return true
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return 'missing'
-    return false
-  }
 }
 
 /**
