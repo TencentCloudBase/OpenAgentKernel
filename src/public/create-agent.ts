@@ -577,32 +577,6 @@ function createSession(deps: SessionDeps): Session {
       })
     },
 
-    /**
-     * 注入用户对 askUser 提问的回答并 resume agent 运行。
-     *
-     * 流终止+resume 范式（与 respondApproval / respondToolUse 同一模式）：
-     *   1. 把回答写入 clientToolStore(包成 result.output={answer})
-     *   2. 起一轮 SDK query（resume）→ 模型重发 askUser 工具 → hook 从 store 读到回答 → 放行
-     */
-    respondAskUser(opts: { toolUseId: string; answer: string }): AsyncIterable<SessionEvent> {
-      abortController = new AbortController()
-      return runAskUserResume({
-        config,
-        conversationId,
-        userId,
-        toolUseId: opts.toolUseId,
-        answer: opts.answer,
-        abortController,
-        ensureSandbox,
-        ensureCloudbaseMcp,
-        ensureSnapshotBootstrap,
-        onSnapshotEngine,
-        permissionStore,
-        clientToolNames,
-        clientToolStore,
-      })
-    },
-
     async getHistory(opts): Promise<MessageRecord[]> {
       const store = config.session?.store
       if (!store) return []
@@ -1396,86 +1370,12 @@ async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerat
 }
 
 // ============================================================
-// 内部：注入 askUser 回答并 resume agent 运行
+// 内部：askUser resume 已合并到 runClientToolResume
 // ============================================================
-
-interface RunAskUserResumeArgs {
-  config: AgentConfig
-  conversationId: string
-  userId: string
-  toolUseId: string
-  answer: string
-  abortController: AbortController
-  ensureSandbox: () => Promise<SandboxInstance | undefined>
-  ensureCloudbaseMcp: (sandbox: SandboxInstance) => Promise<SdkMcpServerConfig | undefined>
-  ensureSnapshotBootstrap: (engine: WorkspaceSnapshotEngine, sandbox: SandboxInstance) => Promise<void>
-  onSnapshotEngine: (engine: WorkspaceSnapshotEngine | undefined) => void
-  permissionStore?: PermissionStore
-  clientToolNames: ReadonlySet<string>
-  clientToolStore: ClientToolResultStore
-}
-
-async function* runAskUserResume(args: RunAskUserResumeArgs): AsyncGenerator<SessionEvent, void, unknown> {
-  const {
-    config,
-    conversationId,
-    userId,
-    toolUseId,
-    answer,
-    abortController,
-    ensureSandbox,
-    ensureCloudbaseMcp,
-    ensureSnapshotBootstrap,
-    onSnapshotEngine,
-    permissionStore,
-    clientToolNames,
-    clientToolStore,
-  } = args
-
-  const existing = await clientToolStore.get({ conversationId, toolUseId })
-  if (!existing) {
-    yield {
-      type: 'error',
-      error: new ResourceError(
-        `No pending askUser found for toolUseId=${toolUseId}. ` + 'It may have expired or already been resolved.',
-      ),
-    }
-    yield { type: 'session_idle', reason: 'error' }
-    return
-  }
-  if (existing.result) {
-    yield {
-      type: 'error',
-      error: new ResourceError(`askUser for toolUseId=${toolUseId} has already been resolved.`),
-    }
-    yield { type: 'session_idle', reason: 'error' }
-    return
-  }
-
-  // askUser 复用 ClientToolResultStore:answer 包成 result.output(isError=false)。
-  await clientToolStore.put({ ...existing, result: { output: { answer }, isError: false } })
-
-  // Resume prompt: tell the model the user has answered, ask it to retry
-  // the askUser tool so the hook can inject the answer.
-  const resumePrompt = `[系统通知] 用户已回答了你刚才的提问。请重新调用 askUser 工具以获取用户的回答（hook 会自动注入），然后基于回答继续。`
-
-  yield* runClaudeQuery({
-    config,
-    input: resumePrompt,
-    abortController,
-    sessionId: conversationId,
-    conversationId,
-    userId,
-    isContinuation: true,
-    ensureSandbox,
-    ensureCloudbaseMcp,
-    ensureSnapshotBootstrap,
-    onSnapshotEngine,
-    permissionStore,
-    clientToolNames,
-    clientToolStore,
-  })
-}
+// askUser 现在用统一的 tool_use_required 事件 + respondToolUse API:
+//   host 收到 tool_use_required(toolName='askUser') → 收集 answer →
+//   调 respondToolUse({ toolUseId, output: { answer }, isError: false })。
+// 不再有独立的 runAskUserResume / respondAskUser API。
 
 /**
  * 构造 resume 阶段给模型的引导 prompt。

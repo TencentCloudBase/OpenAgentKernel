@@ -161,17 +161,21 @@ export function* translateSdkMessage(
             }
 
             // ── askUser: 内置提问工具 sentinel ──
-            // PreToolUse hook denied with askUser sentinel; turn pauses so
-            // the host can collect user answer and resume via
-            // session.respondAskUser().
+            // askUser 已合并到 clientTool 流程(共用 clientToolStore),事件也统一到
+            // tool_use_required:toolName='askUser',input={question,options?}。
+            // host 端识别 toolName='askUser' 渲染问答 UI,收集 answer 后调
+            // session.respondToolUse({ toolUseId, output: { answer }, isError: false })。
             const askUserSignal = reasonText ? parseAskUserSignal(reasonText) : null
             if (askUserSignal) {
               state.approvalTriggered = true
               yield {
-                type: 'ask_user_required',
+                type: 'tool_use_required',
                 toolUseId: askUserSignal.toolUseId,
-                question: askUserSignal.question,
-                ...(askUserSignal.options ? { options: askUserSignal.options } : {}),
+                toolName: 'askUser',
+                input: {
+                  question: askUserSignal.question,
+                  ...(askUserSignal.options ? { options: askUserSignal.options } : {}),
+                },
               }
               continue
             }
