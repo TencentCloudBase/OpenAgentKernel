@@ -12,7 +12,6 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import * as os from 'node:os'
 import * as path from 'node:path'
-import { existsSync } from 'node:fs'
 import { buildClaudeQueryOptions } from '../agent-builder.js'
 import type { AgentConfig } from '../../public/types.js'
 import type { SandboxRuntime } from '../../sandbox/types.js'
@@ -32,13 +31,11 @@ beforeEach(() => {
 })
 
 describe('buildClaudeQueryOptions — cwd / settingSources', () => {
-  it('no cwd → ephemeral cwd + settingSources=[]', () => {
+  it('no cwd → falls back to process.cwd() + settingSources=[]', () => {
     const { options } = buildClaudeQueryOptions(baseConfig)
-    expect(options.cwd).toMatch(/oak-ephemeral-/)
-    expect(options.cwd?.startsWith(os.tmpdir())).toBe(true)
+    // kernel 不再自造 ephemeral 目录;没传 cwd 时诚实兜底 process.cwd()
+    expect(options.cwd).toBe(process.cwd())
     expect(options.settingSources).toEqual([])
-    // C1 fix verification:ephemeral dir 实际被创建
-    expect(existsSync(options.cwd!)).toBe(true)
   })
 
   it('user cwd → settingSources=["project"]', () => {
@@ -135,8 +132,10 @@ describe('buildClaudeQueryOptions — userMemory', () => {
       { userId: 'alice' },
     )
     expect(syncEngine).toBeDefined()
+    // per-user 路径:<workRoot>/.oak/users/<env>/<user>/.claude
     expect(options.env?.CLAUDE_CONFIG_DIR).toContain('alice')
-    expect(options.env?.CLAUDE_CONFIG_DIR?.startsWith(os.tmpdir())).toBe(true)
+    expect(options.env?.CLAUDE_CONFIG_DIR).toContain(path.join('.oak', 'users'))
+    expect(options.env?.CLAUDE_CONFIG_DIR?.endsWith('.claude')).toBe(true)
   })
 
   // 关键修复:userMemory 启用时,settingSources 必须含 'user',
@@ -152,17 +151,11 @@ describe('buildClaudeQueryOptions — userMemory', () => {
     expect(options.settingSources).toContain('user')
   })
 
-  // userMemory 启用且无 cwd → effectiveCwd 应该用 per-user 稳定路径
-  // (而非 ephemeral 随机),让 SDK projects/<cwd-hash>/ 跨节点稳定
-  it('userMemory.enabled + userId without cwd → effectiveCwd is stable per-user (not ephemeral)', () => {
+  // 设计决策:effectiveCwd 不再随 userMemory 派生 per-user 路径,统一 userCwd ?? process.cwd()
+  // (CLAUDE_CONFIG_DIR 仍 per-user 派生;cwd 与配置目录解耦)。
+  it('userMemory.enabled + userId without cwd → effectiveCwd is process.cwd()', () => {
     const { options } = buildClaudeQueryOptions({ ...baseConfig, userMemory: { enabled: true } }, { userId: 'alice' })
-    expect(options.cwd).not.toMatch(/oak-ephemeral-/)
-    expect(options.cwd).toContain('alice')
-    // cwd 应是 claudeConfigDir 的上一级(去掉末尾 .claude)
-    expect(options.cwd?.endsWith('/.claude')).toBe(false)
-    // 跨调用应稳定(同 envId+userId 永远一致)
-    const second = buildClaudeQueryOptions({ ...baseConfig, userMemory: { enabled: true } }, { userId: 'alice' })
-    expect(second.options.cwd).toBe(options.cwd)
+    expect(options.cwd).toBe(process.cwd())
   })
 
   it('userMemory.enabled + cwd both → cwd wins for effectiveCwd, settingSources has both', () => {
@@ -202,35 +195,40 @@ describe('buildClaudeQueryOptions — userMemory', () => {
     expect(options.persistSession).toBe(false)
   })
 
-  it('userMemory.enabled but no userId → no syncEngine, no CLAUDE_CONFIG_DIR', () => {
+  // 注:CLAUDE_CONFIG_DIR 现在无条件设置(per-user 派生 或 .oak/agent/.claude 全局兜底),
+  // 避免回落到只读宿主 ~/.claude。未启用 per-user 时退到 agent 全局目录。
+  const AGENT_FALLBACK = path.join('.oak', 'agent', '.claude')
+
+  it('userMemory.enabled but no userId → no syncEngine, CLAUDE_CONFIG_DIR = agent fallback', () => {
     const { options, syncEngine } = buildClaudeQueryOptions(
       { ...baseConfig, userMemory: { enabled: true } },
       {}, // no userId
     )
     expect(syncEngine).toBeUndefined()
-    expect(options.env?.CLAUDE_CONFIG_DIR).toBeUndefined()
+    expect(options.env?.CLAUDE_CONFIG_DIR).toContain(AGENT_FALLBACK)
+    expect(options.env?.CLAUDE_CONFIG_DIR).not.toContain('alice')
   })
 
-  it('userMemory disabled → no syncEngine even with userId', () => {
+  it('userMemory disabled → no syncEngine, CLAUDE_CONFIG_DIR = agent fallback', () => {
     const { options, syncEngine } = buildClaudeQueryOptions(
       { ...baseConfig, userMemory: { enabled: false } },
       { userId: 'alice' },
     )
     expect(syncEngine).toBeUndefined()
-    expect(options.env?.CLAUDE_CONFIG_DIR).toBeUndefined()
+    expect(options.env?.CLAUDE_CONFIG_DIR).toContain(AGENT_FALLBACK)
   })
 
   it('userMemory + missing credentials → graceful degrade (no syncEngine, no throw)', () => {
-    // 模拟 spec §3.1:COS 凭证缺失时,构造 store 抛 InvalidConfigError →
-    // agent-builder 应 try/catch 兜住,返回 syncEngine=undefined,不影响 send 主流程
+    // COS 凭证缺失时构造 store 抛 InvalidConfigError → agent-builder try/catch 兜住,
+    // syncEngine=undefined,claudeConfigDir 回退到 agent 全局,不影响 send 主流程。
     expect(() => {
       const { options, syncEngine } = buildClaudeQueryOptions(
         { ...baseConfig, credentials: undefined, userMemory: { enabled: true } },
         { userId: 'alice' },
       )
       expect(syncEngine).toBeUndefined()
-      // CLAUDE_CONFIG_DIR 也跟着清空(graceful degrade 全套不留半截状态)
-      expect(options.env?.CLAUDE_CONFIG_DIR).toBeUndefined()
+      // 降级后回退 agent 全局目录(不是 per-user,也不是 undefined)
+      expect(options.env?.CLAUDE_CONFIG_DIR).toContain(AGENT_FALLBACK)
     }).not.toThrow()
   })
 })
@@ -312,5 +310,118 @@ describe('buildClaudeQueryOptions — workspaceSnapshot', () => {
       },
     })
     expect(result.snapshotEngine).toBeDefined()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────
+// workspacePersist(无沙箱 cwd 持久化)
+// ─────────────────────────────────────────────────────────────────
+
+describe('buildClaudeQueryOptions — workspacePersist', () => {
+  const cwd = os.tmpdir() // writable
+
+  it("auto (default) + writable cwd + sessionId → returns cwdPersistEngine", () => {
+    const { cwdPersistEngine } = buildClaudeQueryOptions(
+      { ...baseConfig, cwd },
+      { sessionId: 'sess-1', userId: 'alice' },
+    )
+    expect(cwdPersistEngine).toBeDefined()
+  })
+
+  it('auto + missing sessionId → undefined (silent skip)', () => {
+    const { cwdPersistEngine } = buildClaudeQueryOptions({ ...baseConfig, cwd }, { userId: 'alice' })
+    expect(cwdPersistEngine).toBeUndefined()
+  })
+
+  it("workspacePersist='disabled' → undefined even with sessionId", () => {
+    const { cwdPersistEngine } = buildClaudeQueryOptions(
+      { ...baseConfig, cwd, workspacePersist: 'disabled' },
+      { sessionId: 'sess-1' },
+    )
+    expect(cwdPersistEngine).toBeUndefined()
+  })
+
+  it('sandbox enabled → workspacePersist ignored (mutual exclusion)', () => {
+    const goodRuntime: SandboxRuntime = {
+      backend: 'ags-stateful',
+      acquire: vi.fn(),
+    } as unknown as SandboxRuntime
+    const { cwdPersistEngine } = buildClaudeQueryOptions(
+      {
+        ...baseConfig,
+        cwd,
+        sandbox: { enabled: true, scope: 'shared', runtime: goodRuntime },
+        workspacePersist: 'auto',
+      },
+      { sessionId: 'sess-1' },
+    )
+    expect(cwdPersistEngine).toBeUndefined()
+  })
+
+  it('missing credentials → graceful degrade (undefined, no throw)', () => {
+    expect(() => {
+      const { cwdPersistEngine } = buildClaudeQueryOptions(
+        { ...baseConfig, credentials: undefined, cwd },
+        { sessionId: 'sess-1' },
+      )
+      expect(cwdPersistEngine).toBeUndefined()
+    }).not.toThrow()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────
+// streaming（includePartialMessages）
+// ─────────────────────────────────────────────────────────────────
+
+describe('buildClaudeQueryOptions — streaming', () => {
+  it('default (no config.stream) → includePartialMessages true', () => {
+    const { options } = buildClaudeQueryOptions(baseConfig)
+    expect(options.includePartialMessages).toBe(true)
+  })
+
+  it('config.stream=true → includePartialMessages true', () => {
+    const { options } = buildClaudeQueryOptions({ ...baseConfig, stream: true })
+    expect(options.includePartialMessages).toBe(true)
+  })
+
+  it('config.stream=false → includePartialMessages false', () => {
+    const { options } = buildClaudeQueryOptions({ ...baseConfig, stream: false })
+    expect(options.includePartialMessages).toBe(false)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────
+// localTools（内置工具开关）
+// ─────────────────────────────────────────────────────────────────
+
+describe('buildClaudeQueryOptions — localTools', () => {
+  it('default → tools = [] (all builtin disabled)', () => {
+    const { options } = buildClaudeQueryOptions(baseConfig)
+    expect(options.tools).toEqual([])
+  })
+
+  it('skills enabled, no localTools → tools = ["Skill"]', () => {
+    const { options } = buildClaudeQueryOptions({ ...baseConfig, cwd: os.tmpdir(), skills: { enabled: 'all' } })
+    expect(options.tools).toEqual(['Skill'])
+  })
+
+  it('localTools=true → claude_code preset', () => {
+    const { options } = buildClaudeQueryOptions({ ...baseConfig, localTools: true })
+    expect(options.tools).toEqual({ type: 'preset', preset: 'claude_code' })
+  })
+
+  it('localTools=string[] → that list', () => {
+    const { options } = buildClaudeQueryOptions({ ...baseConfig, localTools: ['Read', 'Glob', 'Grep'] })
+    expect(options.tools).toEqual(['Read', 'Glob', 'Grep'])
+  })
+
+  it('localTools=string[] + skills → adds Skill (deduped)', () => {
+    const { options } = buildClaudeQueryOptions({
+      ...baseConfig,
+      cwd: os.tmpdir(),
+      skills: { enabled: 'all' },
+      localTools: ['Read'],
+    })
+    expect(options.tools).toEqual(['Read', 'Skill'])
   })
 })

@@ -1001,6 +1001,7 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
   let snapshotEngine: ReturnType<typeof buildClaudeQueryOptions>['snapshotEngine']
   let sandbox: SandboxInstance | undefined
   let debugFilePath: string | undefined
+  let cwdPersistEngine: ReturnType<typeof buildClaudeQueryOptions>['cwdPersistEngine']
   // Spec B(Task 8):仅当 snapshot bootstrap 成功完成(或无需 bootstrap)时才置 true。
   // 若 bootstrap 抛错(SandboxRestoreFailed / 网络),finally 必须跳过 send-end snapshot,
   // 否则会在 broken state 上再花 30s timeout 做 snapshot,可能把不完整状态推上 COS。
@@ -1026,11 +1027,14 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
       ...(clientToolStore ? { clientToolStore } : {}),
       ...(askUserStore ? { askUserStore } : {}),
       userId,
+      // cwd 持久化用 conversationId 作 per-session key(同 session 跨请求复用)
+      sessionId: conversationId,
     })
     const options = built.options
     syncEngine = built.syncEngine
     snapshotEngine = built.snapshotEngine
     debugFilePath = built.debugFilePath
+    cwdPersistEngine = built.cwdPersistEngine
     onSnapshotEngine(snapshotEngine)
 
     // ── Spec B(Task 8):workspace snapshot bootstrap(首次 send + 启用时)───
@@ -1053,6 +1057,16 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn('[oak/userMemory] pullOnSendStart failed:', (err as Error)?.message)
+      }
+    }
+
+    // ── workspacePersist: send-start pull cwd(失败不抛,记 warning)───
+    if (cwdPersistEngine) {
+      try {
+        await cwdPersistEngine.pullOnSendStart()
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[oak/workspacePersist] pullOnSendStart failed:', (err as Error)?.message)
       }
     }
 
@@ -1087,7 +1101,9 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
     }
 
     q = claudeQuery({ prompt: promptStream as never, options: sdkOptions })
-    const translatorState = createTranslatorState()
+    // 流式开关:与 SDK includePartialMessages 一致(builder 据 config.stream 设置)。
+    // translator 用它避免最终 assistant 文本与 stream_event 增量重复。
+    const translatorState = createTranslatorState(options.includePartialMessages === true)
     for await (const sdkMsg of q) {
       for (const event of translateSdkMessage(sdkMsg, translatorState)) {
         yield event
@@ -1112,6 +1128,16 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn('[oak/userMemory] pushOnSendEnd failed:', (err as Error)?.message)
+      }
+    }
+
+    // ── workspacePersist: send-end push cwd(abort/异常都触发,失败不抛)───
+    if (cwdPersistEngine) {
+      try {
+        await cwdPersistEngine.pushOnSendEnd()
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[oak/workspacePersist] pushOnSendEnd failed:', (err as Error)?.message)
       }
     }
 

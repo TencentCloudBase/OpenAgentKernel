@@ -15,6 +15,13 @@ export {
   OAK_ROOT_SEGMENT,
 } from './path-derivation.js'
 export { matchesSyncRule, SYNC_INCLUDES } from './sync-rules.js'
+export { matchesCwdSyncRule, shouldPruneCwdDir, DEFAULT_CWD_EXCLUDES } from './workspace-cwd-rules.js'
+export {
+  WorkspaceCwdArchiveEngine,
+  createWorkspaceCwdArchiveEngine,
+  cwdArchiveKeyPrefix,
+  type WorkspaceCwdArchiveEngineOptions,
+} from './workspace-cwd-archive-engine.js'
 export { sha256OfBuffer, sha256OfFile } from './dedup.js'
 export { ClaudeHomeSyncEngine, type ClaudeHomeSyncEngineOptions } from './sync-engine.js'
 export { InMemoryClaudeHomeStore } from './in-memory-store.js'
@@ -22,5 +29,6 @@ export {
   CloudBaseCosClaudeHomeStore,
   type CloudBaseCosCredentials,
   type CloudBaseCosClaudeHomeStoreOptions,
+  type CosKeyPrefixFn,
 } from './cloudbase-cos-store.js'
 export type { ClaudeHomeSyncStore, ClaudeHomeContext, RelativePath } from './types.js'

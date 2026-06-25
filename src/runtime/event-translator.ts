@@ -38,10 +38,17 @@ export interface TranslatorState {
    * 用于在审批中断时给 'tool_approval_required' 事件补 toolName（兜底，主路径从 sentinel JSON 直接拿）。
    */
   toolCallNames: Map<string, string>
+  /**
+   * 是否启用了流式（SDK includePartialMessages）。
+   * 启用时增量文本由 stream_event → message_delta 发出；最终 assistant message 的 text
+   * 只发 message_complete（不再重复发整段 message_delta，避免文本翻倍）。
+   * 未启用时 assistant text 同时发 message_delta + message_complete（无流式 chunk）。
+   */
+  streaming: boolean
 }
 
-export function createTranslatorState(): TranslatorState {
-  return { approvalTriggered: false, toolCallNames: new Map() }
+export function createTranslatorState(streaming = false): TranslatorState {
+  return { approvalTriggered: false, toolCallNames: new Map(), streaming }
 }
 
 /**
@@ -64,7 +71,12 @@ export function* translateSdkMessage(
           case 'text': {
             const text = (block as { text?: string }).text
             if (typeof text === 'string' && text.length > 0) {
-              yield { type: 'message_delta', text }
+              // 流式模式:增量已由 stream_event 发过,这里只发最终完整文本(message_complete),
+              // 否则会把整段文本再当一个 delta 发一遍 → 消费端文本翻倍。
+              // 非流式模式:没有 stream chunk,把整段当一个 delta + complete。
+              if (!state.streaming) {
+                yield { type: 'message_delta', text }
+              }
               yield { type: 'message_complete', text }
             }
             break

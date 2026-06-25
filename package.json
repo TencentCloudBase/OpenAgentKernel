@@ -33,6 +33,7 @@
     "@cloudbase/manager-node": "^4.10.6",
     "@cloudbase/node-sdk": "^3.18.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "tar": "^7.5.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {

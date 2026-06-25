@@ -40,8 +40,10 @@ import {
 import {
   ClaudeHomeSyncEngine,
   CloudBaseCosClaudeHomeStore,
+  createWorkspaceCwdArchiveEngine,
   deriveAgentConfigDir,
   deriveClaudeConfigDir,
+  WorkspaceCwdArchiveEngine,
 } from '../claude-home/index.js'
 import { ConfigError, InvalidConfigError } from '../internal/errors.js'
 import type { AgentConfig, SandboxConfig, ToolDefinition, UserMemoryConfig } from '../public/types.js'
@@ -84,6 +86,14 @@ export interface BuiltClaudeQueryParams {
    * 在 query 结束后(尤其 0 消息时)读取它,把子进程 init/退出原因打到日志。
    */
   debugFilePath?: string
+  /**
+   * workspacePersist 启用时返回:cwd 工作目录持久化引擎(无沙箱场景)。
+   * 调用方(create-agent)挂到 send 两端:
+   *   send-start → cwdPersistEngine.pullOnSendStart()
+   *   send-end   → cwdPersistEngine.pushOnSendEnd()
+   * 与沙箱 snapshotEngine 互斥(启用沙箱时本字段为 undefined)。
+   */
+  cwdPersistEngine?: WorkspaceCwdArchiveEngine
 }
 
 /**
@@ -115,6 +125,8 @@ export function buildClaudeQueryOptions(
     askUserStore?: AskUserStore
     /** Task 9 for userMemory:agent.startSession({ userId }) 透传过来 */
     userId?: string
+    /** workspacePersist:cwd 持久化的 per-session key 命名空间。 */
+    sessionId?: string
   } = {},
 ): BuiltClaudeQueryParams {
   const credential = resolveCredential({
@@ -379,6 +391,18 @@ export function buildClaudeQueryOptions(
       })
     : undefined
 
+  // ── workspacePersist:无沙箱时持久化 cwd 到 COS(per-session)──
+  // 与沙箱 snapshot 互斥:启用沙箱(snapshotEngine 或 sandboxInstance)时忽略本配置,
+  // 由沙箱 snapshot 负责容器内 cwd。
+  const sandboxActive = snapshotEnabled || Boolean(extra.sandboxInstance) || config.sandbox?.enabled === true
+  const cwdPersistEngine = resolveCwdPersistEngine(config, {
+    credential,
+    cwd: effectiveCwd,
+    sessionId: extra.sessionId,
+    userId: extra.userId,
+    sandboxActive,
+  })
+
   const options: ClaudeOptions = {
     model: credential.modelId,
     env,
@@ -409,17 +433,116 @@ export function buildClaudeQueryOptions(
     // 因此始终 bypass SDK 的内置权限系统，让 Hook 全权负责。
     permissionMode: 'bypassPermissions' as const,
     allowDangerouslySkipPermissions: true,
-    // ── 内置工具默认全部禁用(沙箱能力通过上面的 mcpServers 提供)──
-    // 例外:启用 skills 时必须保留 'Skill' 工具,否则模型无法 invoke discovered skills
-    // (SDK 文档:"If you also pass an explicit tools list, include 'Skill' in that list
-    //   so Claude can invoke skills.")
-    tools: config.skills?.enabled !== undefined ? ['Skill'] : [],
+    // ── 流式:透传 includePartialMessages(默认 true)──
+    // SDK 只有此项为 true 才 emit stream_event(增量 chunk);translator 据此发 message_delta。
+    includePartialMessages: config.stream !== false,
+    // ── 内置工具(默认禁用)──
+    // 默认 tools=[](或仅 'Skill'):无沙箱时模型无本地文件/命令工具(避免操作 kernel 宿主机)。
+    // config.localTools 显式开放内置工具(单租户/可信场景);沙箱能力另经 mcpServers 提供。
+    tools: resolveBuiltinTools(config),
   }
 
-  return { options, credential, syncEngine, snapshotEngine, ...(debugFilePath ? { debugFilePath } : {}) }
+  return {
+    options,
+    credential,
+    syncEngine,
+    snapshotEngine,
+    ...(debugFilePath ? { debugFilePath } : {}),
+    ...(cwdPersistEngine ? { cwdPersistEngine } : {}),
+  }
 }
 
 // ─── 辅助 ────────────────────────────────────────────────────────
+
+/**
+ * 解析 SDK 内置工具集(options.tools)。
+ *
+ *   - localTools 未设/false → 仅在启用 skills 时保留 ['Skill'],否则 []（全禁用)
+ *   - localTools === true   → 'claude_code' preset(全部默认内置工具);启用 skills 时
+ *     preset 已含 Skill,无需额外加
+ *   - localTools 是 string[] → 用该列表;启用 skills 时补 'Skill'(去重)
+ *
+ * 安全默认:不开 localTools 时模型拿不到本地 Bash/Read/Write,避免操作 kernel 宿主机 FS。
+ */
+function resolveBuiltinTools(config: AgentConfig): ClaudeOptions['tools'] {
+  const skillsOn = config.skills?.enabled !== undefined
+  const local = config.localTools
+
+  if (local === true) {
+    // 全部默认内置工具(preset 已含 Skill)
+    return { type: 'preset', preset: 'claude_code' }
+  }
+  if (Array.isArray(local)) {
+    const set = new Set(local)
+    if (skillsOn) set.add('Skill')
+    return [...set]
+  }
+  // 默认禁用:仅在启用 skills 时保留 'Skill'
+  return skillsOn ? ['Skill'] : []
+}
+
+/**
+ * 解析 workspacePersist → 构造 cwd 持久化引擎(无沙箱场景)。
+ *
+ * 决策:
+ *   - 沙箱激活(snapshot / sandboxInstance / sandbox.enabled)→ undefined(互斥)
+ *   - workspacePersist === 'disabled' → undefined
+ *   - 'auto'(默认):cwd 可写 + 有 sessionId → 启用;否则静默 undefined
+ *   - 对象(显式):启用;cwd 不可写或缺 sessionId → warn + undefined
+ *
+ * 构造失败(凭证缺失等)→ warn + undefined(graceful degrade,不阻塞 send)。
+ */
+function resolveCwdPersistEngine(
+  config: AgentConfig,
+  args: {
+    credential: ResolvedCredential
+    cwd: string
+    sessionId: string | undefined
+    userId: string | undefined
+    sandboxActive: boolean
+  },
+): WorkspaceCwdArchiveEngine | undefined {
+  const setting = config.workspacePersist ?? 'auto'
+  if (args.sandboxActive) return undefined
+  if (setting === 'disabled') return undefined
+
+  const explicit = typeof setting === 'object'
+  // userId 兜底:workspacePersist 不要求业务传 userId,缺省用占位(COS key 只用 sessionId)
+  const userId = args.userId ?? 'anonymous'
+
+  // 前置条件:cwd 可写 + 有 sessionId
+  const cwdWritable = probeWritable(args.cwd) === true
+  if (!args.sessionId || !cwdWritable) {
+    if (explicit) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[oak/workspacePersist] enabled but prerequisites missing ` +
+          `(sessionId=${args.sessionId ? 'ok' : 'MISSING'}, cwdWritable=${cwdWritable}); skipping.`,
+      )
+    }
+    return undefined
+  }
+
+  const credentials = config.credentials
+    ? { ...config.credentials, envId: config.credentials.envId ?? config.envId }
+    : undefined
+
+  try {
+    return createWorkspaceCwdArchiveEngine({
+      ...(credentials ? { credentials } : {}),
+      envId: config.envId,
+      userId,
+      sessionId: args.sessionId,
+      cwd: args.cwd,
+      ...(explicit && setting.exclude ? { extraExcludes: setting.exclude } : {}),
+      ...(explicit && setting.maxFileBytes !== undefined ? { maxFileBytes: setting.maxFileBytes } : {}),
+    })
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('[oak/workspacePersist] failed to construct engine, cwd persistence disabled:', (err as Error)?.message)
+    return undefined
+  }
+}
 
 function isUserMemoryEnabled(config: UserMemoryConfig | undefined): boolean {
   return config === true || (typeof config === 'object' && config.enabled === true)

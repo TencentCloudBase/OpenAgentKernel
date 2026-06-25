@@ -450,6 +450,32 @@ export interface AgentConfig {
   model: ModelInput
   systemPrompt?: string
 
+  /**
+   * 是否启用流式增量输出。默认 true。
+   *
+   * 启用时 SDK 透传 includePartialMessages,事件流发出增量 message_delta(逐字),
+   * 最终再发一个 message_complete(完整文本)。
+   * 关闭时不发增量,assistant 文本一次性作为 message_delta + message_complete 发出。
+   *
+   * 注:部署形态若在网关层缓冲整个响应(如 SCF web-function 只投递最后一次 write),
+   * 即使开了流式,前端也要等整轮结束才一次性收到 —— 那是网关行为,与本开关无关。
+   */
+  stream?: boolean
+
+  /**
+   * 是否开放 claude CLI 的内置本地工具(Bash / Read / Write / Edit / Glob / Grep 等)。
+   * 默认 false —— 无沙箱时模型默认无任何文件/命令工具(纯对话),因为 claude 在 kernel
+   * 宿主进程运行,开放内置工具 = 模型可直接操作宿主机文件系统(多租户场景危险)。
+   *
+   * ⚠️ 仅在单租户 / 可信 / 已隔离的部署里开启。需要隔离的文件能力请用 sandbox(独立容器)。
+   * 启用沙箱时本配置无意义(沙箱通过 mcp__sandbox__* 提供工具)。
+   *
+   * - false / 不传:tools=[](或仅 'Skill')
+   * - true:放开 SDK 默认内置工具集
+   * - string[]:精确指定要开放的内置工具名(如 ['Read','Glob','Grep'] 只读)
+   */
+  localTools?: boolean | string[]
+
   // ── 能力 ────────────────────────────────────────
   tools?: ToolDefinition<any, any>[]
   /**
@@ -536,6 +562,28 @@ export interface AgentConfig {
    * 防御。但允许 alice 这次落 node1、下次落 node2,只要两次不重叠。
    */
   userMemory?: UserMemoryConfig
+
+  /**
+   * 无沙箱场景:把本地 cwd 工作目录在 send 边界持久化到 COS(send-start 拉取、
+   * send-end diff 推送),per-session。这是沙箱 workspaceSnapshot 的"本地版":
+   * 不开沙箱时让 claude 在 cwd 产生的产物跨容器/请求可恢复。
+   *
+   * - 'auto'(默认):未开沙箱 + effectiveCwd 可写 + 有 sessionId 时自动启用,否则静默跳过
+   * - 'disabled':显式关闭
+   * - 对象:显式启用并配置排除项 / 单文件上限
+   *
+   * 启用沙箱时本配置被忽略(沙箱 snapshot 负责容器内 cwd)。
+   * 不持久化 .claude(配置/记忆,与沙箱场景一致都不持久);对话历史由 sessionStore 负责。
+   */
+  workspacePersist?:
+    | 'auto'
+    | 'disabled'
+    | {
+        /** 追加排除项:目录名(如 'tmp')或后缀('*.log')。 */
+        exclude?: string[]
+        /** 跳过大于此字节数的文件。默认 5_000_000(5MB)。 */
+        maxFileBytes?: number
+      }
 
   // ── 钩子 ────────────────────────────────────────
   hooks?: AgentHooks

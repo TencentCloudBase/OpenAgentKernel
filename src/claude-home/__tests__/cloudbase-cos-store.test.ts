@@ -298,3 +298,47 @@ describe('CloudBaseCosClaudeHomeStore — delete()', () => {
     await expect(store.delete(ctx, 'CLAUDE.md')).rejects.toThrow(/AccessDenied/)
   })
 })
+
+// ── injectable keyPrefix（cwd 持久化用）─────────────────────────
+describe('CloudBaseCosClaudeHomeStore — injectable keyPrefix', () => {
+  const cwdCtx = { envId: 'env-test', userId: 'alice', sessionId: 'sess-1' }
+  const cwdPrefix = (c: typeof cwdCtx) => `oak/workspaces/sessions/${c.sessionId}/cwd/`
+
+  it('default prefix unchanged (userMemory layout)', async () => {
+    const store = new CloudBaseCosClaudeHomeStore({ credentials })
+    const fake = makeFakeManager()
+    spyManagerCtor(store, fake, 'cjs')
+    await store.delete(ctx, 'CLAUDE.md')
+    expect(fake.storage.deleteFile).toHaveBeenCalledWith(['oak/users/alice/claude-home/CLAUDE.md'])
+  })
+
+  it('uses injected keyPrefix for put/delete', async () => {
+    const store = new CloudBaseCosClaudeHomeStore({ credentials, keyPrefix: cwdPrefix })
+    const fake = makeFakeManager()
+    spyManagerCtor(store, fake, 'cjs')
+
+    await store.put(cwdCtx, 'src/index.ts', Buffer.from('x'))
+    expect(fake.storage.uploadFile).toHaveBeenCalledWith(
+      expect.objectContaining({ cloudPath: 'oak/workspaces/sessions/sess-1/cwd/src/index.ts' }),
+    )
+
+    await store.delete(cwdCtx, 'src/index.ts')
+    expect(fake.storage.deleteFile).toHaveBeenCalledWith(['oak/workspaces/sessions/sess-1/cwd/src/index.ts'])
+  })
+
+  it('pull uses injected prefix and strips it from relPath', async () => {
+    const store = new CloudBaseCosClaudeHomeStore({ credentials, keyPrefix: cwdPrefix })
+    const fake = makeFakeManager({
+      walkCloudDir: vi.fn().mockResolvedValue([{ Key: 'oak/workspaces/sessions/sess-1/cwd/a.txt', Size: 3 }]),
+      getTemporaryUrl: vi.fn().mockResolvedValue([{ fileId: '', url: 'https://example/a' }]),
+    })
+    spyManagerCtor(store, fake, 'cjs')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(Buffer.from('abc')))
+    const localDir = await fs.mkdtemp(path.join((await import('node:os')).tmpdir(), 'oak-cwd-pull-'))
+
+    const baseline = await store.pull(cwdCtx, localDir)
+    expect([...baseline.keys()]).toEqual(['a.txt'])
+    expect(fake.storage.walkCloudDir).toHaveBeenCalledWith('oak/workspaces/sessions/sess-1/cwd/')
+    fetchSpy.mockRestore()
+  })
+})

@@ -24,7 +24,13 @@ import { sha256OfBuffer } from './dedup.js'
 import { deriveSyncTmpDir } from './path-derivation.js'
 import type { ClaudeHomeContext, ClaudeHomeSyncStore, RelativePath } from './types.js'
 
-const KEY_PREFIX_TPL = (userId: string) => `oak/users/${userId}/claude-home/`
+/**
+ * COS key 前缀解析器。默认 userMemory 布局 `oak/users/<userId>/claude-home/`。
+ * cwd 持久化注入自己的前缀(`oak/workspaces/sessions/<sessionId>/cwd/`)。
+ */
+export type CosKeyPrefixFn = (ctx: ClaudeHomeContext) => string
+
+const DEFAULT_KEY_PREFIX: CosKeyPrefixFn = (ctx) => `oak/users/${ctx.userId}/claude-home/`
 
 export interface CloudBaseCosCredentials {
   envId: string
@@ -36,6 +42,8 @@ export interface CloudBaseCosCredentials {
 
 export interface CloudBaseCosClaudeHomeStoreOptions {
   credentials?: CloudBaseCosCredentials
+  /** COS key 前缀解析器。默认 userMemory 布局。 */
+  keyPrefix?: CosKeyPrefixFn
 }
 
 interface ResolvedCredentials extends CloudBaseCosCredentials {
@@ -86,8 +94,7 @@ function resolveCredentials(opts?: CloudBaseCosClaudeHomeStoreOptions): Resolved
   return { envId, secretId, secretKey, sessionToken, region }
 }
 
-function assertSafeKey(userId: string, fullKey: string): void {
-  const expectedPrefix = KEY_PREFIX_TPL(userId)
+function assertSafeKey(expectedPrefix: string, fullKey: string): void {
   if (!fullKey.startsWith(expectedPrefix)) {
     throw new Error(`assertSafeKey: ${fullKey} does not start with ${expectedPrefix}`)
   }
@@ -117,10 +124,12 @@ function isFileNotExistError(err: unknown): boolean {
 
 export class CloudBaseCosClaudeHomeStore implements ClaudeHomeSyncStore {
   private readonly creds: ResolvedCredentials
+  private readonly keyPrefix: CosKeyPrefixFn
   private manager: CloudBaseManagerInstance | null = null
 
   constructor(opts: CloudBaseCosClaudeHomeStoreOptions = {}) {
     this.creds = resolveCredentials(opts)
+    this.keyPrefix = opts.keyPrefix ?? DEFAULT_KEY_PREFIX
   }
 
   private async getManager(): Promise<CloudBaseManagerInstance> {
@@ -164,7 +173,7 @@ export class CloudBaseCosClaudeHomeStore implements ClaudeHomeSyncStore {
   async pull(ctx: ClaudeHomeContext, localDir: string): Promise<Map<RelativePath, string>> {
     const baseline = new Map<RelativePath, string>()
     const manager = await this.getManager()
-    const prefix = KEY_PREFIX_TPL(ctx.userId)
+    const prefix = this.keyPrefix(ctx)
 
     const listed = await manager.storage.walkCloudDir(prefix)
 
@@ -177,7 +186,7 @@ export class CloudBaseCosClaudeHomeStore implements ClaudeHomeSyncStore {
         const size = typeof item.Size === 'number' ? item.Size : Number(item.Size)
         if (Number.isFinite(size) && size === 0) return
 
-        assertSafeKey(ctx.userId, fileID)
+        assertSafeKey(prefix, fileID)
         const relPath = fileID.substring(prefix.length)
         if (!relPath) return
 
@@ -200,8 +209,9 @@ export class CloudBaseCosClaudeHomeStore implements ClaudeHomeSyncStore {
 
   async put(ctx: ClaudeHomeContext, relPath: RelativePath, content: Buffer): Promise<void> {
     const manager = await this.getManager()
-    const fullKey = KEY_PREFIX_TPL(ctx.userId) + relPath
-    assertSafeKey(ctx.userId, fullKey)
+    const prefix = this.keyPrefix(ctx)
+    const fullKey = prefix + relPath
+    assertSafeKey(prefix, fullKey)
 
     // manager-node 的 uploadFile 只接 localPath(底层 fs.createReadStream),
     // 我们要传 Buffer,所以走"临时文件桥接"。COS 上传后立即清理 tmp 文件。
@@ -223,8 +233,9 @@ export class CloudBaseCosClaudeHomeStore implements ClaudeHomeSyncStore {
 
   async delete(ctx: ClaudeHomeContext, relPath: RelativePath): Promise<void> {
     const manager = await this.getManager()
-    const fullKey = KEY_PREFIX_TPL(ctx.userId) + relPath
-    assertSafeKey(ctx.userId, fullKey)
+    const prefix = this.keyPrefix(ctx)
+    const fullKey = prefix + relPath
+    assertSafeKey(prefix, fullKey)
     try {
       await manager.storage.deleteFile([fullKey])
     } catch (err) {
@@ -232,5 +243,22 @@ export class CloudBaseCosClaudeHomeStore implements ClaudeHomeSyncStore {
       if (isFileNotExistError(err)) return
       throw err
     }
+  }
+
+  async getObject(ctx: ClaudeHomeContext, relPath: RelativePath): Promise<Buffer | null> {
+    const manager = await this.getManager()
+    const prefix = this.keyPrefix(ctx)
+    const fullKey = prefix + relPath
+    assertSafeKey(prefix, fullKey)
+    const urlRes = await manager.storage.getTemporaryUrl([{ cloudPath: fullKey, maxAge: 600 }]).catch((err: unknown) => {
+      // namespace 不存在 / 对象不存在:manager-node 可能抛错而非返空
+      if (isFileNotExistError(err)) return null
+      throw err
+    })
+    if (!urlRes?.[0]?.url) return null
+    const resp = await fetch(urlRes[0].url)
+    if (resp.status === 404) return null
+    if (!resp.ok) throw new Error(`getObject failed for ${fullKey}: ${resp.status}`)
+    return Buffer.from(await resp.arrayBuffer())
   }
 }
