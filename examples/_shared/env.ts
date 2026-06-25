@@ -27,6 +27,8 @@ interface ExampleConfig {
     resumeConversationId?: string
     storage?: string
     imagePath?: string
+    /** 多模态 example 专用；不受顶层 model（常为文本模型）影响 */
+    visionModel?: string
     debug?: boolean
   }
 }
@@ -72,6 +74,12 @@ export function getEnvId(): string {
 
 export function getModel(defaultModel = 'glm-5.1'): string {
   return loadConfig().model ?? defaultModel
+}
+
+/** 视觉 / 多模态 example 专用模型（忽略 config.model，避免误用文本模型） */
+export function getVisionModel(defaultModel = 'glm-5v-turbo'): string {
+  const visionModel = loadConfig().examples?.visionModel
+  return visionModel && visionModel.length > 0 ? visionModel : defaultModel
 }
 
 export function getPlatformCredentials(): PlatformCredentials {

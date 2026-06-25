@@ -1,6 +1,6 @@
 {
   "name": "@cloudbase/open-agent-kernel",
-  "version": "0.1.0-beta.7",
+  "version": "0.1.0-beta.8",
   "description": "CloudBase Open Agent Kernel — server-side agentic agent SDK with built-in CloudBase resources",
   "license": "Apache-2.0",
   "type": "module",
@@ -28,6 +28,7 @@
     "prepublishOnly": "pnpm run build"
   },
   "dependencies": {
+    "@agentclientprotocol/sdk": "^1.0.0",
     "@anthropic-ai/claude-agent-sdk": "^0.3.146",
     "@anthropic-ai/sdk": "^0.93.0",
     "@cloudbase/manager-node": "^4.10.6",

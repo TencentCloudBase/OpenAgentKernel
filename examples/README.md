@@ -31,6 +31,7 @@ pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
 | `examples.resumeConversationId` | example 04 使用；指定上一次输出的 conversationId 做跨进程 resume。 |
 | `examples.storage` | example 05 使用；设为 `memory` 时改用 `InMemoryStorage`。 |
 | `examples.imagePath` | example 05 使用；指定自定义图片路径。 |
+| `examples.visionModel` | example 05 使用；视觉模型 ID（默认 `glm-5v-turbo`，不受顶层 `model` 影响）。 |
 | `examples.debug` | 为 `true` 时打开 `OAK_DEBUG` 调试日志。 |
 
 ## 运行索引
@@ -46,7 +47,7 @@ pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
 | `01-quickstart.ts` | 快速开始 | `pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts` |
 | `02-debug.ts` | 打印调试事件 | `pnpm dlx tsx packages/open-agent-kernel/examples/02-debug.ts` |
 | `03-multi-turn.ts` | 进程内多轮对话 | `pnpm dlx tsx packages/open-agent-kernel/examples/03-multi-turn.ts` |
-| `04-multi-turn-db.ts` | CloudBase session 持久化 / resume | `pnpm dlx tsx packages/open-agent-kernel/examples/04-multi-turn-db.ts` |
+| `04-multi-turn-db.ts` | CloudBase session 持久化 / resume | 第一次跑写入个人信息；把输出的 `conversationId` 填入 `examples.resumeConversationId` 后再跑，验证跨进程回忆 |
 | `05-multimodal.ts` | 图片附件 / Storage | `pnpm dlx tsx packages/open-agent-kernel/examples/05-multimodal.ts` |
 | `06-mcp-sdk-server.ts` | 进程内 MCP | `pnpm dlx tsx packages/open-agent-kernel/examples/06-mcp-sdk-server.ts` |
 | `07-mcp-stdio.ts` | stdio MCP | `pnpm dlx tsx packages/open-agent-kernel/examples/07-mcp-stdio.ts` |
@@ -54,7 +55,7 @@ pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
 | `09-sandbox-shared.ts` | shared sandbox | `pnpm dlx tsx packages/open-agent-kernel/examples/09-sandbox-shared.ts` |
 | `10-sandbox-cloudbase-tools.ts` | sandbox 内 CloudBase MCP 工具 | `pnpm dlx tsx packages/open-agent-kernel/examples/10-sandbox-cloudbase-tools.ts` |
 | `11-hitl-approval.ts` | 单进程 HITL 审批 | `pnpm dlx tsx packages/open-agent-kernel/examples/11-hitl-approval.ts` |
-| `12-hitl-acp-adapter.ts` | ACP 风格审批适配 | `pnpm dlx tsx packages/open-agent-kernel/examples/12-hitl-acp-adapter.ts` |
+| `12-hitl-acp-adapter.ts` | 内置 ACP 审批流 | `pnpm dlx tsx packages/open-agent-kernel/examples/12-hitl-acp-adapter.ts` |
 | `13-hitl-distributed-cloudbase.ts` | 分布式 HITL 审批 | `pnpm dlx tsx packages/open-agent-kernel/examples/13-hitl-distributed-cloudbase.ts` |
 | `14-session-history.ts` | 历史查询 / 聚合验证 | `pnpm dlx tsx packages/open-agent-kernel/examples/14-session-history.ts` |
 | `15-skills.ts` | Skills | `pnpm dlx tsx packages/open-agent-kernel/examples/15-skills.ts` |
@@ -63,6 +64,8 @@ pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
 | `18-workspace-snapshot.ts` | workspace snapshot 单进程 | `pnpm dlx tsx packages/open-agent-kernel/examples/18-workspace-snapshot.ts` |
 | `19a-snapshot-write.ts` | workspace snapshot 写入阶段 | `pnpm dlx tsx packages/open-agent-kernel/examples/19a-snapshot-write.ts` |
 | `19b-snapshot-read.ts` | workspace snapshot 读取阶段 | `pnpm dlx tsx packages/open-agent-kernel/examples/19b-snapshot-read.ts` |
+| `20-acp-stream-adapter-fixture.ts` | ACP adapter fixture（不调用真实模型） | `pnpm dlx tsx packages/open-agent-kernel/examples/20-acp-stream-adapter-fixture.ts` |
+| `21-default-acp-session-contract.ts` | 默认 session ACP 类型契约 | `pnpm exec tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck packages/open-agent-kernel/examples/21-default-acp-session-contract.ts` |
 
 ## 凭证依赖矩阵
 

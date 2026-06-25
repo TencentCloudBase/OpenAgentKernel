@@ -17,6 +17,7 @@
  *
  * 注意：第一次运行 npx 会拉包，需要 ~10s。
  */
+import { printAcpUpdate } from './_shared/acp.js'
 import { getEnvId, getModel } from './_shared/env.js'
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
@@ -45,15 +46,7 @@ async function main(): Promise<void> {
   process.stdout.write('Assistant: ')
 
   for await (const e of session.send('帮我把 17 和 25 相加，再让 echo 工具回显 "hello mcp"')) {
-    if (e.type === 'message_delta') {
-      process.stdout.write(e.text)
-    } else if (e.type === 'tool_call') {
-      process.stdout.write(`\n  → calling ${e.toolName}(${JSON.stringify(e.input)})\n  `)
-    } else if (e.type === 'tool_result') {
-      process.stdout.write(`\n  ← result: ${JSON.stringify(e.output)}\n  `)
-    } else if (e.type === 'error') {
-      console.error('\n[error]', e.error.message)
-    }
+    printAcpUpdate(e)
   }
 
   console.log('\n\n--- Done ---')

@@ -15,8 +15,9 @@
  *   OAK_DEBUG=1 pnpm dlx tsx packages/open-agent-kernel/examples/18-workspace-snapshot.ts
  */
 
-import { createAgent } from '@cloudbase/open-agent-kernel'
+import { createAgent, type AcpSessionUpdate } from '@cloudbase/open-agent-kernel'
 
+import { appendAcpAssistantText, fmtAcpUpdate } from './_shared/acp.js'
 import { getPlatformCredentials, loadEnv } from './_shared/env.js'
 
 function buildModel() {
@@ -33,35 +34,10 @@ function buildModel() {
 }
 
 /**
- * 把任意 event 简短打印 — 展示 SessionEvent 全貌而不只 message_delta。
- * 这是 debug 用,生产代码请按 type 分支处理。
+ * 把 ACP update 简短打印 — 展示 update 全貌而不只 agent_message_chunk。
  */
-function fmtEvent(ev: unknown): string {
-  if (typeof ev !== 'object' || ev === null) return String(ev)
-  const e = ev as Record<string, unknown>
-  const type = String(e.type ?? '<no-type>')
-  switch (type) {
-    case 'message_delta':
-      return `Δ ${JSON.stringify(e.text)}`
-    case 'message_complete':
-      return `▣ message_complete len=${(e.text as string | undefined)?.length ?? 0}`
-    case 'tool_call': {
-      const inputStr = JSON.stringify(e.input)
-      const trim = inputStr.length > 200 ? `${inputStr.slice(0, 200)}…` : inputStr
-      return `→ tool_call ${e.toolName} ${trim}`
-    }
-    case 'tool_result': {
-      const out = JSON.stringify(e.output)
-      const trim = out.length > 300 ? `${out.slice(0, 300)}…` : out
-      return `← tool_result ${e.toolName} isError=${e.isError} ${trim}`
-    }
-    case 'error': {
-      const err = e.error as { name?: string; message?: string } | undefined
-      return `✗ error ${err?.name}: ${err?.message}`
-    }
-    default:
-      return `· ${type} ${JSON.stringify(e).slice(0, 200)}`
-  }
+function fmtEvent(ev: AcpSessionUpdate): string {
+  return fmtAcpUpdate(ev)
 }
 
 async function runOne(label: string, userId: string, prompt: string, opts: { manualSnapshotAfter?: boolean } = {}) {
@@ -85,15 +61,14 @@ async function runOne(label: string, userId: string, prompt: string, opts: { man
 
   const tSend = Date.now()
   let eventCount = 0
-  let assistantText = ''
+  const assistantText = { text: '' }
   for await (const event of session.send(prompt)) {
     eventCount += 1
     console.log(`[${label}][evt#${eventCount}] ${fmtEvent(event)}`)
-    if (event.type === 'message_delta') assistantText += event.text
-    if (event.type === 'message_complete') assistantText = event.text // 完整版覆盖
+    appendAcpAssistantText(event, assistantText)
   }
   console.log(
-    `[${label}] send-end ms=${Date.now() - tSend}  events=${eventCount}  finalText=${JSON.stringify(assistantText.slice(0, 300))}`,
+    `[${label}] send-end ms=${Date.now() - tSend}  events=${eventCount}  finalText=${JSON.stringify(assistantText.text.slice(0, 300))}`,
   )
 
   if (opts.manualSnapshotAfter && session.snapshotWorkspace) {

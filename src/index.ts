@@ -10,6 +10,61 @@
 
 // 公共 API：唯一的入口点
 export { createAgent } from './public/create-agent.js'
+export { AcpStreamAdapter } from './adapters/index.js'
+
+export type { AcpStreamAdapterOptions, StreamAdapter, StreamAdapterContext } from './adapters/index.js'
+export type {
+  // Top-level union
+  AcpSessionUpdate,
+  // OAK convenience alias
+  AcpTextBlock,
+  // OAK _meta extension namespace
+  OakMeta,
+  // Standard ACP types (re-exported from @agentclientprotocol/sdk)
+  SessionUpdate,
+  ToolCall,
+  ToolCallUpdate,
+  ToolKind,
+  ToolCallStatus,
+  ToolCallLocation,
+  ToolCallContent,
+  ContentChunk,
+  ContentBlock,
+  TextContent,
+  Plan,
+  PlanEntry,
+  PlanUpdate,
+  PlanRemoved,
+  UsageUpdate,
+  AvailableCommandsUpdate,
+  AvailableCommand,
+  CurrentModeUpdate,
+  ConfigOptionUpdate,
+  SessionInfoUpdate,
+  PermissionOption,
+  PermissionOptionKind,
+  PermissionOptionId,
+  RequestPermissionRequest,
+  RequestPermissionOutcome,
+  SelectedPermissionOutcome,
+  Diff,
+  Terminal,
+  Cost,
+  MessageId,
+  // OAK extension variants
+  LogUpdate,
+  ArtifactUpdate,
+  HistoryPageUpdate,
+  AgentPhaseUpdate,
+  RequestPermissionUpdate,
+  AskUserUpdate,
+  // OAK history types
+  HistoryMessage,
+  HistoryMessagePart,
+  HistoryMessagePartToolCall,
+  HistoryMessagePartToolResult,
+  AgentPhaseName,
+} from './acp/index.js'
 
 // 公共类型：完整对外契约
 export type {
@@ -21,7 +76,6 @@ export type {
   SessionSummary,
   // 输入 / 事件
   SessionInput,
-  SessionEvent,
   MessageRecord,
   MessagePart,
   AttachmentInput,

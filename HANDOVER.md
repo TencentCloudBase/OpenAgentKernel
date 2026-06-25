@@ -144,7 +144,7 @@ COS bucket/oak-workspaces/
   └─ createAgent(config)
        ├─ Session（会话实例，含 send / getHistory / respondApproval / abort）
        │    └─ runClaudeQuery() → Claude Agent SDK → 流式 SDKMessage
-       │         └─ event-translator.ts → SessionEvent（message_delta / tool_call / tool_result / ...）
+       │         └─ AcpStreamAdapter → AcpSessionUpdate（agent_message_chunk / tool_call / tool_confirm / ...）
        │
        ├─ SessionStore（可选，持久化会话）
        │    └─ CloudBaseSessionStore → SessionStoreDriver
@@ -174,8 +174,12 @@ src/
 ├── runtime/
 │   ├── agent-builder.ts             # buildClaudeQueryOptions（薄封装 Claude SDK）
 │   ├── credential-factory.ts        # model → ANTHROPIC_BASE_URL / AUTH_TOKEN
-│   ├── event-translator.ts          # SDKMessage → SessionEvent 翻译
 │   └── prompt-builder.ts            # system prompt 构建
+├── acp/
+│   └── types.ts                     # ACP session/update 类型
+├── adapters/
+│   ├── acp-stream-adapter.ts        # 默认 SDKMessage → AcpSessionUpdate
+│   └── types.ts                     # StreamAdapter 接口
 ├── resources/
 │   ├── credential-provider.ts       # CloudBase AI gateway APIKey 加载
 │   └── name-resolver.ts             # envId → 集合名/函数名/网关 URL 派生
@@ -233,21 +237,23 @@ const agent = createAgent({
 **文件**: `src/public/create-agent.ts`（内部 `createSession()`）
 
 核心方法：
-- `send(input)` → `AsyncIterable<SessionEvent>`（流式事件）
+- `send(input)` → `AsyncIterable<AcpSessionUpdate>`（ACP 更新流）
 - `getHistory(opts)` → `MessageRecord[]`（消息历史查询）
 - `respondApproval(opts)` → 注入审批决策并 resume
 - `abort()` → 终止会话 + 释放沙箱
 - `getState()` → JSON 序列化的会话引用
 
-### 4.3 SessionEvent — 流式事件类型
+### 4.3 AcpSessionUpdate — 默认流式输出
 
 ```typescript
-type SessionEvent =
-  | { type: 'message_delta'; text: string }
-  | { type: 'tool_call'; toolUseId: string; toolName: string; input: unknown }
-  | { type: 'tool_result'; toolUseId: string; output: unknown; isError: boolean }
-  | { type: 'session_idle'; reason: 'completed' | 'aborted' | 'error' }
-  | { type: 'error'; error: Error }
+type AcpSessionUpdate =
+  | { sessionUpdate: 'agent_message_chunk'; content: { type: 'text'; text: string } }
+  | { sessionUpdate: 'tool_call'; toolCallId: string; title: string; input?: unknown }
+  | { sessionUpdate: 'tool_call_update'; toolCallId: string; status: string; result?: unknown }
+  | { sessionUpdate: 'tool_confirm'; toolCallId: string; toolName: string; input: Record<string, unknown> }
+  | { sessionUpdate: 'ask_user'; toolCallId: string; questions: unknown[] }
+  | { sessionUpdate: 'agent_phase'; phase: 'preparing' | 'model_responding' | 'tool_executing' | 'compacting' | 'idle' }
+  | { sessionUpdate: 'log'; level: 'info' | 'error' | 'success' | 'command'; message: string }
 ```
 
 ### 4.4 SessionStore — 会话持久化
@@ -293,7 +299,7 @@ acquire() → CreateSandboxTool + StartSandboxInstance → SandboxInstance
 **范式**: 流终止 + 重新进入（跨进程友好）
 
 ```
-send() → PreToolUse hook 检测到 requireApproval → 发 approval_required 事件 → 流终止
+send() → PreToolUse hook 检测到 requireApproval → ACP tool_confirm → 流终止
   ↓
 业务层展示给用户，收集决策
   ↓
@@ -309,7 +315,7 @@ PreToolUse hook 从 store 读到决策 → 放行/拒绝
 核心类型：
 - `Agent` / `Session` — Agent 和会话接口
 - `AgentConfig` — createAgent 配置
-- `SessionEvent` — 流式事件
+- `AcpSessionUpdate` — 默认 ACP 更新流
 - `MessageRecord` / `MessagePart` — 消息记录和部件
 - `SessionStoreDriver` / `SessionMessageMeta` — 存储驱动接口
 - `SandboxRuntime` / `SandboxInstance` — 沙箱接口

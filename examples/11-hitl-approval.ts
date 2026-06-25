@@ -3,7 +3,7 @@
  *
  * 演示：
  *   - `permissions.requireApproval` 把指定工具变成"需审批"
- *   - 事件流出 `tool_approval_required` 后流自然结束（reason: 'requires_action'）
+ *   - 事件流出 `request_permission` 后流自然结束
  *   - 业务侧通过 readline 在终端收集用户决定
  *   - `session.respondApproval({ toolUseId, decision })` 注入决策并 resume
  *   - 决策为 allow → 工具执行，agent 继续；deny → 模型收到拒绝并解释
@@ -16,6 +16,7 @@
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/11-hitl-approval.ts
  */
+import { captureRequestPermission, printAcpUpdate, type PendingRequestPermission } from './_shared/acp.js'
 import { getEnvId, getModel } from './_shared/env.js'
 
 import { CloudBaseSessionStore, createAgent, InMemoryDriver } from '@cloudbase/open-agent-kernel'
@@ -95,25 +96,19 @@ async function main(): Promise<void> {
   console.log(`User: ${prompt}\n`)
   process.stdout.write('Assistant: ')
 
-  let pendingApproval: { toolUseId: string; toolName: string; input: unknown } | undefined
+  let pendingApproval: PendingRequestPermission | undefined
 
   for await (const e of session.send(prompt)) {
-    if (e.type === 'message_delta') {
-      process.stdout.write(e.text)
-    } else if (e.type === 'tool_call') {
-      process.stdout.write(`\n  → ${e.toolName}(${JSON.stringify(e.input).slice(0, 200)})\n  `)
-    } else if (e.type === 'tool_result') {
-      process.stdout.write(`\n  ← ${JSON.stringify(e.output).slice(0, 200)}\n  `)
-    } else if (e.type === 'tool_approval_required') {
+    printAcpUpdate(e)
+    const captured = captureRequestPermission(e)
+    if (captured) {
       console.log('\n\n⏸  审批请求：')
-      console.log(`   工具: ${e.toolName}`)
-      console.log(`   参数: ${JSON.stringify(e.input)}`)
-      console.log(`   toolUseId: ${e.toolUseId}`)
-      pendingApproval = { toolUseId: e.toolUseId, toolName: e.toolName, input: e.input }
-    } else if (e.type === 'session_idle') {
-      console.log(`\n[session_idle: ${e.reason}]`)
-    } else if (e.type === 'error') {
-      console.error('\n[error]', e.error.message)
+      console.log(`   工具: ${captured.toolName}`)
+      console.log(`   参数: ${JSON.stringify(captured.input)}`)
+      console.log(`   toolUseId: ${captured.toolUseId}`)
+      pendingApproval = captured
+    } else if (e.sessionUpdate === 'agent_phase' && e.phase === 'idle') {
+      console.log('\n[agent_phase: idle]')
     }
   }
 
@@ -136,31 +131,21 @@ async function main(): Promise<void> {
       ? { kind: 'allow', scope: 'once' }
       : { kind: 'deny', reason: '用户在 CLI 拒绝', interrupt: false },
   })) {
-    if (e.type === 'message_delta') {
-      process.stdout.write(e.text)
-    } else if (e.type === 'tool_call') {
-      process.stdout.write(`\n  → ${e.toolName}(${JSON.stringify(e.input).slice(0, 200)})\n  `)
-    } else if (e.type === 'tool_result') {
-      process.stdout.write(`\n  ← ${JSON.stringify(e.output).slice(0, 200)}\n  `)
-    } else if (e.type === 'tool_approval_required') {
-      // 第二个工具调用又触发了审批；为简化 demo，直接 allow
-      console.log('\n\n⏸  又一个审批请求（demo 自动 allow）：', e.toolName, e.input)
-      // 注意：这里嵌套调用同一 session.respondApproval 来再次 resume——支持
+    printAcpUpdate(e)
+    const captured = captureRequestPermission(e)
+    if (captured) {
+      console.log('\n\n⏸  又一个审批请求（demo 自动 allow）：', captured.toolName, captured.input)
       for await (const e2 of session.respondApproval({
-        toolUseId: e.toolUseId,
+        toolUseId: captured.toolUseId,
         decision: { kind: 'allow', scope: 'once' },
       })) {
-        if (e2.type === 'message_delta') process.stdout.write(e2.text)
-        else if (e2.type === 'tool_call')
-          process.stdout.write(`\n  → ${e2.toolName}(${JSON.stringify(e2.input).slice(0, 200)})\n  `)
-        else if (e2.type === 'tool_result') process.stdout.write(`\n  ← ${JSON.stringify(e2.output).slice(0, 200)}\n  `)
-        else if (e2.type === 'session_idle') console.log(`\n[session_idle: ${e2.reason}]`)
-        else if (e2.type === 'error') console.error('\n[error]', e2.error.message)
+        printAcpUpdate(e2)
+        if (e2.sessionUpdate === 'agent_phase' && e2.phase === 'idle') {
+          console.log('\n[agent_phase: idle]')
+        }
       }
-    } else if (e.type === 'session_idle') {
-      console.log(`\n[session_idle: ${e.reason}]`)
-    } else if (e.type === 'error') {
-      console.error('\n[error]', e.error.message)
+    } else if (e.sessionUpdate === 'agent_phase' && e.phase === 'idle') {
+      console.log('\n[agent_phase: idle]')
     }
   }
 

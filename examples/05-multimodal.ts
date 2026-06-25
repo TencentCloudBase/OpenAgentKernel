@@ -10,7 +10,14 @@
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/05-multimodal.ts
  */
-import { getEnvId, getExampleImagePath, getExampleStorage, getModel, getPlatformCredentials } from './_shared/env.js'
+import { printAcpUpdate } from './_shared/acp.js'
+import {
+  getEnvId,
+  getExampleImagePath,
+  getExampleStorage,
+  getPlatformCredentials,
+  getVisionModel,
+} from './_shared/env.js'
 
 import * as path from 'node:path'
 import { InMemoryStorage, createAgent } from '@cloudbase/open-agent-kernel'
@@ -28,13 +35,15 @@ async function main(): Promise<void> {
   const agent = createAgent({
     envId: getEnvId(),
     ...(credentials ? { credentials } : {}),
-    // 视觉模型：需当前 CloudBase 环境已开通对应多模态模型
-    model: getModel('glm-5v-turbo'),
+    // 必须用视觉模型；config.model 常为文本模型（glm-5.1），不能用于识图
+    model: 'glm-5v-turbo',
     systemPrompt: 'You are a helpful image analysis assistant. Reply concisely in Chinese.',
     ...(storage ? { storage } : {}),
   })
 
+  const visionModel = getVisionModel()
   console.log(`[storage] using ${storageName}`)
+  console.log(`[model] ${visionModel} (vision; config.model 不影响本 example)`)
   console.log(`[image] ${imagePath}`)
 
   const session = await agent.startSession({ userId: 'demo-user' })
@@ -48,12 +57,8 @@ async function main(): Promise<void> {
     content: '这张图里展示了什么？请用一两句话描述关键内容。',
     attachments: [{ type: 'file', source: imagePath }],
   })) {
-    if (event.type === 'message_delta') process.stdout.write(event.text)
-    if (event.type === 'session_idle') console.log()
-    if (event.type === 'error') {
-      console.error('\n[error]', event.error.message)
-      return
-    }
+    printAcpUpdate(event)
+    if (event.sessionUpdate === 'log' && event.level === 'error') return
   }
 
   console.log('\n--- Done ---')

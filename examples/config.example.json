@@ -11,6 +11,7 @@
     "resumeConversationId": "",
     "storage": "",
     "imagePath": "",
+    "visionModel": "glm-5v-turbo",
     "debug": false
   }
 }

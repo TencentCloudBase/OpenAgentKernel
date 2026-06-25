@@ -82,7 +82,7 @@ function buildKey(conversationId: string, toolUseId: string): string {
  *
  * Used to stash a client-supplied tool result between two SDK runs:
  *   1. SDK turn 1: PreToolUse hook denies a custom tool with a sentinel.
- *      Stream emits 'tool_use_required'; turn ends.
+ *      ACP stream emits `tool_confirm`; turn ends.
  *   2. Host calls session.respondToolUse(...) → store.put(... result).
  *   3. SDK turn 2 (resume): PreToolUse hook scans the store, finds the
  *      result, allows + injects it via updatedInput. The wrapped MCP stub

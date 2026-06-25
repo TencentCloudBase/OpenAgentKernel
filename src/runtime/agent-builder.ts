@@ -418,6 +418,8 @@ export function buildClaudeQueryOptions(
     strictMcpConfig: true,
     // 持久化策略：注入 store 时必须 true（SDK 强制约束）
     persistSession: enablePersist,
+    // ACP adapter consumes SDK stream_event messages for token/tool input streaming.
+    includePartialMessages: true,
     ...(sessionStore ? { sessionStore } : {}),
     ...(config.session?.flush ? { sessionStoreFlush: config.session.flush } : {}),
     // ── 系统提示 ──
@@ -437,9 +439,8 @@ export function buildClaudeQueryOptions(
     // 因此始终 bypass SDK 的内置权限系统，让 Hook 全权负责。
     permissionMode: 'bypassPermissions' as const,
     allowDangerouslySkipPermissions: true,
-    // ── 流式:透传 includePartialMessages(默认 true)──
-    // SDK 只有此项为 true 才 emit stream_event(增量 chunk);translator 据此发 message_delta。
-    includePartialMessages: config.stream !== false,
+    // ── 流式:始终开启 includePartialMessages(AcpStreamAdapter 处理增量)──
+    // SDK 只有此项为 true 才 emit stream_event(增量 chunk);adapter 据此发 agent_message_chunk。
     // ── 内置工具(默认禁用,local provider 自动开)──
     // 默认 tools=[](或仅 'Skill'):避免模型操作 kernel 宿主机 FS。
     //   - sandbox.provider='local' → 自动开 'claude_code' preset(SDK 全部内置工具)

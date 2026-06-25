@@ -8,6 +8,8 @@
 
 import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
 import type { z } from 'zod'
+import type { AcpSessionUpdate } from '../acp/index.js'
+import type { StreamAdapter } from '../adapters/index.js'
 
 /**
  * 平台凭证，用于初始化 CloudBase 管理端/服务端 SDK。
@@ -250,7 +252,7 @@ export type McpServerConfig = SdkMcpServerConfig
 // ============================================================
 
 /**
- * 审批决策（用户对 tool_approval_required 的响应）。
+ * 审批决策（用户对 ACP request_permission 的响应）。
  *
  * 这是协议无关的超集——业务侧的 ACP / AG-UI / 自家 SSE 等协议只需要把
  * 自己的决策枚举映射成下面的字段即可。
@@ -567,6 +569,12 @@ export interface AgentConfig {
 
   // ── 钩子 ────────────────────────────────────────
   hooks?: AgentHooks
+
+  /**
+   * @internal 高级覆盖：未传时使用内置 AcpStreamAdapter。
+   * 常规用户无需声明此字段，session.send() 默认输出 ACP session/update。
+   */
+  streamAdapter?: StreamAdapter<AcpSessionUpdate>
 }
 
 /**
@@ -723,36 +731,35 @@ export interface Session {
    * 发送用户消息，返回事件流。
    * 字符串糖：等价于 { type: 'message', content: input }
    */
-  send(input: string | SessionInput): AsyncIterable<SessionEvent>
+  send(input: string | SessionInput): AsyncIterable<AcpSessionUpdate>
 
   /**
    * 响应工具审批（PR #7.0）。
    *
-   * 当事件流给出 `tool_approval_required` 后，业务收集到用户决策（allow/deny/scope/...）
+   * 当 ACP 更新流给出 `request_permission` 后，业务收集到用户决策（allow/deny/scope/...）
    * 调本方法注入决策。kernel 把决策写入 PermissionStore，然后内部 resume 一次 SDK 运行：
    * Hook 再次触发时从 store 读到决策并放行 / 拒绝，agent 继续往下跑。
    *
-   * 返回的事件流是"决策注入后"的运行流（可能包含 message_delta / tool_call /
-   * tool_result / 再次的 tool_approval_required / session_idle 等）。
+   * 返回的事件流是"决策注入后"的 ACP 更新流（可能包含 agent_message_chunk /
+   * tool_call / tool_call_update / 再次的 request_permission / agent_phase 等）。
    *
    * 注意：调用方应确保同一 toolUseId 不被并发响应；重复响应会用最后一次为准。
    */
-  respondApproval(opts: { toolUseId: string; decision: ApprovalDecision }): AsyncIterable<SessionEvent>
+  respondApproval(opts: { toolUseId: string; decision: ApprovalDecision }): AsyncIterable<AcpSessionUpdate>
 
   /**
    * PR #7.1: 注入客户端工具结果并 resume agent 运行。
    *
-   * 配套 'tool_use_required' 事件使用：业务侧在客户端执行完 AgentConfig.tools[]
+   * 配套 ACP `request_permission` 使用：业务侧在客户端执行完 AgentConfig.tools[]
    * 中声明的工具后，调本方法把结果回灌给 kernel：
    *   1. kernel 把结果写入内部 client-tool store
    *   2. 起一轮 SDK query（resume）→ 模型重发同名工具 → PreToolUse hook 这次
    *      把结果通过 updatedInput 注入 → 包装的 MCP stub 直接返回它，写一条
    *      正常（非 error）的 tool_result 进 transcript。
    *
-   * 返回的事件流是"结果注入后"的运行流（可能包含 message_delta / tool_call /
-   * tool_result / session_idle 等）。
+   * 返回的事件流是"结果注入后"的 ACP 更新流。
    */
-  respondToolUse(opts: { toolUseId: string; output: unknown; isError?: boolean }): AsyncIterable<SessionEvent>
+  respondToolUse(opts: { toolUseId: string; output: unknown; isError?: boolean }): AsyncIterable<AcpSessionUpdate>
 
   /** 拉取历史消息 */
   getHistory(opts?: { limit?: number; before?: number }): Promise<MessageRecord[]>
@@ -816,87 +823,6 @@ export type AttachmentInput =
   | { type: 'file'; source: string | Uint8Array; mimeType?: string }
   | { type: 'url'; url: string; mimeType?: string }
   | { type: 'cos'; fileId: string; mimeType?: string }
-
-// ============================================================
-// Session 事件流
-// ============================================================
-
-export type SessionEvent =
-  | { type: 'message_delta'; text: string }
-  | { type: 'message_complete'; text: string }
-  | {
-      type: 'tool_call'
-      toolUseId: string
-      toolName: string
-      input: unknown
-    }
-  | {
-      type: 'tool_result'
-      toolUseId: string
-      toolName: string
-      output: unknown
-      isError: boolean
-    }
-  | {
-      /**
-       * 工具调用需要用户审批（PR #7.0）。
-       *
-       * 收到此事件后，本轮 SDK 运行会自然结束（紧跟 `session_idle.requires_action`）。
-       * 业务收集到决策后调 `session.respondApproval({ toolUseId, decision })` 继续。
-       *
-       * 协议无关字段：客户端协议（ACP/AG-UI/SSE）适配只需把这些字段映射到自家协议。
-       */
-      type: 'tool_approval_required'
-      toolUseId: string
-      toolName: string
-      input: unknown
-      /**
-       * 给客户端 UI 的辅助提示，**协议无关**。
-       * - displayName：UI 按钮 / 标题用的短名
-       * - description：长描述（"will read files in ~/Downloads"）
-       * - suggestedScopes：UI 可呈现的"作用范围"选项（once/session/forever）
-       */
-      hints?: {
-        displayName?: string
-        description?: string
-        suggestedScopes?: Array<'once' | 'session' | 'forever'>
-      }
-      /**
-       * Resume token（业务可不持久化，conversationId + toolUseId 就够 resumeApproval；
-       * 此字段留作未来跨进程 RunState 持久化的扩展点）。
-       */
-      runStateJson: string
-    }
-  | {
-      /**
-       * 客户端工具需要客户端执行（PR #7.1）。
-       *
-       * 当模型调用 AgentConfig.tools[] 中声明的"client-side custom tool"时，
-       * kernel 不会真的调 execute()，而是让 PreToolUse hook 拦截：
-       *   1. 写一个 pending entry 到内部 client-tool store
-       *   2. 用一个 sentinel deny 让 SDK 终止本轮
-       *   3. 翻译层识别 sentinel 后吐出本事件
-       *
-       * 业务侧收到本事件 → 在客户端实际执行工具 → 调
-       * `session.respondToolUse({ toolUseId, output, isError? })` 注入结果，
-       * kernel 会 resume 一轮 SDK 让模型重发同名工具，hook 这次会注入结果，
-       * 模型基于真实结果继续。
-       */
-      type: 'tool_use_required'
-      toolUseId: string
-      toolName: string
-      input: unknown
-    }
-  | {
-      type: 'handoff'
-      fromAgent: string
-      toAgent: string
-    }
-  | {
-      type: 'session_idle'
-      reason: 'completed' | 'requires_action' | 'aborted' | 'error'
-    }
-  | { type: 'error'; error: Error }
 
 // ============================================================
 // 历史消息记录（PR #4.6 扩展）

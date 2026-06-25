@@ -22,6 +22,7 @@
  *   - 镜像必须自带 mcporter + cloudbase-mcp（默认 OpenVibeCoding 公开 vibecoding 镜像满足）
  *   - 镜像不带这两个工具时，cloudbase tools 自动 degrade（仍能用 sandbox 文件系统工具）
  */
+import { printAcpUpdate } from './_shared/acp.js'
 import { getEnvId, getModel, getPlatformCredentials } from './_shared/env.js'
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
@@ -67,16 +68,7 @@ async function main(): Promise<void> {
   process.stdout.write('Assistant: ')
 
   for await (const e of session.send(prompt)) {
-    if (e.type === 'message_delta') {
-      process.stdout.write(e.text)
-    } else if (e.type === 'tool_call') {
-      process.stdout.write(`\n  → ${e.toolName}(${JSON.stringify(e.input).slice(0, 200)})\n  `)
-    } else if (e.type === 'tool_result') {
-      const out = JSON.stringify(e.output).slice(0, 300)
-      process.stdout.write(`\n  ← ${out}\n  `)
-    } else if (e.type === 'error') {
-      console.error('\n[error]', e.error.message)
-    }
+    printAcpUpdate(e)
   }
 
   console.log('\n\n--- Cleaning up sandbox ---')

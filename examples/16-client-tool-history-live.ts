@@ -12,6 +12,8 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { CloudBaseDbDriver, CloudBaseSessionStore, createAgent } from '@cloudbase/open-agent-kernel'
 
+import { captureRequestPermission, logAcpUpdate } from './_shared/acp.js'
+
 // ─── 配置 ──────────────────────────────────────────────────────────
 
 const envId = process.env.TCB_ENV_ID!
@@ -72,26 +74,17 @@ console.log(`👤 User: ${prompt}\n`)
 
 let toolUseId: string | undefined
 
-// Step 1: 发送消息，等待 tool_use_required
+// Step 1: 发送消息，等待 tool_confirm（client-tool）
 process.stdout.write('🤖 Assistant: ')
 for await (const e of session.send(prompt)) {
-  switch (e.type) {
-    case 'message_delta':
-      process.stdout.write(e.text)
-      break
-    case 'tool_use_required':
-      console.log(`\n\n  ⏸  client-tool 触发！`)
-      console.log(`     工具: ${e.toolName}`)
-      console.log(`     参数: ${JSON.stringify(e.input)}`)
-      console.log(`     toolUseId: ${e.toolUseId}`)
-      toolUseId = e.toolUseId
-      break
-    case 'session_idle':
-      console.log(`\n[session_idle: ${e.reason}]`)
-      break
-    case 'error':
-      console.error('\n[error]', e.error.message)
-      break
+  logAcpUpdate(e)
+  const captured = captureRequestPermission(e)
+  if (captured) {
+    console.log(`\n\n  ⏸  client-tool 触发！`)
+    console.log(`     工具: ${captured.toolName}`)
+    console.log(`     参数: ${JSON.stringify(captured.input)}`)
+    console.log(`     toolUseId: ${captured.toolUseId}`)
+    toolUseId = captured.toolUseId
   }
 }
 
@@ -106,23 +99,7 @@ if (toolUseId) {
     output: mockResult,
     isError: false,
   })) {
-    switch (e.type) {
-      case 'message_delta':
-        process.stdout.write(e.text)
-        break
-      case 'tool_call':
-        console.log(`\n  → [tool_call] ${e.toolName}(${JSON.stringify(e.input)})`)
-        break
-      case 'tool_result':
-        console.log(`  ← [tool_result] ${JSON.stringify(e.output).slice(0, 200)}`)
-        break
-      case 'session_idle':
-        console.log(`\n[session_idle: ${e.reason}]`)
-        break
-      case 'error':
-        console.error('\n[error]', e.error.message)
-        break
-    }
+    logAcpUpdate(e)
   }
 }
 
