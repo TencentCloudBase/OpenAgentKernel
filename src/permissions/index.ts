@@ -5,7 +5,6 @@
 export {
   InMemoryPermissionStore,
   InMemoryClientToolStore,
-  InMemoryAskUserStore,
   DEFAULT_APPROVAL_TIMEOUT_MS,
   compileRequireApprovalPredicate,
   isStaleApproval,
@@ -26,8 +25,6 @@ export {
   type ClientToolSignalPayload,
   type ClientToolResultStore,
   type PendingClientToolResult,
-  type AskUserStore,
-  type PendingAskUserEntry,
   type AskUserSignalPayload,
   type PreToolUseHookLocalState,
 } from './hooks.js'

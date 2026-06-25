@@ -193,28 +193,11 @@ export function parseAskUserSignal(reason: string): AskUserSignalPayload | null 
 }
 
 /**
- * Pending entry for askUser flow (mirrors PendingClientToolResult).
+ * askUser 流程已合并到 ClientToolResultStore —— askUser 是 clientTool 的特化
+ * (toolName='askUser',question/options 通过 PendingClientToolResult.toolInput 携带,
+ *  host 调 respondToolUse() 时把 { answer } 放进 result.output)。
+ * 旧的 PendingAskUserEntry 和 AskUserStore 类型已删除,统一用 ClientToolResultStore。
  */
-export interface PendingAskUserEntry {
-  conversationId: string
-  toolUseId: string
-  question: string
-  options?: string[]
-  /** Set once the host calls session.respondAskUser(). */
-  result?: { answer: string }
-  createdAt: number
-}
-
-/**
- * Store interface for askUser pending entries.
- * Structure is identical to ClientToolResultStore but kept separate for semantic clarity.
- */
-export interface AskUserStore {
-  put(entry: PendingAskUserEntry): Promise<void>
-  get(key: { conversationId: string; toolUseId: string }): Promise<PendingAskUserEntry | null>
-  delete(key: { conversationId: string; toolUseId: string }): Promise<void>
-  scanRecent?(key: { conversationId: string; question: string }): Promise<PendingAskUserEntry | null>
-}
 
 // ─────────────────────────────────────────────────────────
 // Hook factory
@@ -237,9 +220,20 @@ export interface PreToolUsePermissionHookArgs {
    * stub reads this key and returns its content as the tool result.
    */
   clientToolNames?: ReadonlySet<string>
+  /**
+   * Store for pending client-side tool results AND askUser pending entries.
+   *
+   * askUser(内置工具)和 clientTool(用户声明工具)共用同一存储:
+   * 两者流程完全一致(模型在 turn 中请求外部输入,host 在 turn 间填充结果),
+   * 区别只是 toolName —— askUser 的 toolName 是 'askUser',question/options 通过
+   * toolInput 携带,host 调 respondToolUse() 时把 { answer } 放进 result.output。
+   *
+   * On resume, the hook reads the host-supplied result from this store and
+   * ALLOWs the call after rewriting `updatedInput` to carry the result under
+   * OAK_CLIENT_TOOL_RESULT_KEY. The wrapped MCP stub reads this key and
+   * returns its content as the tool result.
+   */
   clientToolStore?: ClientToolResultStore
-  /** Store for askUser pending entries (agent主动提问). */
-  askUserStore?: AskUserStore
 }
 
 export interface ClientToolResultStore {
@@ -294,7 +288,7 @@ export function createPreToolUsePermissionHook(
   toolUseID: string | undefined,
   options: { signal: AbortSignal },
 ) => Promise<PreToolUseHookOutput | Record<string, never>> {
-  const { conversationId, permissions, localState, clientToolNames, clientToolStore, askUserStore } = args
+  const { conversationId, permissions, localState, clientToolNames, clientToolStore } = args
   const requirePredicate = compileRequireApprovalPredicate(permissions.requireApproval)
   const store = permissions.store
   const timeoutMs = permissions.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS
@@ -387,13 +381,15 @@ export function createPreToolUsePermissionHook(
 
     // ── askUser: 内置提问工具 ─────────────────────────────────────────
     // 当模型调用内置 askUser 工具时，拦截并暂停 turn，让 Host 收集用户回答。
-    // 与 client-tool 共享同一"deny + sentinel → resume"范式。
+    // 与 client-tool 共享同一"deny + sentinel → resume"范式 + 同一 clientToolStore
+    // (askUser 是 clientTool 的特化:toolName='askUser',question/options 通过 toolInput 携带,
+    //  host 调 respondToolUse() 时把 { answer } 放进 result.output)。
     // 工具注册在 'kernel' MCP server 下，SDK 报告为 'mcp__kernel__askUser'。
     const isAskUserTool = toolName === 'askUser' || bareToolName === 'askUser' || toolName === 'mcp__kernel__askUser'
-    if (isAskUserTool && askUserStore) {
+    if (isAskUserTool && clientToolStore) {
       // Resume path: result already waiting
       if (toolUseId) {
-        const existing = await askUserStore.get({ conversationId, toolUseId })
+        const existing = await clientToolStore.get({ conversationId, toolUseId })
         if (existing?.result) {
           return {}
         }
@@ -419,14 +415,16 @@ export function createPreToolUsePermissionHook(
       const optionsList =
         typeof toolInput === 'object' && toolInput !== null ? (toolInput as { options?: string[] }).options : undefined
 
-      const pending: PendingAskUserEntry = {
+      // askUser 复用 PendingClientToolResult:toolName='askUser',
+      // question/options 包到 toolInput(host 端 respondAskUser 时反向解出)。
+      const pending: PendingClientToolResult = {
         conversationId,
         toolUseId,
-        question: questionText,
-        options: optionsList,
+        toolName: 'askUser',
+        toolInput: { question: questionText, ...(optionsList ? { options: optionsList } : {}) },
         createdAt: Date.now(),
       }
-      await askUserStore.put(pending)
+      await clientToolStore.put(pending)
 
       const signal: AskUserSignalPayload = {
         [OAK_ASK_USER_SENTINEL]: true,

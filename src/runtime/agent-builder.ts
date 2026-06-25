@@ -35,7 +35,6 @@ import {
   OAK_CLIENT_TOOL_RESULT_KEY,
   type PreToolUseHookLocalState,
   type ClientToolResultStore,
-  type AskUserStore,
 } from '../permissions/hooks.js'
 import {
   ClaudeHomeSyncEngine,
@@ -129,8 +128,6 @@ export function buildClaudeQueryOptions(
     clientToolNames?: ReadonlySet<string>
     /** PR #7.1: store for client-supplied tool results (in-memory by default). */
     clientToolStore?: import('../permissions/hooks.js').ClientToolResultStore
-    /** askUser: store for pending askUser entries. */
-    askUserStore?: AskUserStore
     /** Task 9 for userMemory:agent.startSession({ userId }) 透传过来 */
     userId?: string
     /** workspacePersist:cwd 持久化的 per-session key 命名空间。 */
@@ -305,7 +302,9 @@ export function buildClaudeQueryOptions(
   //   - 上述任一并提供了 conversationId + hookLocalState（runtime 必须配齐）
   const hasClientTools = Boolean(config.tools && config.tools.length > 0)
   const hasApproval = config.permissions !== undefined && config.permissions.requireApproval !== undefined
-  const hasAskUser = Boolean(extra.askUserStore)
+  // askUser 现在复用 clientToolStore(askUser 是 clientTool 的特化,toolName='askUser')。
+  // clientToolStore 在 create-agent 里始终注入(askUser 是内置工具),所以 hasAskUser 始终 true。
+  const hasAskUser = Boolean(extra.clientToolStore)
   const userHasApprovalConfig =
     (hasApproval || hasClientTools || hasAskUser) && Boolean(extra.conversationId) && Boolean(extra.hookLocalState)
 
@@ -330,10 +329,10 @@ export function buildClaudeQueryOptions(
       Object.assign(merged, extra.extraMcpServers)
     }
     // ── 内置 askUser 工具 → SDK MCP server 'kernel' (mcp__kernel__askUser)
-    // 模型可通过此工具主动向用户提问，kernel 用 sentinel 中断 turn，
-    // Host 收集回答后调 respondAskUser() resume。
-    if (extra.askUserStore) {
-      merged.kernel = createBuiltinAskUserMcpServer(extra.askUserStore, extra.conversationId)
+    // 模型可通过此工具主动向用户提问,kernel 用 sentinel 中断 turn,
+    // Host 收集回答后调 respondToolUse() resume(askUser 复用 clientToolStore)。
+    if (extra.clientToolStore) {
+      merged.kernel = createBuiltinAskUserMcpServer(extra.clientToolStore, extra.conversationId)
     }
     // ── 用户自定义 ToolDefinition[] → SDK MCP server 'custom' (mcp__custom__*)
     // SDK 的 query() 不接受 tools 数组——所有工具必须打包成 MCP server 注入。
@@ -360,7 +359,6 @@ export function buildClaudeQueryOptions(
       localState: extra.hookLocalState!,
       ...(extra.clientToolNames ? { clientToolNames: extra.clientToolNames } : {}),
       ...(extra.clientToolStore ? { clientToolStore: extra.clientToolStore } : {}),
-      ...(extra.askUserStore ? { askUserStore: extra.askUserStore } : {}),
     })
     return {
       PreToolUse: [
@@ -519,9 +517,7 @@ function resolveCwdPersistEngine(
 
   if (!args.sessionId) {
     // eslint-disable-next-line no-console
-    console.warn(
-      `[oak/workspacePersist] sandbox.provider='local' but sessionId missing; skipping cwd persistence.`,
-    )
+    console.warn(`[oak/workspacePersist] sandbox.provider='local' but sessionId missing; skipping cwd persistence.`)
     return undefined
   }
 
@@ -759,12 +755,13 @@ function extractSessionStore(config: AgentConfig): SessionStore | null {
  *
  * 注册一个 `askUser` 工具，模型可通过它主动向用户提问。
  * 工具的 execute() 是 stub——实际执行由 PreToolUse hook 拦截（sentinel 模式），
- * Host 收集用户回答后调 session.respondAskUser() resume。
+ * Host 收集用户回答后调 session.respondToolUse() resume。
  *
- * resume 时 hook 从 store 读到回答 → allow → 此 stub 读取回答并返回。
+ * resume 时 hook 从 clientToolStore 读到回答 → allow → 此 stub 读取回答并返回。
+ * askUser 在 store 里的 toolName='askUser',result.output={answer}。
  */
 function createBuiltinAskUserMcpServer(
-  askUserStore: AskUserStore,
+  clientToolStore: ClientToolResultStore,
   conversationId?: string,
 ): ReturnType<typeof createSdkMcpServer> {
   const askUserTool = sdkTool(
@@ -777,21 +774,24 @@ function createBuiltinAskUserMcpServer(
         .optional()
         .describe('Optional predefined answer options for the user to choose from'),
     },
-    async (input: Record<string, unknown>) => {
+    async (_input: Record<string, unknown>) => {
       // Resume path: check if an answer is already stashed in the store.
-      if (conversationId && askUserStore.scanRecent) {
-        const questionText = (input.question as string) ?? ''
-        const scanned = await askUserStore.scanRecent({
+      // askUser 的 toolName='askUser',scanRecent 按 toolName 匹配。
+      if (conversationId && clientToolStore.scanRecent) {
+        const scanned = await clientToolStore.scanRecent({
           conversationId,
-          question: questionText,
+          toolName: 'askUser',
         })
         if (scanned?.result) {
-          await askUserStore.delete({
+          await clientToolStore.delete({
             conversationId,
             toolUseId: scanned.toolUseId,
           })
+          // result.output 是 { answer: string }(respondAskUser 写入时包装的)
+          const output = scanned.result.output as { answer?: string } | string
+          const text = typeof output === 'string' ? output : (output.answer ?? JSON.stringify(output))
           return {
-            content: [{ type: 'text', text: scanned.result.answer }],
+            content: [{ type: 'text', text }],
           }
         }
       }
