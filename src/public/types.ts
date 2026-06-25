@@ -67,7 +67,8 @@ export interface SandboxConfig {
    * - `local`：OAK 宿主进程本地 FS + Claude SDK 内置工具（过渡方案，AGS 产品化未就绪时使用）
    *
    * 选 `local` 时：
-   *   - SDK 内置工具(Bash/Read/Write/Edit/Glob/Grep)默认开启(可被 AgentConfig.localTools 覆盖)
+   *   - SDK 内置工具(Bash/Read/Write/Edit/Glob/Grep)默认开启(local provider 即用本地 FS,
+   *     无需经 mcp__sandbox__* HTTP 数据面)
    *   - 不暴露 HTTP 数据面 —— `SandboxInstance.request()` 会抛 SandboxError
    *   - cwd 跨请求持久化由 AgentConfig.workspacePersist 负责(独立配置,与 local provider 正交)
    *
@@ -476,20 +477,6 @@ export interface AgentConfig {
    * 即使开了流式,前端也要等整轮结束才一次性收到 —— 那是网关行为,与本开关无关。
    */
   stream?: boolean
-
-  /**
-   * 是否开放 claude CLI 的内置本地工具(Bash / Read / Write / Edit / Glob / Grep 等)。
-   * 默认 false —— 无沙箱时模型默认无任何文件/命令工具(纯对话),因为 claude 在 kernel
-   * 宿主进程运行,开放内置工具 = 模型可直接操作宿主机文件系统(多租户场景危险)。
-   *
-   * ⚠️ 仅在单租户 / 可信 / 已隔离的部署里开启。需要隔离的文件能力请用 sandbox(独立容器)。
-   * 启用沙箱时本配置无意义(沙箱通过 mcp__sandbox__* 提供工具)。
-   *
-   * - false / 不传:tools=[](或仅 'Skill')
-   * - true:放开 SDK 默认内置工具集
-   * - string[]:精确指定要开放的内置工具名(如 ['Read','Glob','Grep'] 只读)
-   */
-  localTools?: boolean | string[]
 
   // ── 能力 ────────────────────────────────────────
   tools?: ToolDefinition<any, any>[]

@@ -458,7 +458,6 @@ export function buildClaudeQueryOptions(
     // ── 内置工具(默认禁用,local provider 自动开)──
     // 默认 tools=[](或仅 'Skill'):避免模型操作 kernel 宿主机 FS。
     //   - sandbox.provider='local' → 自动开 'claude_code' preset(SDK 全部内置工具)
-    //   - AgentConfig.localTools → 显式覆盖(支持 true/string[] 精细控制)
     //   - 沙箱(ags-stateful)能力另经 mcpServers 提供
     tools: resolveBuiltinTools(config, sandboxMode),
   }
@@ -486,36 +485,16 @@ export type SandboxMode = 'local' | 'remote' | 'none'
 /**
  * 解析 SDK 内置工具集(options.tools)。
  *
- * 优先级(从高到低):
- *   1. config.localTools 显式覆盖
- *      - true  → 'claude_code' preset(SDK 全部默认内置工具,含 Skill)
- *      - []    → 空数组(全禁用,即使 local provider 也不开)
- *      - string[] → 用该列表(若启用 skills 补 'Skill' 去重)
- *   2. sandboxMode === 'local' → 'claude_code' preset(local provider 默认开内置工具)
- *   3. 默认 → [](或仅 'Skill' 若启用 skills)
+ *   - sandboxMode === 'local' → 'claude_code' preset(local provider 即用本地 FS,
+ *     SDK 内置 Bash/Read/Write/Edit/Glob/Grep 直接操作 cwd,preset 已含 Skill)
+ *   - 其他 → [](或仅 'Skill' 若启用 skills)
  *
- * 安全默认:无 local provider 且未开 localTools 时,模型拿不到本地 Bash/Read/Write,
+ * 安全默认:无 local provider 时模型拿不到本地 Bash/Read/Write,
  * 避免操作 kernel 宿主机 FS。
  */
 function resolveBuiltinTools(config: AgentConfig, sandboxMode: SandboxMode): ClaudeOptions['tools'] {
   const skillsOn = config.skills?.enabled !== undefined
-  const local = config.localTools
 
-  // 显式覆盖优先
-  if (local === true) {
-    return { type: 'preset', preset: 'claude_code' }
-  }
-  if (Array.isArray(local)) {
-    const set = new Set(local)
-    if (skillsOn) set.add('Skill')
-    return [...set]
-  }
-  // 显式 false → 即使 local provider 也不开(用户明确表态)
-  if (local === false) {
-    return skillsOn ? ['Skill'] : []
-  }
-
-  // 未显式配置 localTools:
   if (sandboxMode === 'local') {
     // local provider 默认开 SDK 全部内置工具(preset 已含 Skill)
     return { type: 'preset', preset: 'claude_code' }

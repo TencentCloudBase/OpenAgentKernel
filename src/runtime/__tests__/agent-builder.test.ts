@@ -410,52 +410,30 @@ describe('buildClaudeQueryOptions — streaming', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────
-// localTools（内置工具开关）
+// builtin tools（内置工具开关,由 sandboxMode 驱动）
 // ─────────────────────────────────────────────────────────────────
 
-describe('buildClaudeQueryOptions — localTools', () => {
-  it('default → tools = [] (all builtin disabled)', () => {
+describe('buildClaudeQueryOptions — builtin tools', () => {
+  it('default (no sandbox) → tools = [] (all builtin disabled)', () => {
     const { options } = buildClaudeQueryOptions(baseConfig)
     expect(options.tools).toEqual([])
   })
 
-  it('skills enabled, no localTools → tools = ["Skill"]', () => {
+  it('skills enabled, no sandbox → tools = ["Skill"]', () => {
     const { options } = buildClaudeQueryOptions({ ...baseConfig, cwd: os.tmpdir(), skills: { enabled: 'all' } })
     expect(options.tools).toEqual(['Skill'])
   })
 
-  it('localTools=true → claude_code preset', () => {
-    const { options } = buildClaudeQueryOptions({ ...baseConfig, localTools: true })
-    expect(options.tools).toEqual({ type: 'preset', preset: 'claude_code' })
-  })
-
-  it('localTools=string[] → that list', () => {
-    const { options } = buildClaudeQueryOptions({ ...baseConfig, localTools: ['Read', 'Glob', 'Grep'] })
-    expect(options.tools).toEqual(['Read', 'Glob', 'Grep'])
-  })
-
-  it('localTools=string[] + skills → adds Skill (deduped)', () => {
-    const { options } = buildClaudeQueryOptions({
-      ...baseConfig,
-      cwd: os.tmpdir(),
-      skills: { enabled: 'all' },
-      localTools: ['Read'],
-    })
-    expect(options.tools).toEqual(['Read', 'Skill'])
-  })
-
-  it("sandboxMode='local' (no localTools) → claude_code preset (provider auto-enables builtins)", () => {
+  it("sandboxMode='local' → claude_code preset (provider auto-enables builtins)", () => {
     const { options } = buildClaudeQueryOptions(baseConfig, { sandboxMode: 'local' })
     expect(options.tools).toEqual({ type: 'preset', preset: 'claude_code' })
   })
 
-  it("sandboxMode='local' + localTools=false → tools=[] (explicit override beats provider default)", () => {
-    const { options } = buildClaudeQueryOptions({ ...baseConfig, localTools: false }, { sandboxMode: 'local' })
-    expect(options.tools).toEqual([])
-  })
-
-  it("sandboxMode='local' + localTools=['Read'] → that list (explicit override)", () => {
-    const { options } = buildClaudeQueryOptions({ ...baseConfig, localTools: ['Read'] }, { sandboxMode: 'local' })
-    expect(options.tools).toEqual(['Read'])
+  it("sandboxMode='local' + skills → claude_code preset (preset 已含 Skill)", () => {
+    const { options } = buildClaudeQueryOptions(
+      { ...baseConfig, cwd: os.tmpdir(), skills: { enabled: 'all' } },
+      { sandboxMode: 'local' },
+    )
+    expect(options.tools).toEqual({ type: 'preset', preset: 'claude_code' })
   })
 })
