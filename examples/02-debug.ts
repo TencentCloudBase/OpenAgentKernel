@@ -1,8 +1,8 @@
 /**
  * 02-debug.ts —— 诊断脚本（PR #3 排错用）
  *
- * 打印 Claude SDK 发出的所有原始消息 type，以及 kernel 翻译出的 SessionEvent。
- * 用来定位"为什么 message_delta 没触发"。
+ * 打印 Claude SDK 发出的所有原始消息 type，以及 OAK 输出的 ACP update。
+ * 用来定位"为什么 agent_message_chunk 没触发"。
  *
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/02-debug.ts
@@ -12,8 +12,8 @@
 import { getEnvId, getModel } from './_shared/env.js'
 
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk'
+import { AcpStreamAdapter } from '@cloudbase/open-agent-kernel'
 import { buildClaudeQueryOptions } from '../src/runtime/agent-builder.js'
-import { translateSdkMessage } from '../src/runtime/event-translator.js'
 
 async function main(): Promise<void> {
   const { options } = buildClaudeQueryOptions({
@@ -38,22 +38,30 @@ async function main(): Promise<void> {
   })
 
   console.log('=== Stream events ===')
-  for await (const msg of q) {
-    console.log('raw msg', JSON.stringify(msg))
-    // 打印 SDK 原始消息的 type + subtype（不打印 content 避免太长）
-    const summary: Record<string, unknown> = { sdk_type: msg.type }
-    if ('subtype' in msg) summary.subtype = msg.subtype
-    if ('subagent_type' in msg) summary.subagent_type = msg.subagent_type
-    if (msg.type === 'assistant' && 'message' in msg) {
-      const m = msg.message as { content?: Array<{ type: string }> }
-      summary.content_blocks = m.content?.map((b) => b.type) ?? []
+  const adapter = new AcpStreamAdapter()
+  const messages = (async function* () {
+    for await (const msg of q) {
+      console.log('raw msg', JSON.stringify(msg))
+      // 打印 SDK 原始消息的 type + subtype（不打印 content 避免太长）
+      const summary: Record<string, unknown> = { sdk_type: msg.type }
+      if ('subtype' in msg) summary.subtype = msg.subtype
+      if ('subagent_type' in msg) summary.subagent_type = msg.subagent_type
+      if (msg.type === 'assistant' && 'message' in msg) {
+        const m = msg.message as { content?: Array<{ type: string }> }
+        summary.content_blocks = m.content?.map((b) => b.type) ?? []
+      }
+      console.log('SDK msg:', JSON.stringify(summary))
+      yield msg
     }
-    console.log('SDK msg:', JSON.stringify(summary))
+  })()
 
-    // 同时打印 kernel 翻译结果
-    for (const event of translateSdkMessage(msg)) {
-      console.log('  → kernel event:', JSON.stringify({ type: event.type }))
-    }
+  for await (const update of adapter.adapt(messages, {
+    conversationId: 'debug',
+    sessionId: 'debug',
+    userId: 'debug',
+    turnId: 'debug-turn',
+  })) {
+    console.log('  → ACP update:', JSON.stringify({ sessionUpdate: update.sessionUpdate }))
   }
 }
 

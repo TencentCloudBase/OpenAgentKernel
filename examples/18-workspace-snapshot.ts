@@ -33,8 +33,8 @@ function buildModel() {
 }
 
 /**
- * 把任意 event 简短打印 — 展示 SessionEvent 全貌而不只 message_delta。
- * 这是 debug 用,生产代码请按 type 分支处理。
+ * 把任意 update 简短打印 — 展示 ACP update 全貌而不只 agent_message_chunk。
+ * 这是 debug 用,生产代码请按 sessionUpdate 分支处理。
  */
 function fmtEvent(ev: unknown): string {
   if (typeof ev !== 'object' || ev === null) return String(ev)

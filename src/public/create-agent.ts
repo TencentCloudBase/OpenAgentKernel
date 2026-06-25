@@ -342,8 +342,8 @@ function createSession(deps: SessionDeps): Session {
   // PR #7.1: client-side tools store + name set. The set lets the
   // PreToolUse hook recognise mcp__custom__* tools (custom = user-declared,
   // execute() in the wrapped MCP server is a stub). The store carries
-  // host-supplied tool results between SDK turns (turn-1 emits
-  // tool_use_required; respondToolUse() stashes; turn-2 reads).
+  // host-supplied tool results between SDK turns (turn-1 emits ACP
+  // tool_confirm; respondToolUse() stashes; turn-2 reads).
   const clientToolNames: Set<string> = new Set((config.tools ?? []).map((t) => t.name))
   const clientToolStore: ClientToolResultStore | undefined =
     clientToolNames.size > 0
@@ -417,7 +417,7 @@ function createSession(deps: SessionDeps): Session {
    *   持久化为 .workspace-env.json,init body 的 env 必须跟它语义一致)
    *
    * 失败处理:bootstrap 抛出(SandboxRestoreFailed / 网络错误)时让异常向上冒,
-   * 由 runClaudeQuery 的 catch 块翻译为 'error' 事件 + session_idle('error')。
+   * 由 runClaudeQuery 的 catch 块翻译为 ACP log + agent_phase idle。
    * 这是 spec §6.2"restore failed → 视为致命"行为。
    */
   async function ensureSnapshotBootstrap(engine: WorkspaceSnapshotEngine, sandbox: SandboxInstance): Promise<void> {
@@ -508,7 +508,7 @@ function createSession(deps: SessionDeps): Session {
     },
 
     /**
-     * PR #7.1: respond to a client-side tool_use_required pause.
+     * PR #7.1: respond to a client-side tool_confirm pause.
      *
      * Wire flow:
      *   1. Stash the host-supplied result in the in-memory clientToolStore.

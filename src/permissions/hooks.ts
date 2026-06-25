@@ -9,11 +9,11 @@
  *        - 有 'deny'  → 返回 deny + 用户拒绝理由（**不**带 sentinel）
  *      - 没有 → 检查规则，需要审批 → 写 store + 返回 deny + sentinel
  *      - 不需要审批 → 返回 {} 放行
- *   3. 事件翻译层（event-translator）识别 sentinel 后吐出 'tool_approval_required' 事件
+ *   3. AcpStreamAdapter 识别 sentinel 后吐出 ACP `tool_confirm` 更新
  *      并吃掉这条假 deny tool_result，避免污染业务事件流和 transcript
  *
  * 这里 "sentinel" 是把 magic string 塞进 `permissionDecisionReason`——这是 SDK Hook
- * 接口能传递信号的唯一通道。具体实现是一个 JSON 字符串，业务侧不会看到（被 translator 吃掉）。
+ * 接口能传递信号的唯一通道。具体实现是一个 JSON 字符串，业务侧不会看到（被 AcpStreamAdapter 吃掉）。
  */
 
 import type { ApprovalDecision, PendingApproval, PermissionConfig } from '../public/types.js'
@@ -83,7 +83,7 @@ export function createHookLocalState(): PreToolUseHookLocalState {
 
 /**
  * Sentinel reason payload（写到 permissionDecisionReason 的 JSON 字符串）。
- * event-translator 解析这个 JSON 把 toolUseId / toolName / input 还原成 'tool_approval_required' 事件。
+ * AcpStreamAdapter 解析这个 JSON，把 toolUseId / toolName / input 还原成 ACP `tool_confirm`。
  */
 export interface InterruptSignalPayload {
   [OAK_INTERRUPT_SENTINEL]: true
@@ -130,7 +130,7 @@ export function parseInterruptSignal(reason: string): InterruptSignalPayload | n
 // must be executed by the client". Used for tools whose definitions live in
 // AgentConfig.tools[] and whose `execute()` is a stub: the kernel never
 // actually runs them, it pauses the turn (via permissionDecision='deny' +
-// sentinel) and emits a `tool_use_required` SessionEvent so the host can
+// sentinel) and emits an ACP `tool_confirm` update so the host can
 // run the tool elsewhere and feed the result back via session.send({type:
 // 'tool_result'}).
 //
@@ -165,7 +165,7 @@ export function parseClientToolSignal(reason: string): ClientToolSignalPayload |
 // 与 approval / client-tool 同一流终止+resume 范式：
 //   1. 模型调用内置 askUser 工具 → PreToolUse hook 拦截
 //   2. 写 PendingAskUserEntry 到 store → 返回 deny + sentinel
-//   3. translator 识别 sentinel → yield 'ask_user_required' 事件
+//   3. AcpStreamAdapter 识别 sentinel → yield ACP `ask_user` 更新
 //   4. Host 收集用户回答 → session.respondAskUser() → resume
 //
 // 与 codebuddy 的区别：codebuddy 的 AskUser 会 hang 住进程；
@@ -229,7 +229,7 @@ export interface PreToolUsePermissionHookArgs {
    * Names of user-defined client-side tools (config.tools[].name). When the
    * model invokes one of these, the hook denies with a client-tool sentinel
    * so the SDK never calls execute(); the runtime intercepts the sentinel
-   * to surface a 'tool_use_required' event and pause the turn.
+   * to surface an ACP `tool_confirm` update and pause the turn.
    *
    * On resume, the hook reads the host-supplied result from the
    * clientToolStore and ALLOWs the call after rewriting `updatedInput` to
@@ -342,8 +342,8 @@ export function createPreToolUsePermissionHook(
       }
 
       // Phase B: no result → pause. Mirror the approval flow: write a
-      // pending entry, return deny + sentinel. Translator detects the
-      // sentinel and emits a 'tool_use_required' SessionEvent.
+      // pending entry, return deny + sentinel. AcpStreamAdapter detects the
+      // sentinel and emits an ACP `tool_confirm` update.
       if (!toolUseId) {
         return {
           hookSpecificOutput: {
@@ -604,7 +604,7 @@ export function createPreToolUsePermissionHook(
     // permissionDecisionReason 这段 JSON 既是 kernel 内部的 sentinel，又会被 SDK
     // 当作 tool_result 喂给模型 context（SDK 接口约束）。我们让它对模型也"读得通"：
     // 加一个明确的 message 字段，引导模型停止重试、等待审批。
-    // event-translator 仍然识别 sentinel 字段并把这条消息从业务事件流里吃掉。
+    // AcpStreamAdapter 仍然识别 sentinel 字段并把这条消息从业务事件流里吃掉。
     const reasonForModel =
       `Tool call paused for user approval (toolUseId=${toolUseId}). ` +
       `Do not retry this tool yourself; the user is reviewing it. ` +

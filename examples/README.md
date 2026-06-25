@@ -54,7 +54,7 @@ pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
 | `09-sandbox-shared.ts` | shared sandbox | `pnpm dlx tsx packages/open-agent-kernel/examples/09-sandbox-shared.ts` |
 | `10-sandbox-cloudbase-tools.ts` | sandbox 内 CloudBase MCP 工具 | `pnpm dlx tsx packages/open-agent-kernel/examples/10-sandbox-cloudbase-tools.ts` |
 | `11-hitl-approval.ts` | 单进程 HITL 审批 | `pnpm dlx tsx packages/open-agent-kernel/examples/11-hitl-approval.ts` |
-| `12-hitl-acp-adapter.ts` | ACP 风格审批适配 | `pnpm dlx tsx packages/open-agent-kernel/examples/12-hitl-acp-adapter.ts` |
+| `12-hitl-acp-adapter.ts` | 内置 ACP 审批流 | `pnpm dlx tsx packages/open-agent-kernel/examples/12-hitl-acp-adapter.ts` |
 | `13-hitl-distributed-cloudbase.ts` | 分布式 HITL 审批 | `pnpm dlx tsx packages/open-agent-kernel/examples/13-hitl-distributed-cloudbase.ts` |
 | `14-session-history.ts` | 历史查询 / 聚合验证 | `pnpm dlx tsx packages/open-agent-kernel/examples/14-session-history.ts` |
 | `15-skills.ts` | Skills | `pnpm dlx tsx packages/open-agent-kernel/examples/15-skills.ts` |
@@ -63,6 +63,8 @@ pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
 | `18-workspace-snapshot.ts` | workspace snapshot 单进程 | `pnpm dlx tsx packages/open-agent-kernel/examples/18-workspace-snapshot.ts` |
 | `19a-snapshot-write.ts` | workspace snapshot 写入阶段 | `pnpm dlx tsx packages/open-agent-kernel/examples/19a-snapshot-write.ts` |
 | `19b-snapshot-read.ts` | workspace snapshot 读取阶段 | `pnpm dlx tsx packages/open-agent-kernel/examples/19b-snapshot-read.ts` |
+| `20-acp-stream-adapter-fixture.ts` | ACP adapter fixture（不调用真实模型） | `pnpm dlx tsx packages/open-agent-kernel/examples/20-acp-stream-adapter-fixture.ts` |
+| `21-default-acp-session-contract.ts` | 默认 session ACP 类型契约 | `pnpm exec tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck packages/open-agent-kernel/examples/21-default-acp-session-contract.ts` |
 
 ## 凭证依赖矩阵
 

@@ -13,7 +13,7 @@ Open Agent Kernel（OAK）适合在 Node.js 服务端中构建 CloudBase Agent�
 - 让 Agent 使用 CloudBase 数据库、云存储、云函数、静态托管等资源。
 - 把会话、审批状态、附件、用户长期记忆持久化到 CloudBase。
 - 运行远程 sandbox，让 Agent 具备文件系统、Shell、代码执行和 CloudBase MCP 工具能力。
-- OAK 本身只提供协议中立的 `AsyncIterable<SessionEvent>`，开发者自行接入 ACP / AG-UI / SSE / 自定义协议。
+- OAK 默认输出 ACP `session/update` 语义（`AsyncIterable<AcpSessionUpdate>`），可直接接入 Web/SSE/JSON-RPC 消费方。
 
 ## 安装
 
@@ -404,7 +404,7 @@ sandbox: {
 
 ### HITL 工具审批
 
-配置 `permissions.requireApproval` 后，命中的工具调用会暂停并发出 `tool_approval_required` 事件。
+配置 `permissions.requireApproval` 后，命中的工具调用会暂停并发出 ACP `tool_confirm` 更新。
 
 ```typescript
 const agent = createAgent({
@@ -423,8 +423,8 @@ const agent = createAgent({
 
 ```typescript
 for await (const event of session.send('删除测试数据')) {
-  if (event.type === 'tool_approval_required') {
-    // 展示审批 UI，并保存 event.toolUseId
+  if (event.sessionUpdate === 'tool_confirm') {
+    // 展示审批 UI，并保存 event.toolCallId
   }
 }
 
@@ -676,7 +676,7 @@ Agent / Session 运行时 API 详见文末 [API 参考](#api-参考)。
 | `09-sandbox-shared.ts` | shared sandbox | `config.local.json`（含 `credentials`） |
 | `10-sandbox-cloudbase-tools.ts` | sandbox 内 CloudBase MCP | `config.local.json`（含 `credentials`） |
 | `11-hitl-approval.ts` | 单进程 HITL | `config.local.json` |
-| `12-hitl-acp-adapter.ts` | ACP 风格审批适配 | `config.local.json` |
+| `12-hitl-acp-adapter.ts` | 内置 ACP 审批流 | `config.local.json` |
 | `13-hitl-distributed-cloudbase.ts` | 分布式 HITL | `config.local.json`（含 `credentials`） |
 | `14-session-history.ts` | 历史查询 / 聚合验证 | `config.local.json` |
 | `15-skills.ts` | Skills | `config.local.json` |
@@ -768,8 +768,8 @@ await agent.sessions.delete(session.id)
 |------|------|------|
 | `id` | `string` | 会话 ID / conversationId（只读）。 |
 | `userId` | `string` | 所属用户 ID（只读）。 |
-| `send(input)` | `(input) => AsyncIterable<SessionEvent>` | 发送用户消息，返回事件流。 |
-| `respondApproval(opts)` | `(opts) => AsyncIterable<SessionEvent>` | 注入 HITL 审批决策后继续运行。 |
+| `send(input)` | `(input) => AsyncIterable<AcpSessionUpdate>` | 发送用户消息，返回 ACP 更新流。 |
+| `respondApproval(opts)` | `(opts) => AsyncIterable<AcpSessionUpdate>` | 注入 HITL 审批决策后继续运行。 |
 | `getHistory(opts?)` | `() => Promise<MessageRecord[]>` | 获取聚合后的历史消息（供 UI 渲染）。 |
 | `clearHistory()` | `() => Promise<void>` | 清除消息元数据索引，不影响 SDK transcript。 |
 | `getState()` | `() => Promise<string>` | 序列化当前 RunState 为 JSON。 |
@@ -788,8 +788,8 @@ await agent.sessions.delete(session.id)
 ```typescript
 // 文本消息
 for await (const event of session.send('你好')) {
-  if (event.type === 'message_delta') process.stdout.write(event.text)
-  if (event.type === 'session_idle') break // 本轮结束
+  if (event.sessionUpdate === 'agent_message_chunk') process.stdout.write(event.content.text)
+  if (event.sessionUpdate === 'agent_phase' && event.phase === 'idle') break
 }
 
 // 带附件
@@ -806,13 +806,13 @@ for await (const event of session.send({
 
 #### `respondApproval(opts)`
 
-收到 `tool_approval_required` 事件后，收集用户决策并继续运行：
+收到 ACP `tool_confirm` 更新后，收集用户决策并继续运行：
 
 ```typescript
 for await (const event of session.send('删除这个集合')) {
-  if (event.type === 'tool_approval_required') {
+  if (event.sessionUpdate === 'tool_confirm') {
     for await (const resumed of session.respondApproval({
-      toolUseId: event.toolUseId,
+      toolUseId: event.toolCallId,
       decision: { kind: 'allow', scope: 'once' }, // kind: allow | deny；scope: once | session | forever
     })) {
       // 决策注入后的后续事件
@@ -837,34 +837,21 @@ await session.snapshotWorkspace?.() // 手动触发 cwd 快照
 const status = await session.getRestoreStatus?.() // 'full' | 'fresh' | 'partial' | 'failed' | null
 ```
 
-### `SessionEvent`
+### `AcpSessionUpdate`
 
-`send()` 和 `respondApproval()` 返回的 `AsyncIterable<SessionEvent>` 中，常见事件类型：
+`send()` 和 `respondApproval()` 返回 `AsyncIterable<AcpSessionUpdate>`。常见更新类型：
 
-| 事件 | 含义 | 典型处理 |
-|------|------|----------|
-| `message_delta` | 模型输出增量文本 | 流式渲染到 UI |
-| `message_complete` | 模型输出完整文本 | 落盘 / 展示最终回复 |
-| `tool_call` | Agent 发起工具调用 | 展示工具名和参数 |
-| `tool_result` | 工具执行结果 | 展示工具输出 |
-| `tool_approval_required` | 工具需要人工审批 | 调 `respondApproval()` |
-| `handoff` | 子 Agent 切换 | 展示 handoff 信息 |
-| `session_idle` | 本轮运行结束 | `reason`: `completed` / `requires_action` / `aborted` / `error` |
-| `error` | 运行错误 | 展示 `error.message` |
+| `sessionUpdate` | 含义 | 典型处理 |
+|-----------------|------|----------|
+| `agent_message_chunk` | 模型输出增量文本 | 流式渲染 `content.text` |
+| `tool_call` | Agent 发起工具调用 | 展示 `title` 和 `input` |
+| `tool_call_update` | 工具参数或结果更新 | 根据 `status` 渲染进度 / 结果 |
+| `tool_confirm` | 工具需要人工审批 | 调 `respondApproval()` |
+| `ask_user` | Agent 主动向用户提问 | 收集回答后调 `respondAskUser()` |
+| `agent_phase` | Agent 阶段变化 | `phase='idle'` 表示本轮空闲 |
+| `log` | 运行日志 / 错误 | 展示 `message` |
 
-```typescript
-type SessionEvent =
-  | { type: 'message_delta'; text: string }
-  | { type: 'message_complete'; text: string }
-  | { type: 'tool_call'; toolUseId: string; toolName: string; input: unknown }
-  | { type: 'tool_result'; toolUseId: string; toolName: string; output: unknown; isError: boolean }
-  | { type: 'tool_approval_required'; toolUseId: string; toolName: string; input: unknown; runStateJson: string; hints?: {...} }
-  | { type: 'handoff'; fromAgent: string; toAgent: string }
-  | { type: 'session_idle'; reason: 'completed' | 'requires_action' | 'aborted' | 'error' }
-  | { type: 'error'; error: Error }
-```
-
-OAK 只提供协议中立的 `AsyncIterable<SessionEvent>`；接入 SSE / ACP / AG-UI 时由业务层做事件映射。
+ACP 是 OAK 的默认输出协议；常规 `createAgent()` 无需传 `streamAdapter`。
 
 ## 常见问题
 

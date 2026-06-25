@@ -236,7 +236,7 @@ export type McpServerConfig = SdkMcpServerConfig
 // ============================================================
 
 /**
- * 审批决策（用户对 tool_approval_required 的响应）。
+ * 审批决策（用户对 ACP tool_confirm 的响应）。
  *
  * 这是协议无关的超集——业务侧的 ACP / AG-UI / 自家 SSE 等协议只需要把
  * 自己的决策枚举映射成下面的字段即可。
@@ -708,12 +708,12 @@ export interface Session {
   /**
    * 响应工具审批（PR #7.0）。
    *
-   * 当事件流给出 `tool_approval_required` 后，业务收集到用户决策（allow/deny/scope/...）
+   * 当 ACP 更新流给出 `tool_confirm` 后，业务收集到用户决策（allow/deny/scope/...）
    * 调本方法注入决策。kernel 把决策写入 PermissionStore，然后内部 resume 一次 SDK 运行：
    * Hook 再次触发时从 store 读到决策并放行 / 拒绝，agent 继续往下跑。
    *
-   * 返回的事件流是"决策注入后"的运行流（可能包含 message_delta / tool_call /
-   * tool_result / 再次的 tool_approval_required / session_idle 等）。
+   * 返回的事件流是"决策注入后"的 ACP 更新流（可能包含 agent_message_chunk /
+   * tool_call / tool_call_update / 再次的 tool_confirm / agent_phase 等）。
    *
    * 注意：调用方应确保同一 toolUseId 不被并发响应；重复响应会用最后一次为准。
    */
@@ -722,22 +722,21 @@ export interface Session {
   /**
    * PR #7.1: 注入客户端工具结果并 resume agent 运行。
    *
-   * 配套 'tool_use_required' 事件使用：业务侧在客户端执行完 AgentConfig.tools[]
+   * 配套 ACP `tool_confirm` 使用：业务侧在客户端执行完 AgentConfig.tools[]
    * 中声明的工具后，调本方法把结果回灌给 kernel：
    *   1. kernel 把结果写入内部 client-tool store
    *   2. 起一轮 SDK query（resume）→ 模型重发同名工具 → PreToolUse hook 这次
    *      把结果通过 updatedInput 注入 → 包装的 MCP stub 直接返回它，写一条
    *      正常（非 error）的 tool_result 进 transcript。
    *
-   * 返回的事件流是"结果注入后"的运行流（可能包含 message_delta / tool_call /
-   * tool_result / session_idle 等）。
+   * 返回的事件流是"结果注入后"的 ACP 更新流。
    */
   respondToolUse(opts: { toolUseId: string; output: unknown; isError?: boolean }): AsyncIterable<AcpSessionUpdate>
 
   /**
    * 注入用户对 askUser 提问的回答并 resume agent 运行。
    *
-   * 配套 'ask_user_required' 事件使用：业务侧收集到用户回答后，
+   * 配套 ACP `ask_user` 更新使用：业务侧收集到用户回答后，
    * 调本方法把回答回灌给 kernel：
    *   1. kernel 把回答写入内部 askUser store
    *   2. 起一轮 SDK query（resume）→ 模型重发 askUser 工具 → PreToolUse hook 这次
@@ -809,103 +808,6 @@ export type AttachmentInput =
   | { type: 'file'; source: string | Uint8Array; mimeType?: string }
   | { type: 'url'; url: string; mimeType?: string }
   | { type: 'cos'; fileId: string; mimeType?: string }
-
-// ============================================================
-// Session 事件流
-// ============================================================
-
-export type SessionEvent =
-  | { type: 'message_delta'; text: string }
-  | { type: 'message_complete'; text: string }
-  | {
-      type: 'tool_call'
-      toolUseId: string
-      toolName: string
-      input: unknown
-    }
-  | {
-      type: 'tool_result'
-      toolUseId: string
-      toolName: string
-      output: unknown
-      isError: boolean
-    }
-  | {
-      /**
-       * 工具调用需要用户审批（PR #7.0）。
-       *
-       * 收到此事件后，本轮 SDK 运行会自然结束（紧跟 `session_idle.requires_action`）。
-       * 业务收集到决策后调 `session.respondApproval({ toolUseId, decision })` 继续。
-       *
-       * 协议无关字段：客户端协议（ACP/AG-UI/SSE）适配只需把这些字段映射到自家协议。
-       */
-      type: 'tool_approval_required'
-      toolUseId: string
-      toolName: string
-      input: unknown
-      /**
-       * 给客户端 UI 的辅助提示，**协议无关**。
-       * - displayName：UI 按钮 / 标题用的短名
-       * - description：长描述（"will read files in ~/Downloads"）
-       * - suggestedScopes：UI 可呈现的"作用范围"选项（once/session/forever）
-       */
-      hints?: {
-        displayName?: string
-        description?: string
-        suggestedScopes?: Array<'once' | 'session' | 'forever'>
-      }
-      /**
-       * Resume token（业务可不持久化，conversationId + toolUseId 就够 resumeApproval；
-       * 此字段留作未来跨进程 RunState 持久化的扩展点）。
-       */
-      runStateJson: string
-    }
-  | {
-      /**
-       * 客户端工具需要客户端执行（PR #7.1）。
-       *
-       * 当模型调用 AgentConfig.tools[] 中声明的"client-side custom tool"时，
-       * kernel 不会真的调 execute()，而是让 PreToolUse hook 拦截：
-       *   1. 写一个 pending entry 到内部 client-tool store
-       *   2. 用一个 sentinel deny 让 SDK 终止本轮
-       *   3. 翻译层识别 sentinel 后吐出本事件
-       *
-       * 业务侧收到本事件 → 在客户端实际执行工具 → 调
-       * `session.respondToolUse({ toolUseId, output, isError? })` 注入结果，
-       * kernel 会 resume 一轮 SDK 让模型重发同名工具，hook 这次会注入结果，
-       * 模型基于真实结果继续。
-       */
-      type: 'tool_use_required'
-      toolUseId: string
-      toolName: string
-      input: unknown
-    }
-  | {
-      /**
-       * Agent 主动向用户提问。
-       *
-       * 当模型调用内置 askUser 工具时，kernel 用 sentinel 中断 turn，
-       * 翻译层识别后吐出本事件。业务侧收集用户回答后调
-       * `session.respondAskUser({ toolUseId, answer })` 注入回答并 resume。
-       *
-       * 与 codebuddy 的区别：codebuddy 的 AskUser hang 住进程；
-       * OAK 的 askUser 是流终止+resume，不阻塞、支持分布式。
-       */
-      type: 'ask_user_required'
-      toolUseId: string
-      question: string
-      options?: string[]
-    }
-  | {
-      type: 'handoff'
-      fromAgent: string
-      toAgent: string
-    }
-  | {
-      type: 'session_idle'
-      reason: 'completed' | 'requires_action' | 'aborted' | 'error'
-    }
-  | { type: 'error'; error: Error }
 
 // ============================================================
 // 历史消息记录（PR #4.6 扩展）
