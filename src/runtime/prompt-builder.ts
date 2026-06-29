@@ -92,9 +92,6 @@ export async function* buildPromptAsync(args: BuildPromptArgs): AsyncGenerator<S
       },
       parent_tool_use_id: null,
     }
-    if (process.env.OAK_DEBUG_PROMPT) {
-      console.error('[prompt-builder] tool_result yield:', JSON.stringify(message))
-    }
     yield message
     return
   }

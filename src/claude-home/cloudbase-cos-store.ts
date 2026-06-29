@@ -12,14 +12,16 @@
  *     这种"遍历 + 双向同步"场景的正确选择。Monorepo 的 packages/server 也是用它做
  *     云存储管理的。
  *
- * 凭证由 options.credentials 显式注入；manager-node 不从环境变量兜底读取。
- *
- * `@cloudbase/manager-node` 按需懒加载。
+ * 凭证支持两种方式:
+ *   1. CAM 凭证 (secretId + secretKey) —— 直接传给 manager-node
+ *   2. CloudBase API Key (CLOUDBASE_APIKEY) —— 调 capi/credential 换取临时 CAM 凭证,
+ *      再传给 manager-node。临时凭证有过期时间,CredentialExchanger 自动刷新。
  */
 
+import CloudBaseManager from '@cloudbase/manager-node'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
-import { InvalidConfigError, ResourceError } from '../internal/errors.js'
+import { InvalidConfigError } from '../internal/errors.js'
 import { sha256OfBuffer } from './dedup.js'
 import { deriveSyncTmpDir } from './path-derivation.js'
 import type { ClaudeHomeContext, ClaudeHomeSyncStore, RelativePath } from './types.js'
@@ -34,10 +36,12 @@ const DEFAULT_KEY_PREFIX: CosKeyPrefixFn = (ctx) => `oak/users/${ctx.userId}/cla
 
 export interface CloudBaseCosCredentials {
   envId: string
-  secretId: string
-  secretKey: string
+  secretId?: string
+  secretKey?: string
   sessionToken?: string
   region?: string
+  /** CloudBase API Key — 没有 CAM 凭证时用 API Key 换临时密钥 */
+  apiKey?: string
 }
 
 export interface CloudBaseCosClaudeHomeStoreOptions {
@@ -46,7 +50,12 @@ export interface CloudBaseCosClaudeHomeStoreOptions {
   keyPrefix?: CosKeyPrefixFn
 }
 
-interface ResolvedCredentials extends CloudBaseCosCredentials {
+interface ResolvedCredentials {
+  envId: string
+  secretId?: string
+  secretKey?: string
+  sessionToken?: string
+  apiKey?: string
   region: string
 }
 
@@ -67,31 +76,131 @@ interface CloudBaseManagerInstance {
   storage: ManagerStorage
 }
 
-interface ManagerCtor {
-  new (opts: {
-    secretId: string
-    secretKey: string
-    envId: string
-    token?: string
-    region?: string
-  }): CloudBaseManagerInstance
+// ── API Key → 临时 CAM 凭证交换 ───────────────────────────────
+
+interface TempCredentials {
+  secretId: string
+  secretKey: string
+  sessionToken: string
+  expiredTime: number // 毫秒时间戳
+}
+
+const credentialCache = new Map<string, TempCredentials & { promise?: Promise<TempCredentials> }>()
+
+/**
+ * 用 CloudBase API Key 换取临时 CAM 凭证。
+ *
+ * 调用 `https://{envId}.{region}.tcb-api.tencentcloudapi.com/capi/credential`，
+ * 返回 { TmpSecretId, TmpSecretKey, Token, ExpiredTime }。
+ * 结果按 envId 缓存，过期前 5 分钟自动刷新。
+ */
+async function exchangeApiKeyForCredentials(envId: string, apiKey: string, region: string): Promise<TempCredentials> {
+  const cacheKey = `${envId}:${apiKey}`
+  const cached = credentialCache.get(cacheKey)
+  const now = Date.now()
+
+  // 缓存有效（还有 5 分钟才过期）
+  if (cached && cached.expiredTime - now > 5 * 60 * 1000) {
+    return cached
+  }
+
+  // 防止并发重复请求
+  if (cached?.promise) {
+    return cached.promise
+  }
+
+  const promise = (async (): Promise<TempCredentials> => {
+    const baseUrl = process.env.CLOUDBASE_API_ENDPOINT ?? `https://${envId}.${region}.tcb-api.tencentcloudapi.com`
+    const url = `${baseUrl}/capi/credential`
+
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ env: envId }),
+    })
+
+    if (!res.ok) {
+      throw new InvalidConfigError(`API Key 换取临时密钥失败: HTTP ${res.status} ${res.statusText}`)
+    }
+
+    const body = (await res.json()) as {
+      code: number
+      message?: string
+      msg?: string
+      data?: {
+        TmpSecretId: string
+        TmpSecretKey: string
+        Token: string
+        ExpiredTime: number // 秒级时间戳
+      }
+    }
+
+    if (body.code !== 0) {
+      throw new InvalidConfigError(`API Key 换取临时密钥失败: ${body.message ?? body.msg ?? `code=${body.code}`}`)
+    }
+
+    if (!body.data?.TmpSecretId || !body.data?.TmpSecretKey || !body.data?.Token) {
+      throw new InvalidConfigError('API Key 换取临时密钥返回数据不完整，请检查 API Key 是否有效')
+    }
+
+    const result: TempCredentials = {
+      secretId: body.data.TmpSecretId,
+      secretKey: body.data.TmpSecretKey,
+      sessionToken: body.data.Token,
+      expiredTime: body.data.ExpiredTime * 1000, // 秒 → 毫秒
+    }
+
+    credentialCache.set(cacheKey, { ...result, promise: undefined })
+    return result
+  })()
+
+  // 暂存 promise 防止并发
+  credentialCache.set(cacheKey, { secretId: '', secretKey: '', sessionToken: '', expiredTime: 0, promise })
+
+  try {
+    return await promise
+  } finally {
+    const entry = credentialCache.get(cacheKey)
+    if (entry) entry.promise = undefined
+  }
 }
 
 function resolveCredentials(opts?: CloudBaseCosClaudeHomeStoreOptions): ResolvedCredentials {
   const fromOpts = opts?.credentials
   const envId = fromOpts?.envId
-  const secretId = fromOpts?.secretId
-  const secretKey = fromOpts?.secretKey
-  const sessionToken = fromOpts?.sessionToken
-  const region = fromOpts?.region ?? 'ap-shanghai'
-
-  if (!envId || !secretId || !secretKey) {
+  if (!envId) {
     throw new InvalidConfigError(
-      'CloudBaseCosClaudeHomeStore requires platform credentials. ' +
-        'Pass constructor option `credentials` or createAgent({ credentials }).',
+      'CloudBaseCosClaudeHomeStore requires envId. ' +
+        'Pass constructor option `credentials.envId` or createAgent({ credentials }).',
     )
   }
-  return { envId, secretId, secretKey, sessionToken, region }
+
+  const secretId = fromOpts?.secretId
+  const secretKey = fromOpts?.secretKey
+  const apiKey = fromOpts?.apiKey ?? process.env.CLOUDBASE_APIKEY
+  const region = fromOpts?.region ?? 'ap-shanghai'
+
+  // 需要至少一种凭证：CAM (secretId+secretKey) 或 API Key
+  if (!secretId && !secretKey && !apiKey) {
+    throw new InvalidConfigError(
+      'CloudBaseCosClaudeHomeStore requires credentials. Set one of:\n' +
+        '  - credentials.secretId + credentials.secretKey (CAM)\n' +
+        '  - credentials.apiKey or CLOUDBASE_APIKEY env (exchanged for temp CAM)\n' +
+        '  - createAgent({ credentials })',
+    )
+  }
+
+  return {
+    envId,
+    ...(secretId ? { secretId } : {}),
+    ...(secretKey ? { secretKey } : {}),
+    ...(fromOpts?.sessionToken ? { sessionToken: fromOpts.sessionToken } : {}),
+    ...(apiKey ? { apiKey } : {}),
+    region,
+  }
 }
 
 function assertSafeKey(expectedPrefix: string, fullKey: string): void {
@@ -135,39 +244,26 @@ export class CloudBaseCosClaudeHomeStore implements ClaudeHomeSyncStore {
   private async getManager(): Promise<CloudBaseManagerInstance> {
     if (this.manager) return this.manager
 
-    // 与 src/storage/cloudbase-storage.ts 一致的懒加载模式:
-    //   1) 用 new Function 绕过 tsup 静态打包(否则 ESM 入口找不到 @cloudbase/manager-node)
-    //   2) `@cloudbase/manager-node` 是 CommonJS,ESM import 后真实导出在 mod.default
-    const mod = await this.requireManagerNode()
-    const Ctor = ((mod as { default?: unknown }).default ?? mod) as ManagerCtor
-    if (typeof Ctor !== 'function') {
-      throw new ResourceError(
-        '@cloudbase/manager-node loaded but default export is not a constructor. ' +
-          'Check the version (>= 4.0.0 required).',
-      )
-    }
-    this.manager = new Ctor({
-      secretId: this.creds.secretId,
-      secretKey: this.creds.secretKey,
-      envId: this.creds.envId,
-      ...(this.creds.sessionToken ? { token: this.creds.sessionToken } : {}),
-      region: this.creds.region,
-    })
-    return this.manager
-  }
+    let secretId = this.creds.secretId
+    let secretKey = this.creds.secretKey
+    let sessionToken = this.creds.sessionToken
 
-  private async requireManagerNode(): Promise<unknown> {
-    try {
-      // 必须用 new Function 包,避免 tsup 把 import('@cloudbase/manager-node')
-      // 静态展开成相对路径(运行时 ESM 解析失败)。
-      const dynamicImport = new Function('p', 'return import(p)') as (p: string) => Promise<unknown>
-      return await dynamicImport('@cloudbase/manager-node')
-    } catch {
-      throw new ResourceError(
-        'CloudBaseCosClaudeHomeStore failed to load @cloudbase/manager-node. ' +
-          'Reinstall @cloudbase/open-agent-kernel or check your node_modules.',
-      )
+    // 没有 CAM 凭证但有 API Key → 换取临时凭证
+    if ((!secretId || !secretKey) && this.creds.apiKey) {
+      const temp = await exchangeApiKeyForCredentials(this.creds.envId, this.creds.apiKey, this.creds.region)
+      secretId = temp.secretId
+      secretKey = temp.secretKey
+      sessionToken = temp.sessionToken
     }
+
+    this.manager = new CloudBaseManager({
+      secretId: secretId!,
+      secretKey: secretKey!,
+      envId: this.creds.envId,
+      ...(sessionToken ? { token: sessionToken } : {}),
+      region: this.creds.region,
+    }) as unknown as CloudBaseManagerInstance
+    return this.manager
   }
 
   async pull(ctx: ClaudeHomeContext, localDir: string): Promise<Map<RelativePath, string>> {
@@ -215,10 +311,6 @@ export class CloudBaseCosClaudeHomeStore implements ClaudeHomeSyncStore {
 
     // manager-node 的 uploadFile 只接 localPath(底层 fs.createReadStream),
     // 我们要传 Buffer,所以走"临时文件桥接"。COS 上传后立即清理 tmp 文件。
-    // 这是标准做法,几 KB 文档的 IO 开销可以忽略;避免依赖 manager-node 的
-    // private getCos() 实现。
-    // ④ COS 同步临时区:<workRoot>/.oak/sync/put-<rand>(统一 .oak 布局)。
-    // mkdtemp 要求父目录存在,先确保 .oak/sync 在。
     const syncRoot = deriveSyncTmpDir()
     await fs.mkdir(syncRoot, { recursive: true })
     const tmpDir = await fs.mkdtemp(path.join(syncRoot, 'put-'))
@@ -239,7 +331,6 @@ export class CloudBaseCosClaudeHomeStore implements ClaudeHomeSyncStore {
     try {
       await manager.storage.deleteFile([fullKey])
     } catch (err) {
-      // 文件不存在视为成功(idempotent delete)
       if (isFileNotExistError(err)) return
       throw err
     }
@@ -253,7 +344,6 @@ export class CloudBaseCosClaudeHomeStore implements ClaudeHomeSyncStore {
     const urlRes = await manager.storage
       .getTemporaryUrl([{ cloudPath: fullKey, maxAge: 600 }])
       .catch((err: unknown) => {
-        // namespace 不存在 / 对象不存在:manager-node 可能抛错而非返空
         if (isFileNotExistError(err)) return null
         throw err
       })

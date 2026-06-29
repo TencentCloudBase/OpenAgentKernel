@@ -98,10 +98,6 @@ export class CloudBaseSessionStore implements SessionStore {
     await this.driver.appendEntries(mapped, entries)
 
     // 2. 提取消息元数据写入 session_messages（PR #4.6：双写机制）
-    if (process.env.OAK_DEBUG === '1') {
-      // eslint-disable-next-line no-console
-      console.error('[oak][session-store] appendSessionMessage called, entryCount=' + entries.length)
-    }
     await this.driver.appendSessionMessage(mapped, entries)
 
     // 3. 增量维护 summary（仅主 transcript 需要 summary）
@@ -126,6 +122,17 @@ export class CloudBaseSessionStore implements SessionStore {
 
   async load(key: SessionKey): Promise<SessionStoreEntry[] | null> {
     return this.driver.loadEntries(this.mapKey(key))
+  }
+
+  /**
+   * 加载最近 N 条 entries（不是 SDK SessionStore 接口的一部分）。
+   *
+   * 给 patchSentinelToolResult 用：它只需要找刚写入的 sentinel tool_result，
+   * 用 loadRecent 避免全量 load 整个 transcript（长 session 下 load() 会把
+   * 几百条 entry 全拉出来，轮询时放大成性能问题）。
+   */
+  async loadRecent(key: SessionKey, limit: number): Promise<SessionStoreEntry[] | null> {
+    return this.driver.loadRecentEntries(this.mapKey(key), limit)
   }
 
   async listSessions(projectKey: string): Promise<Array<{ sessionId: string; mtime: number; userId?: string }>> {

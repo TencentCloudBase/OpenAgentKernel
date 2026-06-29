@@ -1,6 +1,6 @@
 {
   "name": "@cloudbase/open-agent-kernel",
-  "version": "0.1.0-beta.8",
+  "version": "0.1.0-beta.12",
   "description": "CloudBase Open Agent Kernel — server-side agentic agent SDK with built-in CloudBase resources",
   "license": "Apache-2.0",
   "type": "module",
@@ -34,7 +34,8 @@
     "@cloudbase/manager-node": "^4.10.6",
     "@cloudbase/node-sdk": "^3.18.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "tar": "^7.5.0",
+    "@types/tar": "^6.1.13",
+    "tar": "^7.5.16",
     "zod": "^4.3.6"
   },
   "devDependencies": {

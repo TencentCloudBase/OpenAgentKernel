@@ -72,6 +72,12 @@ export interface CloudBaseMcpBundle {
   toolCount: number
   /** degraded 原因（toolCount === 0 时给出） */
   degradedReason?: string
+  /**
+   * 直接执行某个工具（按 bare toolName，不带 mcp__cloudbase__ 前缀）。
+   * 用于 HITL approval resume：approve 后 kernel 直接调用拿结果 patch 进
+   * transcript，避免让模型重新发起调用。未知工具返回 null。
+   */
+  invoke?: (toolName: string, input: Record<string, unknown>) => Promise<{ output: string; isError: boolean } | null>
 }
 
 // ─── JSON Schema → zod raw shape ──────────────────────────────────────
@@ -530,6 +536,8 @@ export async function createCloudBaseMcpServer(options: CreateCloudBaseMcpOption
 
   log(`registered ${tools.length} cloudbase tools (skipped ${toolDefs.length - tools.length})`)
 
+  const knownToolNames = new Set(toolDefs.filter((t) => t.name && !SKIP_TOOLS.has(t.name)).map((t) => t.name))
+
   return {
     server: createSdkMcpServer({
       name: 'cloudbase',
@@ -537,5 +545,20 @@ export async function createCloudBaseMcpServer(options: CreateCloudBaseMcpOption
       tools,
     }),
     toolCount: tools.length,
+    invoke: async (toolName, input) => {
+      if (!knownToolNames.has(toolName)) return null
+      try {
+        const output = await callCloudBaseTool({
+          sandbox,
+          toolName,
+          args: input,
+          reInjectCredentials,
+          log,
+        })
+        return { output, isError: isCredentialError(output) }
+      } catch (err) {
+        return { output: err instanceof Error ? err.message : String(err), isError: true }
+      }
+    },
   }
 }

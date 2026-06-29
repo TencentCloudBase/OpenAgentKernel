@@ -13,19 +13,16 @@ export {
 export {
   OAK_INTERRUPT_SENTINEL,
   OAK_CLIENT_TOOL_SENTINEL,
-  OAK_ASK_USER_SENTINEL,
   OAK_CLIENT_TOOL_RESULT_KEY,
   isInterruptSignal,
   parseInterruptSignal,
   parseClientToolSignal,
-  parseAskUserSignal,
   createPreToolUsePermissionHook,
   createHookLocalState,
   type InterruptSignalPayload,
   type ClientToolSignalPayload,
   type ClientToolResultStore,
   type PendingClientToolResult,
-  type AskUserSignalPayload,
   type PreToolUseHookLocalState,
 } from './hooks.js'
 

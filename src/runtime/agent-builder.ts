@@ -766,7 +766,7 @@ function createBuiltinAskUserMcpServer(
   conversationId?: string,
 ): ReturnType<typeof createSdkMcpServer> {
   const askUserTool = sdkTool(
-    'askUser',
+    'AskUserQuestion',
     'Ask the user a question and wait for their answer. Use this when you need clarification, confirmation, or a choice from the user.',
     {
       question: z.string().describe('The question to ask the user'),
@@ -777,11 +777,11 @@ function createBuiltinAskUserMcpServer(
     },
     async (_input: Record<string, unknown>) => {
       // Resume path: check if an answer is already stashed in the store.
-      // askUser 的 toolName='askUser',scanRecent 按 toolName 匹配。
+      // AskUserQuestion 的 toolName='AskUserQuestion',scanRecent 按 toolName 匹配。
       if (conversationId && clientToolStore.scanRecent) {
         const scanned = await clientToolStore.scanRecent({
           conversationId,
-          toolName: 'askUser',
+          toolName: 'AskUserQuestion',
         })
         if (scanned?.result) {
           await clientToolStore.delete({
@@ -798,7 +798,7 @@ function createBuiltinAskUserMcpServer(
       }
       // Should not reach here in normal flow — the hook intercepts before execute().
       return {
-        content: [{ type: 'text', text: '(askUser: no answer available)' }],
+        content: [{ type: 'text', text: '(AskUserQuestion: no answer available)' }],
         isError: true,
       }
     },

@@ -20,6 +20,8 @@
  *   2. (projectKey, type, conversationId, toolName, createdAt desc)  scanRecent
  */
 
+import cloudbase from '@cloudbase/node-sdk'
+
 import { ResourceError } from '../../internal/errors.js'
 import type { PendingClientToolResult } from '../hooks.js'
 import type { ClientToolResultStoreDriver } from './types.js'
@@ -27,8 +29,8 @@ import type { ClientToolResultStoreDriver } from './types.js'
 /** CloudBase Node SDK 凭证 */
 export interface CloudBaseClientToolCredentials {
   envId: string
-  secretId: string
-  secretKey: string
+  secretId?: string
+  secretKey?: string
   sessionToken?: string
   region?: string
 }
@@ -42,27 +44,38 @@ const DEFAULT_PREFIX = 'oak_'
 const STATE_COLLECTION = 'state'
 const ENTRY_TYPE = 'client_tool'
 
-interface ResolvedCredentials extends CloudBaseClientToolCredentials {
+interface ResolvedCredentials {
+  envId?: string
+  secretId?: string
+  secretKey?: string
+  sessionToken?: string
   region: string
 }
 
+/**
+ * Resolve credentials — lenient pattern (same as CloudBaseDbDriver and
+ * CloudBaseDbPermissionDriver). Copies only truthy fields; the
+ * @cloudbase/node-sdk picks up CLOUDBASE_APIKEY from env for Bearer auth
+ * when secretId/secretKey are empty. This lets FlexDB work with just
+ * CLOUDBASE_APIKEY (no CAM secret needed).
+ */
 function resolveCredentials(opts?: CloudBaseDbClientToolDriverOptions): ResolvedCredentials {
-  const fromOpts = opts?.credentials
-  const envId = fromOpts?.envId ?? process.env.TCB_ENV_ID
-  const secretId = fromOpts?.secretId ?? process.env.TCB_SECRET_ID
-  const secretKey = fromOpts?.secretKey ?? process.env.TCB_SECRET_KEY
-  const sessionToken = fromOpts?.sessionToken ?? process.env.TCB_TOKEN ?? undefined
-  const region = fromOpts?.region ?? process.env.TCB_REGION ?? 'ap-shanghai'
-
-  if (!envId || !secretId || !secretKey) {
+  const creds = opts?.credentials
+  const envId = creds?.envId ?? process.env.TCB_ENV_ID
+  if (!envId) {
     throw new ResourceError(
-      'CloudBase credentials missing. Set one of:\n' +
-        '  - process.env: TCB_ENV_ID + TCB_SECRET_ID + TCB_SECRET_KEY\n' +
-        '  - CloudBaseDbClientToolDriverOptions.credentials (programmatic)',
+      'CloudBase envId missing. Set one of:\n' +
+        '  - process.env: TCB_ENV_ID or CLOUDBASE_ENV_ID\n' +
+        '  - CloudBaseDbClientToolDriverOptions.credentials.envId (programmatic)',
     )
   }
-
-  return { envId, secretId, secretKey, sessionToken, region }
+  return {
+    envId,
+    ...(creds?.secretId ? { secretId: creds.secretId } : {}),
+    ...(creds?.secretKey ? { secretKey: creds.secretKey } : {}),
+    ...(creds?.sessionToken ? { sessionToken: creds.sessionToken } : {}),
+    region: creds?.region ?? 'ap-shanghai',
+  }
 }
 
 // CloudBase Node SDK 类型（与 cloudbase-db-driver.ts 一致）
@@ -115,14 +128,7 @@ export class CloudBaseDbClientToolDriver implements ClientToolResultStoreDriver 
 
   private async getApp(): Promise<CloudBaseApp> {
     if (this.app) return this.app
-    const mod = await this.requireCloudBase()
-    const init = (mod.default ?? mod) as { init(opts: Record<string, unknown>): CloudBaseApp }
-    if (typeof init.init !== 'function') {
-      throw new ResourceError(
-        '@cloudbase/node-sdk loaded but `.init()` not available. ' + 'Check the version (>= 3.0.0 required).',
-      )
-    }
-    this.app = init.init({
+    this.app = cloudbase.init({
       env: this.creds.envId,
       region: this.creds.region,
       secretId: this.creds.secretId,
@@ -130,22 +136,6 @@ export class CloudBaseDbClientToolDriver implements ClientToolResultStoreDriver 
       ...(this.creds.sessionToken ? { sessionToken: this.creds.sessionToken } : {}),
     })
     return this.app
-  }
-
-  private async requireCloudBase(): Promise<{ default?: unknown; init?: unknown }> {
-    try {
-      const dynamicImport = new Function('p', 'return import(p)') as (
-        p: string,
-      ) => Promise<{ default?: unknown; init?: unknown }>
-      return await dynamicImport('@cloudbase/node-sdk')
-    } catch {
-      throw new ResourceError(
-        '@cloudbase/node-sdk is not installed. Add it as a dependency:\n' +
-          '  pnpm add @cloudbase/node-sdk\n' +
-          'It is a peer dependency of @cloudbase/open-agent-kernel and is\n' +
-          'required when using CloudBaseDbClientToolDriver.',
-      )
-    }
   }
 
   private async getCollection(): Promise<CloudBaseCollection> {

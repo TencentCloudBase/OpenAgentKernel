@@ -226,13 +226,13 @@ export interface RequestPermissionUpdate {
   _meta?: OakMeta | null
 }
 
-// ── OAK extension: ask_user (stop-and-resume AskUserQuestion) ────────────
+// ── OAK extension: ask_user (DEPRECATED) ────────────────────────────────
 //
-// OAK's AskUserQuestion flow. Same stop-and-resume rationale as
-// request_permission. Kept as a separate variant (rather than folded into
-// request_permission) because the question/options shape is richer than a
-// permission option list.
+// @deprecated AskUserQuestion 已去特化为普通 client-tool，现在走 request_permission
+// (toolCall.title='AskUserQuestion', rawInput 含 question/options)。kernel 不再
+// emit ask_user variant。此类型保留仅为向后兼容，下个版本移除。
 
+/** @deprecated AskUserQuestion now flows through request_permission. */
 export interface AskUserUpdate {
   sessionUpdate: 'ask_user'
   toolCallId: string

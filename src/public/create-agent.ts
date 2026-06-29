@@ -31,6 +31,7 @@ import type {
   CloudBaseStorageConfig,
   MessagePart,
   MessageRecord,
+  PendingApproval,
   PermissionStore,
   SandboxUserCredentials,
   Session,
@@ -363,6 +364,11 @@ function createSession(deps: SessionDeps): Session {
   const cloudbaseToolsEnabled = isCloudbaseToolsEnabled(config)
   let cloudbaseMcpServer: SdkMcpServerConfig | undefined
   let cloudbaseMcpPromise: Promise<SdkMcpServerConfig | undefined> | undefined
+  // HITL approval 直调：cloudbase bundle 暴露的 invoke(toolName, input)。
+  // approve 一个 mcp__cloudbase__* 工具后，kernel 直接调它拿结果 patch 进 transcript。
+  let cloudbaseInvoke:
+    | ((toolName: string, input: Record<string, unknown>) => Promise<{ output: string; isError: boolean } | null>)
+    | undefined
 
   // Spec B(Task 8):workspace snapshot engine 由 buildClaudeQueryOptions 在
   // 第一次 send 时构造并通过本闭包变量记录。bootstrap 仅执行一次(首次 acquire 之后)。
@@ -431,6 +437,7 @@ function createSession(deps: SessionDeps): Session {
                 (bundle.degradedReason ? ` reason=${bundle.degradedReason}` : ''),
             )
           }
+          cloudbaseInvoke = bundle.invoke
           return bundle.server as SdkMcpServerConfig
         } catch (err) {
           // eslint-disable-next-line no-console
@@ -540,6 +547,9 @@ function createSession(deps: SessionDeps): Session {
         permissionStore,
         ...(clientToolNames.size > 0 ? { clientToolNames } : {}),
         clientToolStore,
+        // approve 后用于直调被批准的 cloudbase 工具（getter 读最新值，
+        // 因为 cloudbaseInvoke 在 ensureCloudbaseMcp 完成后才赋值）
+        getDirectInvoker: () => cloudbaseInvoke,
       })
     },
 
@@ -611,10 +621,6 @@ function createSession(deps: SessionDeps): Session {
         }
       }
 
-      if (process.env.OAK_DEBUG === '1') {
-        console.error('[oak][getHistory] entryMap size:', entryMap.size, ', metas:', metas.length)
-      }
-
       // 4. 用元数据顺序组装 MessageRecord
       const result: MessageRecord[] = []
       for (const meta of metas) {
@@ -636,13 +642,6 @@ function createSession(deps: SessionDeps): Session {
 
       // metas 是 desc 排序，返回给用户改为 asc（时间正序）
       result.reverse()
-
-      if (process.env.OAK_DEBUG === '1') {
-        console.error('[oak][getHistory] raw records:', result.length)
-        for (const r of result) {
-          console.error(`  ${r.role} id=${r.id} parts=${r.parts.map((p) => p.type).join(',')}`)
-        }
-      }
 
       return aggregateHistory(result)
     },
@@ -1184,6 +1183,90 @@ function* createErrorUpdates(message: string): Generator<AcpSessionUpdate, void,
 }
 
 // ============================================================
+// 内部：resume 通用 helper（approval / client-tool 共用）
+// ============================================================
+
+/**
+ * resume 阶段共用的上下文。approval 和 client-tool 两条 resume 路径
+ * 都把这些字段从各自的 args 里解构出来,再传给 resumeQuery。
+ */
+interface ResumeContext {
+  config: AgentConfig
+  conversationId: string
+  userId: string
+  abortController: AbortController
+  ensureSandbox: () => Promise<SandboxInstance | undefined>
+  ensureCloudbaseMcp: (sandbox: SandboxInstance) => Promise<SdkMcpServerConfig | undefined>
+  ensureSnapshotBootstrap: (engine: WorkspaceSnapshotEngine, sandbox: SandboxInstance) => Promise<void>
+  onSnapshotEngine: (engine: WorkspaceSnapshotEngine | undefined) => void
+  permissionStore?: PermissionStore
+  clientToolNames?: ReadonlySet<string>
+  clientToolStore?: ClientToolResultStore
+}
+
+/**
+ * 以 isContinuation=true 调一轮 runClaudeQuery。approval 直调 / client-tool
+ * resume / approval prompt-resume 三处共用,消除 ~15 行重复的 runClaudeQuery({...}) 块。
+ */
+async function* resumeQuery(ctx: ResumeContext, input: string): AsyncGenerator<AcpSessionUpdate, void, unknown> {
+  yield* runClaudeQuery({
+    config: ctx.config,
+    input,
+    abortController: ctx.abortController,
+    sessionId: ctx.conversationId,
+    conversationId: ctx.conversationId,
+    userId: ctx.userId,
+    isContinuation: true,
+    ensureSandbox: ctx.ensureSandbox,
+    ensureCloudbaseMcp: ctx.ensureCloudbaseMcp,
+    ensureSnapshotBootstrap: ctx.ensureSnapshotBootstrap,
+    onSnapshotEngine: ctx.onSnapshotEngine,
+    permissionStore: ctx.permissionStore,
+    ...(ctx.clientToolNames ? { clientToolNames: ctx.clientToolNames } : {}),
+    ...(ctx.clientToolStore ? { clientToolStore: ctx.clientToolStore } : {}),
+  })
+}
+
+/**
+ * approve 后尝试直调 cloudbase 工具,patch sentinel tool_result。
+ * 仅对 kernel 能直接执行的工具(mcp__cloudbase__*)有效;内置工具(Bash/Write
+ * 等)无 direct invoker,返回 false 让调用方走 prompt 重发。
+ *
+ * @returns true = 直调+patch 成功(调用方用最小 prompt resume)
+ */
+async function tryDirectInvokeApproval(
+  ctx: ResumeContext,
+  existing: PendingApproval,
+  toolUseId: string,
+  decision: ApprovalDecision,
+  getDirectInvoker?: () =>
+    | ((toolName: string, input: Record<string, unknown>) => Promise<{ output: string; isError: boolean } | null>)
+    | undefined,
+): Promise<boolean> {
+  if (decision.kind !== 'allow') return false
+  const invoker = getDirectInvoker?.()
+  if (!invoker) return false
+
+  const bareToolName = existing.toolName.startsWith('mcp__cloudbase__')
+    ? existing.toolName.replace('mcp__cloudbase__', '')
+    : existing.toolName
+  try {
+    const effectiveInput =
+      (decision.updatedInput as Record<string, unknown> | undefined) ??
+      (existing.toolInput as Record<string, unknown> | undefined)
+    const result = await invoker(bareToolName, effectiveInput ?? {})
+    if (!result) return false
+    return patchSentinelToolResult(ctx.config, ctx.conversationId, toolUseId, result.output, result.isError)
+  } catch (err) {
+    if (process.env.OAK_DEBUG === '1') {
+      // eslint-disable-next-line no-console
+      console.error('[oak][approval] direct invoke failed, fallback to prompt resume:', err)
+    }
+    return false
+  }
+}
+
+// ============================================================
 // 内部：注入审批决策并 resume agent 运行（PR #7.0）
 // ============================================================
 
@@ -1201,6 +1284,13 @@ interface RunApprovalResumeArgs {
   permissionStore?: PermissionStore
   clientToolNames?: ReadonlySet<string>
   clientToolStore?: ClientToolResultStore
+  /**
+   * 返回 cloudbase 工具的直调函数（approve 后直接执行拿结果 patch transcript）。
+   * 用 getter 而非直接传值：cloudbaseInvoke 在 ensureCloudbaseMcp 完成后才有值。
+   */
+  getDirectInvoker?: () =>
+    | ((toolName: string, input: Record<string, unknown>) => Promise<{ output: string; isError: boolean } | null>)
+    | undefined
 }
 
 async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<AcpSessionUpdate, void, unknown> {
@@ -1218,6 +1308,7 @@ async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<A
     permissionStore,
     clientToolNames,
     clientToolStore,
+    getDirectInvoker,
   } = args
 
   if (!permissionStore) {
@@ -1237,32 +1328,152 @@ async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<A
 
   await permissionStore.put({ ...existing, decision })
 
-  // 用具体的 prompt 触发一轮 resume：让模型明确知道"刚才那个工具被批准/拒绝了，请重新调用"。
-  // 为什么不能用空 prompt：SDK 的 resume 默认会让模型自由继续，模型可能"理解错"上下文，
-  // 这里用确定指令引导模型重发同样的工具调用，PreToolUse hook 这次从 store 读到 decision → 放行/拒绝。
-  const resumePrompt = buildResumePrompt(existing.toolName, decision)
-
-  yield* runClaudeQuery({
+  const ctx: ResumeContext = {
     config,
-    input: resumePrompt,
-    abortController,
-    sessionId: conversationId,
     conversationId,
     userId,
-    isContinuation: true,
+    abortController,
     ensureSandbox,
     ensureCloudbaseMcp,
     ensureSnapshotBootstrap,
     onSnapshotEngine,
     permissionStore,
-    ...(clientToolNames ? { clientToolNames } : {}),
-    ...(clientToolStore ? { clientToolStore } : {}),
-  })
+    clientToolNames,
+    clientToolStore,
+  }
+
+  // ── approve 直调（cloudbase 工具）──
+  // approve 后 kernel 直接调工具拿结果 patch 进 transcript,模型看到正常结果
+  // 继续,不重发。内置工具(Bash/Write 等)无 direct invoker → 走下方 prompt 重发。
+  if (await tryDirectInvokeApproval(ctx, existing, toolUseId, decision, getDirectInvoker)) {
+    yield* resumeQuery(ctx, '[系统通知] 请继续。')
+    return
+  }
+
+  // ── prompt 重发（内置工具，或直调失败的 fallback）──
+  // 确定性 prompt + 注入原始 toolInput，强制模型用相同参数重发，避免改写命令/重复调用。
+  // resume 后 PreToolUse hook 按 toolName 命中 store 里的 decision → 放行真实执行。
+  yield* resumeQuery(ctx, buildResumePrompt(existing.toolName, decision, existing.toolInput))
 }
 
 // ============================================================
 // 内部：注入客户端工具结果并 resume agent 运行（PR #7.1）
 // ============================================================
+
+/**
+ * 把 transcript 里指定 toolUseId 的 sentinel tool_result（is_error=true）
+ * patch 成真实结果。client-tool 和 approval 直调共用。
+ *
+ * 原理：hook deny 工具时 SDK 记了一条 tool_result(is_error, sentinel content)。
+ * resume 时 SDK 重放 transcript，模型看到 error 会重试（新 toolUseId，导致 mismatch）。
+ * patch 成正常结果后，模型看到干净结果，自然继续，不重发。
+ *
+ * @returns 是否成功 patch
+ */
+async function patchSentinelToolResult(
+  config: AgentConfig,
+  conversationId: string,
+  toolUseId: string,
+  output: unknown,
+  isError: boolean,
+): Promise<boolean> {
+  const resultText = typeof output === 'string' ? output : JSON.stringify(output)
+  const store = config.session?.store as
+    | {
+        loadRecent?: (key: { projectKey: string; sessionId: string }, limit: number) => Promise<unknown[] | null>
+        load?: (key: { projectKey: string; sessionId: string }) => Promise<unknown[] | null>
+        append?: (key: { projectKey: string; sessionId: string }, entries: unknown[]) => Promise<void>
+      }
+    | undefined
+  const projectKey = config.session?.projectKey ?? config.envId
+  const sessionKey = { projectKey, sessionId: conversationId }
+
+  if (!store?.append) return false
+  // 优先用 loadRecent(只拉最近 N 条);store 不支持时退回全量 load。
+  // sentinel 必然是最近写入的几条之一,一轮 tool_use+tool_result 通常 2 条,
+  // 取 20 条足够覆盖,且避免长 session 全量 load 在轮询里被放大。
+  const RECENT_LIMIT = 20
+  const loadEntries = store.loadRecent
+    ? () => store.loadRecent!(sessionKey, RECENT_LIMIT)
+    : store.load
+      ? () => store.load!(sessionKey)
+      : null
+  if (!loadEntries) return false
+
+  try {
+    // 轮询等待 sentinel entry 落盘。
+    //
+    // SDK 的 sentinel tool_result append() 是在 generator 返回「之后」通过
+    // setTimeout 调度的 deferred 写入(不是 generator 内的 await，已验证：
+    // generator 结束 ≠ sentinel 落盘，需要 ~50-150ms）。本函数在「下一个 HTTP
+    // 请求」里跑，所以要轮询直到 sentinel 出现。命中通常 1-3 次(50-150ms)；
+    // 上限 1s。每次只拉最近 RECENT_LIMIT 条(loadRecent)，避免长 session 全量拉取。
+    //
+    // 这是「优化路径」的等待窗口，不是正确性保证：若超时返回 false，上游
+    // runClientToolResume 会回退到 retry prompt，hook 的 scanRecent 仍能从
+    // clientToolStore 确定性地注入结果(见 runClientToolResume 的 fallback 分支)。
+    // 命中则省掉一次模型重发 tool_call 的往返。
+    let entries: Array<Record<string, unknown>> | null = null
+    for (let attempt = 0; attempt < 20; attempt++) {
+      entries = (await loadEntries()) as Array<Record<string, unknown>> | null
+      if (entries) {
+        const found = entries.some((e) => {
+          const msg = e.message as { content?: unknown[] } | undefined
+          if (!Array.isArray(msg?.content)) return false
+          return msg.content.some(
+            (b) =>
+              typeof b === 'object' &&
+              b !== null &&
+              (b as { type?: string }).type === 'tool_result' &&
+              (b as { tool_use_id?: string }).tool_use_id === toolUseId &&
+              (b as { is_error?: boolean }).is_error,
+          )
+        })
+        if (found) break
+      }
+      await new Promise((r) => setTimeout(r, 50))
+    }
+
+    if (!entries) return false
+    for (const entry of entries) {
+      const msg = entry.message as
+        | { content?: Array<{ type: string; tool_use_id?: string; is_error?: boolean; content?: unknown }> }
+        | undefined
+      const blocks = msg?.content
+      if (!Array.isArray(blocks)) continue
+
+      let patched = false
+      for (const block of blocks) {
+        if (block.type === 'tool_result' && block.tool_use_id === toolUseId && block.is_error) {
+          // SDK 正常 tool_result 的 content 是纯字符串（已验证）
+          block.content = resultText
+          block.is_error = isError
+          // 同步 entry 级 toolUseResult（SDK 据此判断工具执行状态）
+          ;(entry as Record<string, unknown>).toolUseResult = {
+            stdout: resultText,
+            stderr: '',
+            interrupted: false,
+            isImage: false,
+            noOutputExpected: false,
+          }
+          patched = true
+        }
+      }
+      if (patched) {
+        await store.append(sessionKey, [entry]) // upsert by uuid
+        await new Promise((r) => setTimeout(r, 200)) // FlexDB 最终一致，等传播
+        return true
+      }
+    }
+    return false
+  } catch (err) {
+    if (process.env.OAK_DEBUG === '1') {
+      // eslint-disable-next-line no-console
+      console.error('[oak][patchSentinelToolResult] failed:', err)
+    }
+    return false
+  }
+}
 
 interface RunClientToolResumeArgs {
   config: AgentConfig
@@ -1316,27 +1527,23 @@ async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerat
 
   await clientToolStore.put({ ...existing, result: { output, isError } })
 
-  // Note: session_entries retains the sentinel deny tool_result as-is.
-  // This is by design — the SDK transcript is append-only. The sentinel
-  // is filtered at the presentation layer by aggregateHistory() in getHistory().
-  // Updating the entry would break aggregateHistory()'s sentinel detection
-  // and cause duplicate tool_calls in the output.
+  // Patch the sentinel tool_result so the model sees a clean result on resume
+  // (no retry, no toolUseId mismatch). Best-effort — falls back to retry prompt.
+  const patched = await patchSentinelToolResult(config, conversationId, toolUseId, output, isError)
 
-  // Mirror the approval-resume prompt: tell the model the prior call has
-  // been resolved and ask it to retry the same tool. The hook will scan the
-  // store on this new call and inject the result via updatedInput.
-  const resumePrompt = isError
-    ? `[系统通知] 用户为刚才的工具调用 \`${existing.toolName}\` 提供了执行错误结果。请重新调用该工具以获取结果（hook 会注入），然后基于错误结果继续。`
-    : `[系统通知] 用户为刚才的工具调用 \`${existing.toolName}\` 提供了实际执行结果。请重新调用该工具以获取该结果（hook 会自动注入），然后基于结果继续。`
+  // patch 成功 → 最小 prompt(模型看到干净结果,自然继续)
+  // patch 失败 → 回退到"请重新调用"prompt(hook 从 clientToolStore 注入结果)
+  const resumePrompt = patched
+    ? `[系统通知] 请继续。`
+    : isError
+      ? `[系统通知] 用户为刚才的工具调用 \`${existing.toolName}\` 提供了执行错误结果。请重新调用该工具以获取结果（hook 会注入），然后基于错误结果继续。`
+      : `[系统通知] 用户为刚才的工具调用 \`${existing.toolName}\` 提供了实际执行结果。请重新调用该工具以获取该结果（hook 会自动注入），然后基于结果继续。`
 
-  yield* runClaudeQuery({
+  const ctx: ResumeContext = {
     config,
-    input: resumePrompt,
-    abortController,
-    sessionId: conversationId,
     conversationId,
     userId,
-    isContinuation: true,
+    abortController,
     ensureSandbox,
     ensureCloudbaseMcp,
     ensureSnapshotBootstrap,
@@ -1344,7 +1551,8 @@ async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerat
     permissionStore,
     clientToolNames,
     clientToolStore,
-  })
+  }
+  yield* resumeQuery(ctx, resumePrompt)
 }
 
 // ============================================================
@@ -1361,14 +1569,18 @@ async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerat
  * - allow：让模型重新发起被审批的工具调用（hook 这次会放行）
  * - deny：告诉模型用户拒绝了，不要再重试
  */
-function buildResumePrompt(toolName: string, decision: ApprovalDecision): string {
+function buildResumePrompt(toolName: string, decision: ApprovalDecision, toolInput?: unknown): string {
   if (decision.kind === 'allow') {
-    const updated = decision.updatedInput
-      ? `（用户修改了参数为 ${JSON.stringify(decision.updatedInput)}，请按这些参数调用）`
-      : ''
+    // 优先使用用户修改后的参数；否则注入原始参数，强制模型用相同参数重发，
+    // 避免模型自由发挥改写命令（这是 approve 后重复/变更 tool_call 的根因）。
+    const effectiveInput = decision.updatedInput ?? toolInput
+    const inputHint =
+      effectiveInput !== undefined
+        ? `请使用以下完全相同的参数调用，不要改动：\n${JSON.stringify(effectiveInput)}`
+        : '请使用与刚才完全相同的参数调用。'
     return (
-      `[系统通知] 用户已批准刚才的工具调用 \`${toolName}\`${updated}。` +
-      '请立即重新调用该工具完成原任务，不要再询问用户。'
+      `[系统通知] 用户已批准刚才的工具调用 \`${toolName}\`。` +
+      `请立即重新调用该工具完成原任务，不要再询问用户，也不要改写参数。${inputHint}`
     )
   }
   // deny

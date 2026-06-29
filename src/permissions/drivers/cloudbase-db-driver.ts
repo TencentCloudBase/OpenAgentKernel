@@ -29,7 +29,8 @@
  * `@cloudbase/node-sdk` 按需懒加载。
  */
 
-import { ResourceError } from '../../internal/errors.js'
+import cloudbase from '@cloudbase/node-sdk'
+
 import type { PendingApproval } from '../../public/types.js'
 import type { PermissionStoreDriver } from './types.js'
 
@@ -132,14 +133,7 @@ export class CloudBaseDbPermissionDriver implements PermissionStoreDriver {
 
   private async getApp(): Promise<CloudBaseApp> {
     if (this.app) return this.app
-    const mod = await this.requireCloudBase()
-    const init = (mod.default ?? mod) as { init(opts: Record<string, unknown>): CloudBaseApp }
-    if (typeof init.init !== 'function') {
-      throw new ResourceError(
-        '@cloudbase/node-sdk loaded but `.init()` not available. ' + 'Check the version (>= 3.0.0 required).',
-      )
-    }
-    this.app = init.init({
+    this.app = cloudbase.init({
       region: this.creds.region,
       ...(this.creds.envId ? { env: this.creds.envId } : {}),
       ...(this.creds.secretId ? { secretId: this.creds.secretId } : {}),
@@ -147,19 +141,6 @@ export class CloudBaseDbPermissionDriver implements PermissionStoreDriver {
       ...(this.creds.sessionToken ? { sessionToken: this.creds.sessionToken } : {}),
     })
     return this.app
-  }
-
-  private async requireCloudBase(): Promise<{ default?: unknown; init?: unknown }> {
-    try {
-      const dynamicImport = new Function('p', 'return import(p)') as (
-        p: string,
-      ) => Promise<{ default?: unknown; init?: unknown }>
-      return await dynamicImport('@cloudbase/node-sdk')
-    } catch {
-      throw new ResourceError(
-        '@cloudbase/node-sdk failed to load. Reinstall @cloudbase/open-agent-kernel or check your node_modules.',
-      )
-    }
   }
 
   private async getCollection(): Promise<CloudBaseCollection> {

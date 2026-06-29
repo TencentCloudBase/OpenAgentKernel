@@ -159,45 +159,20 @@ export function parseClientToolSignal(reason: string): ClientToolSignalPayload |
 }
 
 // ─────────────────────────────────────────────────────────
-// askUser sentinel (agent 主动向用户提问)
+// AskUserQuestion (agent 主动向用户提问)
 // ─────────────────────────────────────────────────────────
 //
-// 与 approval / client-tool 同一流终止+resume 范式：
-//   1. 模型调用内置 askUser 工具 → PreToolUse hook 拦截
-//   2. 写 PendingAskUserEntry 到 store → 返回 deny + sentinel
-//   3. AcpStreamAdapter 识别 sentinel → yield ACP `ask_user` 更新
-//   4. Host 收集用户回答 → session.respondAskUser() → resume
+// AskUserQuestion 已去特化为普通 client-tool：模型调用内置 AskUserQuestion 工具
+// (mcp__kernel__AskUserQuestion) 时，走与 client-tool 完全相同的
+// deny + OAK_CLIENT_TOOL_SENTINEL + resume 范式：
+//   1. PreToolUse hook 拦截（isClientTool 含 isAskUserQuestion 判定）
+//   2. 写 PendingClientToolResult（toolName='AskUserQuestion', toolInput={question,options}）
+//   3. deny + client-tool sentinel → AcpStreamAdapter emit `request_permission`
+//      (toolCall.title='AskUserQuestion', rawInput 携带 question/options)
+//   4. Host 收集回答 → session.respondToolUse() → resume，hook 从 store 读到结果放行
+// 客户端按 toolCall.title==='AskUserQuestion' 渲染问卷 UI（特化在客户端）。
 //
-// 与 codebuddy 的区别：codebuddy 的 AskUser 会 hang 住进程；
-// OAK 的 askUser 是流终止+resume，不阻塞、支持分布式。
-
-export const OAK_ASK_USER_SENTINEL = '__OAK_ASK_USER__'
-
-export interface AskUserSignalPayload {
-  [OAK_ASK_USER_SENTINEL]: true
-  conversationId: string
-  toolUseId: string
-  question: string
-  options?: string[]
-}
-
-export function parseAskUserSignal(reason: string): AskUserSignalPayload | null {
-  if (!reason.includes(OAK_ASK_USER_SENTINEL)) return null
-  try {
-    const parsed = JSON.parse(reason) as Partial<AskUserSignalPayload>
-    if (parsed[OAK_ASK_USER_SENTINEL] === true) return parsed as AskUserSignalPayload
-  } catch {
-    /* fall through */
-  }
-  return null
-}
-
-/**
- * askUser 流程已合并到 ClientToolResultStore —— askUser 是 clientTool 的特化
- * (toolName='askUser',question/options 通过 PendingClientToolResult.toolInput 携带,
- *  host 调 respondToolUse() 时把 { answer } 放进 result.output)。
- * 旧的 PendingAskUserEntry 和 AskUserStore 类型已删除,统一用 ClientToolResultStore。
- */
+// 不再有独立的 OAK_ASK_USER_SENTINEL / ask_user variant。
 
 // ─────────────────────────────────────────────────────────
 // Hook factory
@@ -309,8 +284,17 @@ export function createPreToolUsePermissionHook(
     // Lookup is by the bare tool name (config.tools[].name), but the SDK
     // reports the prefixed form 'mcp__custom__<bare>'. Strip the prefix
     // before matching.
-    const bareToolName = toolName.startsWith('mcp__custom__') ? toolName.slice('mcp__custom__'.length) : toolName
-    const isClientTool = !!clientToolNames && clientToolNames.has(bareToolName)
+    //
+    // AskUserQuestion (mcp__kernel__AskUserQuestion) is treated as a built-in
+    // client-tool: it follows the exact same deny+sentinel+resume flow. The
+    // host collects the user's answer and feeds it back via respondToolUse().
+    const bareToolName = toolName.startsWith('mcp__custom__')
+      ? toolName.slice('mcp__custom__'.length)
+      : toolName.startsWith('mcp__kernel__')
+        ? toolName.slice('mcp__kernel__'.length)
+        : toolName
+    const isAskUserQuestion = bareToolName === 'AskUserQuestion'
+    const isClientTool = isAskUserQuestion || (!!clientToolNames && clientToolNames.has(bareToolName))
 
     if (isClientTool && clientToolStore) {
       // Phase A: a result is already waiting in the store (resume path).
@@ -369,73 +353,6 @@ export function createPreToolUsePermissionHook(
       const reasonForModel =
         `Tool call deferred to the client (toolUseId=${toolUseId}). ` +
         `Do not retry this tool yourself; the client is executing it. ` +
-        `Stop the current turn and wait for the next user message.`
-      return {
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'deny',
-          permissionDecisionReason: JSON.stringify({ ...signal, message: reasonForModel }),
-        },
-      }
-    }
-
-    // ── askUser: 内置提问工具 ─────────────────────────────────────────
-    // 当模型调用内置 askUser 工具时，拦截并暂停 turn，让 Host 收集用户回答。
-    // 与 client-tool 共享同一"deny + sentinel → resume"范式 + 同一 clientToolStore
-    // (askUser 是 clientTool 的特化:toolName='askUser',question/options 通过 toolInput 携带,
-    //  host 调 respondToolUse() 时把 { answer } 放进 result.output)。
-    // 工具注册在 'kernel' MCP server 下，SDK 报告为 'mcp__kernel__askUser'。
-    const isAskUserTool = toolName === 'askUser' || bareToolName === 'askUser' || toolName === 'mcp__kernel__askUser'
-    if (isAskUserTool && clientToolStore) {
-      // Resume path: result already waiting
-      if (toolUseId) {
-        const existing = await clientToolStore.get({ conversationId, toolUseId })
-        if (existing?.result) {
-          return {}
-        }
-      }
-
-      // No result → pause. Extract question from tool input.
-      if (!toolUseId) {
-        return {
-          hookSpecificOutput: {
-            hookEventName: 'PreToolUse',
-            permissionDecision: 'deny',
-            permissionDecisionReason: JSON.stringify({
-              reason: 'Internal error: missing toolUseId for askUser flow.',
-              type: 'oak_internal_error',
-            }),
-          },
-        }
-      }
-      const questionText =
-        typeof toolInput === 'object' && toolInput !== null
-          ? ((toolInput as { question?: string }).question ?? String(toolInput))
-          : String(toolInput)
-      const optionsList =
-        typeof toolInput === 'object' && toolInput !== null ? (toolInput as { options?: string[] }).options : undefined
-
-      // askUser 复用 PendingClientToolResult:toolName='askUser',
-      // question/options 包到 toolInput(host 端 respondAskUser 时反向解出)。
-      const pending: PendingClientToolResult = {
-        conversationId,
-        toolUseId,
-        toolName: 'askUser',
-        toolInput: { question: questionText, ...(optionsList ? { options: optionsList } : {}) },
-        createdAt: Date.now(),
-      }
-      await clientToolStore.put(pending)
-
-      const signal: AskUserSignalPayload = {
-        [OAK_ASK_USER_SENTINEL]: true,
-        conversationId,
-        toolUseId,
-        question: questionText,
-        options: optionsList,
-      }
-      const reasonForModel =
-        `Agent asked the user a question (toolUseId=${toolUseId}). ` +
-        `Do not retry this tool yourself; the user is answering. ` +
         `Stop the current turn and wait for the next user message.`
       return {
         hookSpecificOutput: {

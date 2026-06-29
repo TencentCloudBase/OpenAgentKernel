@@ -169,6 +169,10 @@ export async function createCloudBaseMcpServerInProcess(
 
   log(`registered ${tools.length} in-process cloudbase tools`)
 
+  const knownToolNames = new Set(
+    toolDefs.filter((t) => typeof t.name === 'string' && t.name.length > 0).map((t) => t.name),
+  )
+
   return {
     server: createSdkMcpServer({
       name: 'cloudbase',
@@ -176,5 +180,14 @@ export async function createCloudBaseMcpServerInProcess(
       tools,
     }),
     toolCount: tools.length,
+    invoke: async (toolName, input) => {
+      if (!knownToolNames.has(toolName)) return null
+      try {
+        const res = await client.callTool({ name: toolName, arguments: input })
+        return { output: JSON.stringify(res), isError: false }
+      } catch (err) {
+        return { output: err instanceof Error ? err.message : String(err), isError: true }
+      }
+    },
   }
 }

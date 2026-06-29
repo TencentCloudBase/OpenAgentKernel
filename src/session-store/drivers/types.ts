@@ -78,6 +78,18 @@ export interface SessionStoreDriver {
   loadEntriesByMessageIds(key: SessionKey, messageIds: string[]): Promise<SessionStoreEntry[]>
 
   /**
+   * 加载最近 N 条 entries（按 seq 降序取，返回时转回 seq 升序）。
+   *
+   * 比 loadEntries 高效：只拉最近 N 条，不扫描整个 session。用于
+   * patchSentinelToolResult 这类"只关心刚写入的 sentinel"的场景——
+   * sentinel 必然是最近写入的几条之一，全量 load 整个 transcript 浪费。
+   *
+   * @param limit 取最近多少条
+   * @returns 按写入顺序（seq 升序）排列；session 不存在返回 null。
+   */
+  loadRecentEntries(key: SessionKey, limit: number): Promise<SessionStoreEntry[] | null>
+
+  /**
    * 注册 session 元数据（userId 等）。
    *
    * 在 session 创建时调用一次。若 session 已存在则更新 userId。

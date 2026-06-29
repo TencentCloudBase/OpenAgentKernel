@@ -1,6 +1,6 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { AcpSessionUpdate, OakMeta, PermissionOption, ToolKind } from '../acp/types.js'
-import { parseAskUserSignal, parseClientToolSignal, parseInterruptSignal } from '../permissions/hooks.js'
+import { parseClientToolSignal, parseInterruptSignal } from '../permissions/hooks.js'
 import type { StreamAdapter, StreamAdapterContext } from './types.js'
 
 interface AcpAdapterState {
@@ -78,6 +78,19 @@ export class AcpStreamAdapter implements StreamAdapter<AcpSessionUpdate> {
  * Derive the standard ACP {@link ToolKind} from a tool name. Ported from the
  * official @agentclientprotocol/claude-agent-acp `tools.ts` (toolInfoFromToolUse).
  */
+/**
+ * Strip the SDK MCP prefix from a tool name so the ACP `title` is always the
+ * bare tool name (e.g. `mcp__kernel__AskUserQuestion` → `AskUserQuestion`).
+ * Mirrors the stripping in {@link permissions/hooks.ts} so the streaming
+ * tool_call path and the sentinel (request_permission) path surface identical
+ * titles — clients match AskUserQuestion / custom tools by bare name.
+ */
+function stripMcpToolPrefix(toolName: string): string {
+  if (toolName.startsWith('mcp__custom__')) return toolName.slice('mcp__custom__'.length)
+  if (toolName.startsWith('mcp__kernel__')) return toolName.slice('mcp__kernel__'.length)
+  return toolName
+}
+
 function toolKindFromName(toolName: string): ToolKind {
   switch (toolName) {
     case 'Bash':
@@ -202,7 +215,7 @@ function* translateStreamEvent(
   ) {
     const tool: StreamingToolCall = {
       toolCallId: event.content_block.id,
-      toolName: event.content_block.name,
+      toolName: stripMcpToolPrefix(event.content_block.name),
       partialJson: '',
       ...(parentToolCallId ? { parentToolCallId } : {}),
     }
@@ -339,7 +352,9 @@ function* translateUserMessage(
       continue
     }
 
-    // OAK client-tool sentinel → request_permission (client-side tool flow)
+    // OAK client-tool sentinel → request_permission (client-side tool flow).
+    // AskUserQuestion 也走这条路径（title='AskUserQuestion', rawInput含question/options），
+    // 客户端按 title 识别并渲染问卷 UI。
     const clientSignal = reasonText ? parseClientToolSignal(reasonText) : null
     if (clientSignal) {
       yield {
@@ -353,25 +368,6 @@ function* translateUserMessage(
         },
         options: buildPermissionOptions(),
         _meta: oakMeta({ assistantMessageId: context.turnId }) ?? undefined,
-      }
-      continue
-    }
-
-    // OAK askUser sentinel → ask_user (OAK extension)
-    const askUserSignal = reasonText ? parseAskUserSignal(reasonText) : null
-    if (askUserSignal) {
-      yield {
-        sessionUpdate: 'ask_user',
-        toolCallId: askUserSignal.toolUseId,
-        assistantMessageId: context.turnId,
-        questions: [
-          {
-            question: askUserSignal.question,
-            header: 'Agent asks a question',
-            options: (askUserSignal.options ?? []).map((option) => ({ label: option, description: '' })),
-            multiSelect: false,
-          },
-        ],
       }
       continue
     }

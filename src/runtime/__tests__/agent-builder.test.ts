@@ -376,19 +376,11 @@ describe('buildClaudeQueryOptions — cwdPersistEngine', () => {
 // ─────────────────────────────────────────────────────────────────
 
 describe('buildClaudeQueryOptions — streaming', () => {
-  it('default (no config.stream) → includePartialMessages true', () => {
+  // AcpStreamAdapter always handles streaming; includePartialMessages is
+  // always true so the adapter receives stream_event deltas.
+  it('includePartialMessages is always true', () => {
     const { options } = buildClaudeQueryOptions(baseConfig)
     expect(options.includePartialMessages).toBe(true)
-  })
-
-  it('config.stream=true → includePartialMessages true', () => {
-    const { options } = buildClaudeQueryOptions({ ...baseConfig, stream: true })
-    expect(options.includePartialMessages).toBe(true)
-  })
-
-  it('config.stream=false → includePartialMessages false', () => {
-    const { options } = buildClaudeQueryOptions({ ...baseConfig, stream: false })
-    expect(options.includePartialMessages).toBe(false)
   })
 })
 

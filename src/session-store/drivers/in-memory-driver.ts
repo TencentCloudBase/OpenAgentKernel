@@ -66,7 +66,10 @@ export class InMemoryDriver implements SessionStoreDriver {
       const uuid = typeof entry.uuid === 'string' ? entry.uuid : undefined
       if (uuid !== undefined) {
         if (record.uuidSet.has(uuid)) {
-          continue // 幂等：已存在则跳过
+          // Replace existing entry (supports transcript patching)
+          const idx = record.entries.findIndex((e) => e.uuid === uuid)
+          if (idx >= 0) record.entries[idx] = entry
+          continue
         }
         record.uuidSet.add(uuid)
       }
@@ -80,6 +83,13 @@ export class InMemoryDriver implements SessionStoreDriver {
     if (!record) return null
     // 返回拷贝，防止上游修改污染存储
     return record.entries.map((e) => ({ ...e }))
+  }
+
+  async loadRecentEntries(key: SessionKey, limit: number): Promise<SessionStoreEntry[] | null> {
+    const record = this.sessions.get(encodeSessionKey(key))
+    if (!record) return null
+    // 取最近 limit 条（数组末尾），返回拷贝
+    return record.entries.slice(-limit).map((e) => ({ ...e }))
   }
 
   async loadEntriesByMessageIds(key: SessionKey, messageIds: string[]): Promise<SessionStoreEntry[]> {
