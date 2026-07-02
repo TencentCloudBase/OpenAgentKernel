@@ -16,6 +16,10 @@ export type { AcpStreamAdapterOptions, StreamAdapter, StreamAdapterContext } fro
 export type {
   // Top-level union
   AcpSessionUpdate,
+  // JSON-RPC stream messages
+  AcpStreamMessage,
+  JsonRpcNotification,
+  JsonRpcRequestMessage,
   // OAK convenience alias
   AcpTextBlock,
   // OAK _meta extension namespace

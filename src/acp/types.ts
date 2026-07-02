@@ -245,6 +245,43 @@ export interface AskUserUpdate {
   }>
 }
 
+// ── JSON-RPC Messages (unified envelope for all stream output) ──────────
+//
+// Every message the adapter yields now carries the full JSON-RPC envelope so
+// the transport layer simply serializes and sends it as an SSE data line.
+//
+//   REQUEST:     {"jsonrpc":"2.0","id":X,"method":"session/request_permission","params":{...}}
+//   NOTIFICATION: {"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"...","update":{...}}}
+//
+// Previously session updates were bare payloads (just the `update` object)
+// and the transport wrapped them. Now the adapter does the wrapping so all
+// messages have the same shape.
+
+/** JSON-RPC NOTIFICATION (no id — fire-and-forget). */
+export interface JsonRpcNotification {
+  jsonrpc: '2.0'
+  method: string
+  params: Record<string, unknown>
+}
+
+/** JSON-RPC REQUEST (has id — expects a RESPONSE). id is deterministic to avoid collisions. */
+export interface JsonRpcRequestMessage {
+  jsonrpc: '2.0'
+  id: string
+  method: string
+  params: Record<string, unknown>
+  _meta?: Record<string, unknown>
+}
+
+/**
+ * Unified stream message.
+ *
+ * - JsonRpcNotification: full JSON-RPC envelope without id (e.g. session/update)
+ * - JsonRpcRequestMessage: full JSON-RPC envelope with id (e.g. session/request_permission)
+ * - AcpSessionUpdate: bare session update payload (legacy — wrapped by adapt() at boundary)
+ */
+export type AcpStreamMessage = JsonRpcNotification | JsonRpcRequestMessage | AcpSessionUpdate
+
 // ── AcpSessionUpdate: standard SessionUpdate + OAK extensions ────────────
 //
 // `sessionUpdate` discriminators:

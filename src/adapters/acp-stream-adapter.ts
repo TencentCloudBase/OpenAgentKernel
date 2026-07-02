@@ -1,7 +1,17 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
-import type { AcpSessionUpdate, OakMeta, PermissionOption, ToolKind } from '../acp/types.js'
+import type {
+  AcpSessionUpdate,
+  AcpStreamMessage,
+  JsonRpcNotification,
+  JsonRpcRequestMessage,
+  PermissionOption,
+  ToolKind,
+} from '../acp/types.js'
 import { parseClientToolSignal, parseInterruptSignal } from '../permissions/hooks.js'
 import type { StreamAdapter, StreamAdapterContext } from './types.js'
+
+/** Intermediate type: either a bare session update or a full JSON-RPC REQUEST. */
+type TranslateResult = AcpSessionUpdate | JsonRpcRequestMessage
 
 interface AcpAdapterState {
   activeToolBlocks: Map<number, StreamingToolCall>
@@ -25,14 +35,14 @@ export interface AcpStreamAdapterOptions {
   dedupeAssistantText?: boolean
 }
 
-export class AcpStreamAdapter implements StreamAdapter<AcpSessionUpdate> {
+export class AcpStreamAdapter implements StreamAdapter<AcpStreamMessage> {
   private readonly dedupeAssistantText: boolean
 
   constructor(options: AcpStreamAdapterOptions = {}) {
     this.dedupeAssistantText = options.dedupeAssistantText ?? true
   }
 
-  async *adapt(messages: AsyncIterable<SDKMessage>, context: StreamAdapterContext): AsyncIterable<AcpSessionUpdate> {
+  async *adapt(messages: AsyncIterable<SDKMessage>, context: StreamAdapterContext): AsyncIterable<AcpStreamMessage> {
     const state: AcpAdapterState = {
       activeToolBlocks: new Map(),
       emittedToolCalls: new Set(),
@@ -41,8 +51,14 @@ export class AcpStreamAdapter implements StreamAdapter<AcpSessionUpdate> {
     }
 
     for await (const message of messages) {
-      for (const update of this.translateMessage(message, context, state)) {
-        yield update
+      for (const raw of this.translateMessage(message, context, state)) {
+        // Wrap bare session updates in the session/update notification envelope.
+        // JSON-RPC REQUESTs already carry their own envelope — pass through as-is.
+        if ('jsonrpc' in raw) {
+          yield raw
+        } else {
+          yield wrapSessionUpdate(context.sessionId, raw)
+        }
       }
     }
   }
@@ -51,7 +67,7 @@ export class AcpStreamAdapter implements StreamAdapter<AcpSessionUpdate> {
     message: SDKMessage,
     context: StreamAdapterContext,
     state: AcpAdapterState,
-  ): Generator<AcpSessionUpdate, void, unknown> {
+  ): Generator<TranslateResult, void, unknown> {
     switch (message.type) {
       case 'stream_event':
         yield* translateStreamEvent(message, state)
@@ -69,6 +85,11 @@ export class AcpStreamAdapter implements StreamAdapter<AcpSessionUpdate> {
         void context
         return
     }
+  }
+
+  /** Build a deterministic JSON-RPC request id: `${sessionId}:${toolCallId}`. */
+  static requestId(sessionId: string, toolCallId: string): string {
+    return `${sessionId}:${toolCallId}`
   }
 }
 
@@ -136,17 +157,16 @@ function toolKindFromName(toolName: string): ToolKind {
  * Returns undefined when there's nothing to carry, so the emitted update stays
  * clean for the common (non-subagent, non-HITL) case.
  */
-function oakMeta(opts: {
+function flatToolMeta(opts: {
   parentToolCallId?: string | undefined
   assistantMessageId?: string | undefined
   planContent?: string | undefined
-}): OakMeta | null {
-  const oak: Record<string, unknown> = {}
-  if (opts.parentToolCallId) oak.parentToolCallId = opts.parentToolCallId
-  if (opts.assistantMessageId) oak.assistantMessageId = opts.assistantMessageId
-  if (opts.planContent) oak.planContent = opts.planContent
-  if (Object.keys(oak).length === 0) return null
-  return { oak }
+}): Record<string, unknown> | null {
+  const m: Record<string, unknown> = {}
+  if (opts.parentToolCallId) m.parentToolCallId = opts.parentToolCallId
+  if (opts.assistantMessageId) m.assistantMessageId = opts.assistantMessageId
+  if (opts.planContent) m.planContent = opts.planContent
+  return Object.keys(m).length > 0 ? m : null
 }
 
 /**
@@ -160,6 +180,15 @@ function buildPermissionOptions(): PermissionOption[] {
     { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
     { optionId: 'reject', name: 'Reject', kind: 'reject_once' },
   ]
+}
+
+/** Wrap a bare session update in the standard ACP session/update notification envelope. */
+function wrapSessionUpdate(sessionId: string, update: AcpSessionUpdate): JsonRpcNotification {
+  return {
+    jsonrpc: '2.0',
+    method: 'session/update',
+    params: { sessionId, update },
+  }
 }
 
 function* translateStreamEvent(
@@ -229,7 +258,9 @@ function* translateStreamEvent(
       kind: toolKindFromName(tool.toolName),
       status: 'in_progress',
       rawInput: toRecordInput(event.content_block.input),
-      ...(tool.parentToolCallId ? { _meta: oakMeta({ parentToolCallId: tool.parentToolCallId }) ?? undefined } : {}),
+      ...(tool.parentToolCallId
+        ? { _meta: flatToolMeta({ parentToolCallId: tool.parentToolCallId }) ?? undefined }
+        : {}),
     }
     return
   }
@@ -249,7 +280,9 @@ function* translateStreamEvent(
       toolCallId: tool.toolCallId,
       status: 'in_progress',
       rawInput: parseJsonOrText(tool.partialJson),
-      ...(tool.parentToolCallId ? { _meta: oakMeta({ parentToolCallId: tool.parentToolCallId }) ?? undefined } : {}),
+      ...(tool.parentToolCallId
+        ? { _meta: flatToolMeta({ parentToolCallId: tool.parentToolCallId }) ?? undefined }
+        : {}),
     }
     return
   }
@@ -265,7 +298,9 @@ function* translateStreamEvent(
         toolCallId: tool.toolCallId,
         status: 'in_progress',
         rawInput: parseJsonOrText(tool.partialJson),
-        ...(tool.parentToolCallId ? { _meta: oakMeta({ parentToolCallId: tool.parentToolCallId }) ?? undefined } : {}),
+        ...(tool.parentToolCallId
+          ? { _meta: flatToolMeta({ parentToolCallId: tool.parentToolCallId }) ?? undefined }
+          : {}),
       }
     }
   }
@@ -302,7 +337,7 @@ function* translateAssistantMessage(
           toolCallId: block.id,
           status: 'in_progress',
           rawInput,
-          ...(parentToolCallId ? { _meta: oakMeta({ parentToolCallId }) ?? undefined } : {}),
+          ...(parentToolCallId ? { _meta: flatToolMeta({ parentToolCallId }) ?? undefined } : {}),
         }
       } else {
         state.emittedToolCalls.add(block.id)
@@ -313,7 +348,7 @@ function* translateAssistantMessage(
           kind: toolKindFromName(block.name),
           status: 'in_progress',
           rawInput,
-          ...(parentToolCallId ? { _meta: oakMeta({ parentToolCallId }) ?? undefined } : {}),
+          ...(parentToolCallId ? { _meta: flatToolMeta({ parentToolCallId }) ?? undefined } : {}),
         }
       }
     }
@@ -324,7 +359,7 @@ function* translateUserMessage(
   message: SDKMessage,
   context: StreamAdapterContext,
   state: AcpAdapterState,
-): Generator<AcpSessionUpdate, void, unknown> {
+): Generator<TranslateResult, void, unknown> {
   const content = (message as { message?: { content?: unknown[] } }).message?.content
   if (!Array.isArray(content)) return
 
@@ -332,42 +367,33 @@ function* translateUserMessage(
     if (!isRecord(block) || block.type !== 'tool_result' || typeof block.tool_use_id !== 'string') continue
     const output = block.content ?? null
     const reasonText = extractTextContent(output)
-    const toolName = state.toolCallNames.get(block.tool_use_id) ?? 'unknown'
 
-    // OAK HITL sentinel → request_permission (stop-and-resume)
+    // ── OAK HITL sentinel → session/request_permission JSON-RPC REQUEST ──
     const interrupt = reasonText ? parseInterruptSignal(reasonText) : null
     if (interrupt) {
-      yield {
-        sessionUpdate: 'request_permission',
-        sessionId: context.sessionId,
-        toolCall: {
-          toolCallId: interrupt.toolUseId,
-          title: interrupt.toolName,
-          kind: toolKindFromName(interrupt.toolName),
-          rawInput: toRecordInput(interrupt.toolInput),
-        },
-        options: buildPermissionOptions(),
-        _meta: oakMeta({ assistantMessageId: context.turnId }) ?? undefined,
-      }
+      yield buildRequestPermissionRequest(
+        context.sessionId,
+        interrupt.toolUseId,
+        interrupt.toolName,
+        interrupt.toolInput,
+        context.turnId,
+      )
       continue
     }
 
-    // OAK client-tool sentinel → request_permission (client-side tool flow).
-    // AskUserQuestion 也走这条路径（title='AskUserQuestion', rawInput含question/options），
-    // 客户端按 title 识别并渲染问卷 UI。
+    // ── OAK client-tool sentinel → client/<ToolName> JSON-RPC REQUEST ──
     const clientSignal = reasonText ? parseClientToolSignal(reasonText) : null
     if (clientSignal) {
       yield {
-        sessionUpdate: 'request_permission',
-        sessionId: context.sessionId,
-        toolCall: {
+        jsonrpc: '2.0' as const,
+        id: AcpStreamAdapter.requestId(context.sessionId, clientSignal.toolUseId),
+        method: `client/${clientSignal.toolName}`,
+        params: toRecordInput(clientSignal.toolInput),
+        _meta: {
+          sessionId: context.sessionId,
           toolCallId: clientSignal.toolUseId,
-          title: clientSignal.toolName,
-          kind: toolKindFromName(clientSignal.toolName),
-          rawInput: toRecordInput(clientSignal.toolInput),
+          assistantMessageId: context.turnId,
         },
-        options: buildPermissionOptions(),
-        _meta: oakMeta({ assistantMessageId: context.turnId }) ?? undefined,
       }
       continue
     }
@@ -395,7 +421,41 @@ function* translateUserMessage(
   }
 }
 
-function* translateResultMessage(message: SDKMessage): Generator<AcpSessionUpdate, void, unknown> {
+/**
+ * Build a standard ACP `session/request_permission` JSON-RPC REQUEST.
+ *
+ * id = `${sessionId}:${toolUseId}` — deterministic, no collision risk across sessions.
+ */
+function buildRequestPermissionRequest(
+  sessionId: string,
+  toolUseId: string,
+  toolName: string,
+  toolInput: unknown,
+  assistantMessageId?: string,
+): JsonRpcRequestMessage {
+  const params: Record<string, unknown> = {
+    sessionId,
+    toolCall: {
+      toolCallId: toolUseId,
+      title: toolName,
+      kind: toolKindFromName(toolName),
+      status: 'pending',
+      rawInput: toRecordInput(toolInput),
+    },
+    options: buildPermissionOptions(),
+  }
+  if (assistantMessageId) {
+    ;(params.toolCall as Record<string, unknown>)._meta = { assistantMessageId }
+  }
+  return {
+    jsonrpc: '2.0' as const,
+    id: AcpStreamAdapter.requestId(sessionId, toolUseId),
+    method: 'session/request_permission',
+    params,
+  }
+}
+
+function* translateResultMessage(message: SDKMessage): Generator<TranslateResult, void, unknown> {
   // Emit usage_update (standard) when the SDK result carries token usage.
   const usage = (message as { usage?: { input_tokens?: number; output_tokens?: number } }).usage
   if (usage && typeof usage.input_tokens === 'number' && typeof usage.output_tokens === 'number') {

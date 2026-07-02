@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk'
 import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
 import { AcpStreamAdapter } from '../adapters/index.js'
-import type { AcpSessionUpdate } from '../acp/index.js'
+import type { AcpStreamMessage } from '../acp/index.js'
 import { InvalidConfigError, ResourceError } from '../internal/errors.js'
 import {
   createHookLocalState,
@@ -499,7 +499,7 @@ function createSession(deps: SessionDeps): Session {
     id: conversationId,
     userId,
 
-    send(input: string | SessionInput): AsyncIterable<AcpSessionUpdate> {
+    send(input: string | SessionInput): AsyncIterable<AcpStreamMessage> {
       abortController = new AbortController()
       const isContinuation = hasStarted
       hasStarted = true
@@ -531,7 +531,7 @@ function createSession(deps: SessionDeps): Session {
      *
      * 调用方不需要持有"那次 send 的 generator"——业务可在任意进程 / 节点（store 共享前提下）调本方法。
      */
-    respondApproval(opts: { toolUseId: string; decision: ApprovalDecision }): AsyncIterable<AcpSessionUpdate> {
+    respondApproval(opts: { toolUseId: string; decision: ApprovalDecision }): AsyncIterable<AcpStreamMessage> {
       abortController = new AbortController()
       return runApprovalResume({
         config,
@@ -567,7 +567,7 @@ function createSession(deps: SessionDeps): Session {
      *      the transcript but is harmless because the hook's deny outcome
      *      already aborted that branch of reasoning.
      */
-    respondToolUse(opts: { toolUseId: string; output: unknown; isError?: boolean }): AsyncIterable<AcpSessionUpdate> {
+    respondToolUse(opts: { toolUseId: string; output: unknown; isError?: boolean }): AsyncIterable<AcpStreamMessage> {
       abortController = new AbortController()
       return runClientToolResume({
         config,
@@ -982,7 +982,7 @@ interface RunClaudeQueryArgs {
   clientToolStore?: ClientToolResultStore
 }
 
-async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<AcpSessionUpdate, void, unknown> {
+async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<AcpStreamMessage, void, unknown> {
   const {
     config,
     input,
@@ -1168,7 +1168,7 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<AcpSess
   }
 }
 
-function* createErrorUpdates(message: string): Generator<AcpSessionUpdate, void, unknown> {
+function* createErrorUpdates(message: string): Generator<AcpStreamMessage, void, unknown> {
   yield {
     sessionUpdate: 'log',
     level: 'error',
@@ -1208,7 +1208,7 @@ interface ResumeContext {
  * 以 isContinuation=true 调一轮 runClaudeQuery。approval 直调 / client-tool
  * resume / approval prompt-resume 三处共用,消除 ~15 行重复的 runClaudeQuery({...}) 块。
  */
-async function* resumeQuery(ctx: ResumeContext, input: string): AsyncGenerator<AcpSessionUpdate, void, unknown> {
+async function* resumeQuery(ctx: ResumeContext, input: string): AsyncGenerator<AcpStreamMessage, void, unknown> {
   yield* runClaudeQuery({
     config: ctx.config,
     input,
@@ -1293,7 +1293,7 @@ interface RunApprovalResumeArgs {
     | undefined
 }
 
-async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<AcpSessionUpdate, void, unknown> {
+async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<AcpStreamMessage, void, unknown> {
   const {
     config,
     conversationId,
@@ -1492,7 +1492,7 @@ interface RunClientToolResumeArgs {
   clientToolStore?: ClientToolResultStore
 }
 
-async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerator<AcpSessionUpdate, void, unknown> {
+async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerator<AcpStreamMessage, void, unknown> {
   const {
     config,
     conversationId,

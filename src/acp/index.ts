@@ -49,4 +49,8 @@ export type {
   AgentPhaseName,
   // Top-level union
   AcpSessionUpdate,
+  // JSON-RPC stream messages
+  AcpStreamMessage,
+  JsonRpcNotification,
+  JsonRpcRequestMessage,
 } from './types.js'

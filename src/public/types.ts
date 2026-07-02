@@ -8,7 +8,7 @@
 
 import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
 import type { z } from 'zod'
-import type { AcpSessionUpdate } from '../acp/index.js'
+import type { AcpSessionUpdate, AcpStreamMessage } from '../acp/index.js'
 import type { StreamAdapter } from '../adapters/index.js'
 
 /**
@@ -574,7 +574,7 @@ export interface AgentConfig {
    * @internal 高级覆盖：未传时使用内置 AcpStreamAdapter。
    * 常规用户无需声明此字段，session.send() 默认输出 ACP session/update。
    */
-  streamAdapter?: StreamAdapter<AcpSessionUpdate>
+  streamAdapter?: StreamAdapter<AcpStreamMessage>
 }
 
 /**
@@ -731,35 +731,27 @@ export interface Session {
    * 发送用户消息，返回事件流。
    * 字符串糖：等价于 { type: 'message', content: input }
    */
-  send(input: string | SessionInput): AsyncIterable<AcpSessionUpdate>
+  send(input: string | SessionInput): AsyncIterable<AcpStreamMessage>
 
   /**
    * 响应工具审批（PR #7.0）。
    *
-   * 当 ACP 更新流给出 `request_permission` 后，业务收集到用户决策（allow/deny/scope/...）
-   * 调本方法注入决策。kernel 把决策写入 PermissionStore，然后内部 resume 一次 SDK 运行：
-   * Hook 再次触发时从 store 读到决策并放行 / 拒绝，agent 继续往下跑。
+   * 当 ACP 更新流给出 `session/request_permission` JSON-RPC REQUEST 后，业务收集到
+   * 用户决策（allow/deny/scope/...）调本方法注入决策。kernel 把决策写入 PermissionStore，
+   * 然后内部 resume 一次 SDK 运行。
    *
-   * 返回的事件流是"决策注入后"的 ACP 更新流（可能包含 agent_message_chunk /
-   * tool_call / tool_call_update / 再次的 request_permission / agent_phase 等）。
-   *
-   * 注意：调用方应确保同一 toolUseId 不被并发响应；重复响应会用最后一次为准。
+   * 返回的事件流是"决策注入后"的 ACP 流（AcpStreamMessage 联合：标准 session updates +
+   * 可能的 JSON-RPC REQUESTs）。
    */
-  respondApproval(opts: { toolUseId: string; decision: ApprovalDecision }): AsyncIterable<AcpSessionUpdate>
+  respondApproval(opts: { toolUseId: string; decision: ApprovalDecision }): AsyncIterable<AcpStreamMessage>
 
   /**
    * PR #7.1: 注入客户端工具结果并 resume agent 运行。
    *
-   * 配套 ACP `request_permission` 使用：业务侧在客户端执行完 AgentConfig.tools[]
-   * 中声明的工具后，调本方法把结果回灌给 kernel：
-   *   1. kernel 把结果写入内部 client-tool store
-   *   2. 起一轮 SDK query（resume）→ 模型重发同名工具 → PreToolUse hook 这次
-   *      把结果通过 updatedInput 注入 → 包装的 MCP stub 直接返回它，写一条
-   *      正常（非 error）的 tool_result 进 transcript。
-   *
-   * 返回的事件流是"结果注入后"的 ACP 更新流。
+   * 客户端执行完 `client/<ToolName>` REQUEST 对应的工具后，调本方法把结果回灌给 kernel。
+   * 返回的事件流是"结果注入后"的 ACP 流。
    */
-  respondToolUse(opts: { toolUseId: string; output: unknown; isError?: boolean }): AsyncIterable<AcpSessionUpdate>
+  respondToolUse(opts: { toolUseId: string; output: unknown; isError?: boolean }): AsyncIterable<AcpStreamMessage>
 
   /** 拉取历史消息 */
   getHistory(opts?: { limit?: number; before?: number }): Promise<MessageRecord[]>
