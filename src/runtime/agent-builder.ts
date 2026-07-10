@@ -446,6 +446,18 @@ export function buildClaudeQueryOptions(
     //   - sandbox.provider='local' → 自动开 'claude_code' preset(SDK 全部内置工具)
     //   - 沙箱(ags-stateful)能力另经 mcpServers 提供
     tools: resolveBuiltinTools(config, sandboxMode),
+    // ── pathToClaudeCodeExecutable 透传 ──
+    // 默认情况下 SDK 用 require.resolve("@anthropic-ai/claude-agent-sdk-<platform>/claude")
+    // 来定位原生二进制。在 SCF 等只读 /var/user 的运行时里,平台包无法预装进
+    // node_modules(云构建会触发 Dependency error / 超体积上限),只能运行时下载到
+    // 可写目录(如 /tmp)。此时通过 OAK_CLAUDE_CODE_EXECUTABLE_PATH 显式指定二进制
+    // 绝对路径,SDK 会直接 spawn 它而跳过 require.resolve 探测。
+    // 该变量未设置时不影响原有行为(SDK 仍走默认解析)。
+    // 注意:用 OAK_ 前缀而非 CLAUDE_,因为我们把整份 env 透传进 SDK 子进程,CLAUDE_
+    // 前缀的变量会被 Claude CLI 误读,而 OAK_ 命名空间只属于我们自己。
+    ...(process.env.OAK_CLAUDE_CODE_EXECUTABLE_PATH
+      ? { pathToClaudeCodeExecutable: process.env.OAK_CLAUDE_CODE_EXECUTABLE_PATH }
+      : {}),
   }
 
   return {
