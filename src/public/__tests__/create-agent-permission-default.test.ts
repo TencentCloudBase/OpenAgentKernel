@@ -130,7 +130,7 @@ describe('createAgent — default permission store', () => {
     })
   })
 
-  it('rejects userMemory in TCB_API_KEY-only mode with an explicit credentials error', () => {
+  it('accepts userMemory in TCB_API_KEY-only mode', () => {
     process.env.TCB_API_KEY = 'test-access-key'
 
     expect(() =>
@@ -139,7 +139,20 @@ describe('createAgent — default permission store', () => {
         model: 'glm-5.1',
         userMemory: true,
       }),
-    ).toThrow(/userMemory requires AgentConfig\.credentials/)
+    ).not.toThrow()
+  })
+
+  it('still rejects userMemory when neither CAM credentials nor TCB_API_KEY is available', () => {
+    expect(() =>
+      createAgent({
+        envId: 'env-test',
+        model: {
+          id: 'glm-5.1',
+          apiKey: 'model-key-is-not-a-cloudbase-access-key',
+        },
+        userMemory: true,
+      }),
+    ).toThrow(/userMemory requires AgentConfig\.credentials.*TCB_API_KEY/)
   })
 
   it('keeps custom permission store untouched', () => {

@@ -1,6 +1,9 @@
 import { randomUUID } from 'node:crypto'
+import * as path from 'node:path'
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk'
 import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
+import { ClaudeHomeSyncEngine, deriveClaudeConfigDir } from '../claude-home/index.js'
+import { CloudBaseAccessKeyClaudeHomeStore } from '../claude-home/cloudbase-cos-store.js'
 import { InvalidConfigError, ResourceError } from '../internal/errors.js'
 import {
   CloudBaseDbPermissionDriver,
@@ -35,6 +38,8 @@ import type {
   SessionStartOptions,
   SessionSummary,
 } from './types.js'
+
+const userMemoryAccessKeys = new WeakMap<AgentConfig, string>()
 
 type ResolvedPlatformCredentials = NonNullable<AgentConfig['credentials']> & { envId: string }
 
@@ -118,7 +123,7 @@ export function createAgent(config: AgentConfig): Agent {
 function normalizeAgentConfig(config: AgentConfig): AgentConfig {
   const credentials = resolvePlatformCredentials(config)
   const accessKey = credentials ? undefined : resolveCloudBaseAccessKey()
-  assertUserMemoryCredentials(config)
+  assertUserMemoryCredentials(config, accessKey)
 
   const normalizedConfig: AgentConfig = {
     ...config,
@@ -127,22 +132,24 @@ function normalizeAgentConfig(config: AgentConfig): AgentConfig {
     storage: resolveStorageConfig(config),
   }
 
-  return {
+  const resolvedConfig: AgentConfig = {
     ...normalizedConfig,
     permissions: resolvePermissionConfig(normalizedConfig, accessKey),
     session: resolveSessionConfig(normalizedConfig, accessKey),
   }
+  if (accessKey) userMemoryAccessKeys.set(resolvedConfig, accessKey)
+  return resolvedConfig
 }
 
-function assertUserMemoryCredentials(config: AgentConfig): void {
-  const enabled =
-    config.userMemory === true ||
-    (typeof config.userMemory === 'object' && config.userMemory.enabled === true)
+function isUserMemoryEnabled(userMemory: AgentConfig['userMemory']): boolean {
+  return userMemory === true || (typeof userMemory === 'object' && userMemory.enabled === true)
+}
 
-  if (enabled && !config.credentials) {
+function assertUserMemoryCredentials(config: AgentConfig, accessKey?: string): void {
+  if (isUserMemoryEnabled(config.userMemory) && !config.credentials && !accessKey) {
     throw new InvalidConfigError(
-      'AgentConfig.userMemory requires AgentConfig.credentials (secretId and secretKey). ' +
-        'TCB_API_KEY accessKey only supports FlexDB session and HITL persistence.',
+      'AgentConfig.userMemory requires AgentConfig.credentials (secretId and secretKey) ' +
+        'or process.env.TCB_API_KEY.',
     )
   }
 }
@@ -933,13 +940,58 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
     const effectivePermissions = config.permissions ? { ...config.permissions, store: permissionStore } : undefined
     const effectiveConfig = effectivePermissions ? { ...config, permissions: effectivePermissions } : config
 
-    const built = buildClaudeQueryOptions(effectiveConfig, {
-      sandboxInstance: sandbox,
-      extraMcpServers: cloudbaseMcp ? { cloudbase: cloudbaseMcp } : undefined,
-      conversationId,
-      hookLocalState,
-      userId,
-    })
+    const accessKey = userMemoryAccessKeys.get(config)
+    const accessKeyUserMemoryEnabled = Boolean(
+      accessKey && !effectiveConfig.credentials && isUserMemoryEnabled(effectiveConfig.userMemory),
+    )
+    let built = buildClaudeQueryOptions(
+      accessKeyUserMemoryEnabled ? { ...effectiveConfig, userMemory: false } : effectiveConfig,
+      {
+        sandboxInstance: sandbox,
+        extraMcpServers: cloudbaseMcp ? { cloudbase: cloudbaseMcp } : undefined,
+        conversationId,
+        hookLocalState,
+        userId,
+      },
+    )
+
+    if (accessKeyUserMemoryEnabled) {
+      try {
+        const claudeConfigDir = deriveClaudeConfigDir(effectiveConfig.envId, userId)
+        const accessKeySyncEngine = new ClaudeHomeSyncEngine({
+          store: new CloudBaseAccessKeyClaudeHomeStore({
+            envId: effectiveConfig.envId,
+            accessKey: accessKey as string,
+          }),
+          ctx: { envId: effectiveConfig.envId, userId },
+          localDir: claudeConfigDir,
+        })
+        const settingSources = [...(built.options.settingSources ?? [])]
+        if (!settingSources.includes('user')) settingSources.push('user')
+
+        // Build all accessKey user-memory state first, then replace the result in
+        // one assignment. If construction fails, the builder result remains
+        // untouched and this turn follows the same graceful-degrade semantics as
+        // the existing CAM path.
+        built = {
+          ...built,
+          options: {
+            ...built.options,
+            env: { ...(built.options.env ?? {}), CLAUDE_CONFIG_DIR: claudeConfigDir },
+            cwd: effectiveConfig.cwd ?? path.dirname(claudeConfigDir),
+            settingSources,
+            persistSession: true,
+          },
+          syncEngine: accessKeySyncEngine,
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          '[oak/userMemory] failed to construct sync engine, sync disabled this turn:',
+          (err as Error)?.message,
+        )
+      }
+    }
     const options = built.options
     syncEngine = built.syncEngine
     snapshotEngine = built.snapshotEngine
