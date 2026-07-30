@@ -513,7 +513,9 @@ export interface AgentConfig {
    *
    * 默认:disabled(等价 v0 行为)。
    *
-   * 依赖:必须提供 AgentConfig.credentials；TCB_API_KEY accessKey 不支持 COS 管理面。
+   * 依赖:提供 AgentConfig.credentials(CAM,走 manager-node 目录枚举),或仅有
+   * TCB_API_KEY(走 COS 数据面 + sidecar manifest 索引)。accessKey 模式下历史
+   * projects/* 与 agent-memory/* 无法自动发现(数据面无列目录接口),CLAUDE.md 可自动补录。
    *
    * 依赖:启用时该 envId 必须开通 CloudBase COS。COS 不可达时记 warning,
    * 不阻塞 send(graceful degrade — agent 仍可工作,只是这次不同步)。
