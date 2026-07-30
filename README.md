@@ -55,7 +55,8 @@ const agent = createAgent({
   envId: 'your-env-id', // 必填。默认模型网关、DB、Storage、sandbox 均以此为锚点
 
   credentials: {
-    // 操作 CloudBase DB / Storage / sandbox 控制面时需要
+    // 可选。会话/审批/记忆在仅有 TCB_API_KEY 时也能持久化（走数据面 accessKey）；
+    // 多模态附件上传、历史 projects/* 记忆的自动发现仍需 credentials（CAM 密钥）
     secretId: 'AKIDxxxxxxxx',
     secretKey: 'xxxxxxxx',
     // sessionToken: '...', // STS 临时凭证（可选）
@@ -68,9 +69,9 @@ const agent = createAgent({
   // model: { id: 'custom-model', apiKey: '...', apiBaseUrl: 'https://...' }, // 自带 endpoint
   systemPrompt: 'You are a helpful CloudBase assistant. Reply concisely in Chinese.',
 
-  // ── 会话持久化（有 credentials 时默认启用 CloudBase FlexDB）──
+  // ── 会话持久化（有 credentials 或 TCB_API_KEY 时默认启用 CloudBase FlexDB）──
   session: {
-    // enabled: true, // false 显式关闭；无 credentials 时不启用
+    // enabled: true, // false 显式关闭；两种凭证都没有时不启用
     // tablePrefix: 'oak_', // 表前缀 → oak_sessions / oak_session_entries 等
     // projectKey: 'your-env-id', // 多租户隔离 key，默认 envId
     // database: 'flexdb', // 当前内置 flexdb
@@ -111,7 +112,7 @@ const agent = createAgent({
   // cwd: '/app/skills-bundle', // skills 和项目级 CLAUDE.md 扫描根目录
   // skills: { enabled: 'all' }, // 需要 cwd/.claude/skills/ 目录
 
-  // ── 用户长期记忆（需 credentials + COS）────────────────────
+  // ── 用户长期记忆（需 credentials 或 TCB_API_KEY，落 COS）───
   // userMemory: true, // 同步 CLAUDE.md / agent-memory 等到 CloudBase COS
 
   // ── 生命周期钩子 ───────────────────────────────────────────
@@ -179,7 +180,7 @@ for await (const event of session.send('还记得我的名字吗？')) {
 
 ### 会话持久化和跨进程恢复
 
-传入 `credentials` 后，SDK 默认启用 CloudBase FlexDB session store，无需手动 new driver / store：
+传入 `credentials`（或仅设置 `TCB_API_KEY` 环境变量）后，SDK 默认启用 CloudBase FlexDB session store，无需手动 new driver / store：
 
 ```typescript
 const agent = createAgent({
