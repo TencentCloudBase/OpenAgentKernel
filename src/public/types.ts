@@ -293,8 +293,8 @@ export interface PendingApproval {
 /**
  * 审批状态外部存储接口（让 HITL 支持分布式扩展）。
  *
- * - 不传 store 且已提供 credentials：kernel 默认使用 CloudBase FlexDB 分布式存储
- * - 不传 store 且未提供 credentials：kernel 使用进程内 `InMemoryPermissionStore`（单进程可用）
+ * - 不传 store 且已提供 credentials 或 TCB_API_KEY：kernel 默认使用 CloudBase FlexDB 分布式存储
+ * - 不传 store 且两种凭证都没有：kernel 使用进程内 `InMemoryPermissionStore`（单进程可用）
  * - 传 store：可跨节点 / 跨进程 resume；同一 conversationId 的请求可路由到任意节点
  *
  * 接口与 SessionStoreDriver 同套路：内置 InMemory（默认）+ CloudBaseDb（生产）+ 用户可自实现。
@@ -339,8 +339,8 @@ export interface PermissionConfig {
   /**
    * 审批状态存储。
    *
-   * 不传且已提供 credentials：默认使用 CloudBase FlexDB 分布式存储；
-   * 不传且未提供 credentials：走进程内 `InMemoryPermissionStore`。
+   * 不传且已提供 credentials 或 TCB_API_KEY：默认使用 CloudBase FlexDB 分布式存储；
+   * 不传且两种凭证都没有：走进程内 `InMemoryPermissionStore`。
    */
   store?: PermissionStore
 
@@ -443,7 +443,10 @@ export interface AgentConfig {
 
   // ── 资源锚点 ────────────────────────────────────
   envId: string
-  /** 平台凭证，用于初始化 CloudBase SDK。不传则依赖下游 SDK 自身行为或按能力报错。 */
+  /**
+   * CAM 平台凭证，用于 CloudBase 管理面、COS 和数据面。
+   * 不传时仅 FlexDB session/HITL 可回退到 process.env.TCB_API_KEY。
+   */
   credentials?: PlatformCredentials
 
   // ── 模型 ────────────────────────────────────────
@@ -510,6 +513,8 @@ export interface AgentConfig {
    *
    * 默认:disabled(等价 v0 行为)。
    *
+   * 依赖:必须提供 AgentConfig.credentials；TCB_API_KEY accessKey 不支持 COS 管理面。
+   *
    * 依赖:启用时该 envId 必须开通 CloudBase COS。COS 不可达时记 warning,
    * 不阻塞 send(graceful degrade — agent 仍可工作,只是这次不同步)。
    *
@@ -527,9 +532,9 @@ export interface AgentConfig {
  * 会话持久化配置。
  *
  * 默认行为：
- * - 传了 `AgentConfig.credentials` 且未显式关闭时，自动使用 CloudBase FlexDB
- *   持久化 session，表前缀默认 `oak_`，projectKey 默认 `envId`。
- * - 未传 credentials 时保持本地临时 transcript，避免无凭证 quickstart 报错。
+ * - 传了 `AgentConfig.credentials` 或设置了 `process.env.TCB_API_KEY`，且未显式关闭时，
+ *   自动使用 CloudBase FlexDB 持久化 session，表前缀默认 `oak_`，projectKey 默认 `envId`。
+ * - 两者都没有时保持本地临时 transcript，避免无凭证 quickstart 报错。
  * - 传 `enabled: false` 可显式关闭默认持久化。
  *
  * 注意：本接口刻意不导出底层 SDK 的 `SessionStore` 类型，避免锁定 runtime。
@@ -540,7 +545,8 @@ export interface SessionConfig {
   /**
    * 是否启用 session 持久化。
    *
-   * - `undefined`：有 credentials 时默认启用 CloudBase FlexDB；无 credentials 时不启用
+   * - `undefined`：有 credentials 或 TCB_API_KEY 时默认启用 CloudBase FlexDB；
+   *   两者都没有时不启用
    * - `false`：显式关闭持久化
    * - `true`：强制启用；若缺少所需配置会在 createAgent 阶段报错
    */

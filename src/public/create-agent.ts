@@ -9,6 +9,7 @@ import {
   InMemoryPermissionStore,
   type PreToolUseHookLocalState,
 } from '../permissions/index.js'
+import { resolveCloudBaseAccessKey } from '../resources/index.js'
 import { buildClaudeQueryOptions } from '../runtime/agent-builder.js'
 import { createTranslatorState, translateSdkMessage } from '../runtime/event-translator.js'
 import { buildPromptAsync } from '../runtime/prompt-builder.js'
@@ -116,6 +117,9 @@ export function createAgent(config: AgentConfig): Agent {
 
 function normalizeAgentConfig(config: AgentConfig): AgentConfig {
   const credentials = resolvePlatformCredentials(config)
+  const accessKey = credentials ? undefined : resolveCloudBaseAccessKey()
+  assertUserMemoryCredentials(config)
+
   const normalizedConfig: AgentConfig = {
     ...config,
     ...(credentials ? { credentials } : {}),
@@ -125,8 +129,21 @@ function normalizeAgentConfig(config: AgentConfig): AgentConfig {
 
   return {
     ...normalizedConfig,
-    permissions: resolvePermissionConfig(normalizedConfig),
-    session: resolveSessionConfig(normalizedConfig),
+    permissions: resolvePermissionConfig(normalizedConfig, accessKey),
+    session: resolveSessionConfig(normalizedConfig, accessKey),
+  }
+}
+
+function assertUserMemoryCredentials(config: AgentConfig): void {
+  const enabled =
+    config.userMemory === true ||
+    (typeof config.userMemory === 'object' && config.userMemory.enabled === true)
+
+  if (enabled && !config.credentials) {
+    throw new InvalidConfigError(
+      'AgentConfig.userMemory requires AgentConfig.credentials (secretId and secretKey). ' +
+        'TCB_API_KEY accessKey only supports FlexDB session and HITL persistence.',
+    )
   }
 }
 
@@ -226,7 +243,7 @@ function resolveStorageConfig(config: AgentConfig): StorageProvider | undefined 
   })
 }
 
-function resolveSessionConfig(config: AgentConfig): AgentConfig['session'] {
+function resolveSessionConfig(config: AgentConfig, accessKey?: string): AgentConfig['session'] {
   const session = config.session
   if (session?.enabled === false) return undefined
 
@@ -234,7 +251,7 @@ function resolveSessionConfig(config: AgentConfig): AgentConfig['session'] {
     return session
   }
 
-  const shouldEnable = session?.enabled === true || config.credentials !== undefined
+  const shouldEnable = session?.enabled === true || config.credentials !== undefined || accessKey !== undefined
   if (!shouldEnable) return session
 
   const provider = session?.provider ?? 'cloudbase'
@@ -253,18 +270,25 @@ function resolveSessionConfig(config: AgentConfig): AgentConfig['session'] {
     )
   }
   const credentials = resolvePlatformCredentials(config)
-  if (!credentials) {
+  if (!credentials && !accessKey) {
     throw new InvalidConfigError(
-      'AgentConfig.session.enabled=true requires AgentConfig.credentials for the default CloudBase FlexDB session store.',
+      'AgentConfig.session.enabled=true requires AgentConfig.credentials or process.env.TCB_API_KEY ' +
+        'for the default CloudBase FlexDB session store.',
     )
   }
 
   const projectKey = session?.projectKey ?? config.envId
+  const driver = credentials
+    ? new CloudBaseDbDriver({
+        credentials,
+        collectionPrefix: session?.tablePrefix,
+      })
+    : new CloudBaseDbDriver({
+        accessKey: { envId: config.envId, accessKey: accessKey as string },
+        collectionPrefix: session?.tablePrefix,
+      })
   const store = new CloudBaseSessionStore({
-    driver: new CloudBaseDbDriver({
-      credentials,
-      collectionPrefix: session?.tablePrefix,
-    }),
+    driver,
     projectKey,
   })
 
@@ -277,19 +301,21 @@ function resolveSessionConfig(config: AgentConfig): AgentConfig['session'] {
   }
 }
 
-function resolvePermissionConfig(config: AgentConfig): AgentConfig['permissions'] {
+function resolvePermissionConfig(config: AgentConfig, accessKey?: string): AgentConfig['permissions'] {
   const permissions = config.permissions
   if (!permissions || permissions.requireApproval === undefined || permissions.store) return permissions
 
   const credentials = resolvePlatformCredentials(config)
-  if (!credentials) return permissions
+  if (!credentials && !accessKey) return permissions
 
   return {
     ...permissions,
     store: new CloudBasePermissionStore({
       projectKey: config.envId,
       driver: new CloudBaseDbPermissionDriver({
-        credentials,
+        ...(credentials
+          ? { credentials }
+          : { accessKey: { envId: config.envId, accessKey: accessKey as string } }),
         collectionPrefix: permissions.tablePrefix,
       }),
     }),
@@ -327,8 +353,8 @@ function createSession(deps: SessionDeps): Session {
   let snapshotBootstrapped = false
   let snapshotBootstrapPromise: Promise<void> | undefined
 
-  // PR #7.0/7.1：审批 store 已在 normalizeAgentConfig 中按 credentials 默认 CloudBase 化；
-  // 未提供 credentials 时仍回落到进程内单例。
+  // PR #7.0/7.1：审批 store 已在 normalizeAgentConfig 中按可用 DB 凭证默认 CloudBase 化；
+  // CAM credentials 和 TCB_API_KEY 都未提供时仍回落到进程内单例。
   // 仅在用户配了 requireApproval 时启用；不配则 hook 整体不注入。
   const permissionStore: PermissionStore | undefined =
     config.permissions?.requireApproval !== undefined

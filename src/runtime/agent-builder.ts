@@ -129,6 +129,13 @@ export function buildClaudeQueryOptions(
   let claudeConfigDir: string | undefined
   let syncEngine: ClaudeHomeSyncEngine | undefined
   const userMemoryEnabled = isUserMemoryEnabled(config.userMemory)
+  if (userMemoryEnabled && !config.credentials) {
+    throw new InvalidConfigError(
+      'AgentConfig.userMemory requires AgentConfig.credentials (secretId and secretKey). ' +
+        'TCB_API_KEY accessKey only supports FlexDB session and HITL persistence.',
+    )
+  }
+
   if (userMemoryEnabled && extra.userId) {
     try {
       claudeConfigDir = deriveClaudeConfigDir(config.envId, extra.userId)

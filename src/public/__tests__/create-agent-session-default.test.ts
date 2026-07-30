@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeEach, describe, expect, it } from 'vitest'
 import { createAgent } from '../create-agent.js'
 import type { AgentConfig } from '../types.js'
 
@@ -11,7 +11,18 @@ const baseConfig: AgentConfig = {
   },
 }
 
+const originalTcbApiKey = process.env.TCB_API_KEY
+
 describe('createAgent — default session store', () => {
+  beforeEach(() => {
+    delete process.env.TCB_API_KEY
+  })
+
+  afterAll(() => {
+    if (originalTcbApiKey === undefined) delete process.env.TCB_API_KEY
+    else process.env.TCB_API_KEY = originalTcbApiKey
+  })
+
   it('enables CloudBase FlexDB session store by default when credentials are provided', async () => {
     const agent = createAgent(baseConfig)
 
@@ -49,7 +60,7 @@ describe('createAgent — default session store', () => {
     })
   })
 
-  it('requires credentials when session.enabled=true uses the default CloudBase FlexDB store', () => {
+  it('requires credentials or TCB_API_KEY when session.enabled=true uses the default CloudBase FlexDB store', () => {
     expect(() =>
       createAgent({
         envId: 'env-test',

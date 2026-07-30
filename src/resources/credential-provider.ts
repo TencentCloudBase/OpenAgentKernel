@@ -22,6 +22,17 @@ export interface ResolvedApiKey {
 }
 
 /**
+ * 解析 CloudBase 数据面可使用的 accessKey。
+ *
+ * 这里只读取 TCB_API_KEY，不能复用 ModelSpec.apiKey（它可能是第三方模型 key）
+ * 或 sandbox 的 API key。
+ */
+export function resolveCloudBaseAccessKey(): string | undefined {
+  const accessKey = process.env.TCB_API_KEY
+  return typeof accessKey === 'string' && accessKey.length > 0 ? accessKey : undefined
+}
+
+/**
  * 解析 API Key。
  *
  * @param explicitKey 用户在 AgentConfig.model.apiKey 直传的 key（最高优先级）
@@ -34,8 +45,8 @@ export function resolveApiKey(explicitKey?: string): ResolvedApiKey {
   }
 
   // 2. CloudBase 环境服务端 APIKey
-  const tcbApiKey = process.env.TCB_API_KEY
-  if (typeof tcbApiKey === 'string' && tcbApiKey.length > 0) {
+  const tcbApiKey = resolveCloudBaseAccessKey()
+  if (tcbApiKey) {
     return { apiKey: tcbApiKey, source: 'env_tcb_api_key' }
   }
 

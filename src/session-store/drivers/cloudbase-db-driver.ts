@@ -3,7 +3,8 @@
  *
  * 凭证模式：
  *   - 推荐通过 CloudBaseDbDriverOptions.credentials 显式注入
- *   - 不传时不做 env fallback，由 @cloudbase/node-sdk 自身处理运行环境认证
+ *   - 无 credentials 时可通过 accessKey 使用 CloudBase 数据面认证
+ *   - 两者都不传时由 @cloudbase/node-sdk 自身处理运行环境认证
  *
  * 四张集合：
  *   - {prefix}sessions          一行 = 一个 session（用作 listSessions 索引）
@@ -34,6 +35,11 @@ export interface CloudBaseCredentials {
 export interface CloudBaseDbDriverOptions {
   /** 显式凭证；不传则由 @cloudbase/node-sdk 自身处理运行环境认证 */
   credentials?: CloudBaseCredentials
+  /** 仅用于 FlexDB 数据面的 API Key 认证；credentials 存在时忽略 */
+  accessKey?: {
+    envId: string
+    accessKey: string
+  }
   /**
    * 集合名前缀（默认 `oak_`，与 OpenVibeCoding 的 `vibe_agent_` 区分开，
    * 避免污染同一 envId 下其他业务的命名空间）
@@ -96,12 +102,14 @@ interface CloudBaseApp {
 
 export class CloudBaseDbDriver implements SessionStoreDriver {
   private readonly creds: ResolvedCredentials
+  private readonly accessKey?: NonNullable<CloudBaseDbDriverOptions['accessKey']>
   private readonly prefix: string
   private app: CloudBaseApp | null = null
   private readonly ensuredCollections = new Set<string>()
 
   constructor(opts?: CloudBaseDbDriverOptions) {
     this.creds = resolveCredentials(opts)
+    this.accessKey = opts?.credentials ? undefined : opts?.accessKey
     this.prefix = opts?.collectionPrefix ?? DEFAULT_PREFIX
   }
 
@@ -116,13 +124,15 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
         '@cloudbase/node-sdk loaded but `.init()` not available. ' + 'Check the version (>= 3.0.0 required).',
       )
     }
-    this.app = init.init({
-      region: this.creds.region,
-      ...(this.creds.envId ? { env: this.creds.envId } : {}),
-      ...(this.creds.secretId ? { secretId: this.creds.secretId } : {}),
-      ...(this.creds.secretKey ? { secretKey: this.creds.secretKey } : {}),
-      ...(this.creds.sessionToken ? { sessionToken: this.creds.sessionToken } : {}),
-    })
+    this.app = this.accessKey
+      ? init.init({ env: this.accessKey.envId, accessKey: this.accessKey.accessKey })
+      : init.init({
+          region: this.creds.region,
+          ...(this.creds.envId ? { env: this.creds.envId } : {}),
+          ...(this.creds.secretId ? { secretId: this.creds.secretId } : {}),
+          ...(this.creds.secretKey ? { secretKey: this.creds.secretKey } : {}),
+          ...(this.creds.sessionToken ? { sessionToken: this.creds.sessionToken } : {}),
+        })
     return this.app
   }
 
