@@ -20,6 +20,7 @@
  */
 
 import type { PendingApproval } from '../../public/types.js'
+import type { PendingClientToolResult } from '../hooks.js'
 
 export interface PermissionStoreDriver {
   /**
@@ -55,4 +56,25 @@ export interface PermissionStoreDriver {
    * 性能建议：分布式 driver 应在 (projectKey, conversationId, toolName, createdAt desc) 上建索引。
    */
   scanRecent(args: { projectKey: string; conversationId: string; toolName: string }): Promise<PendingApproval | null>
+}
+
+/**
+ * ClientToolResultStoreDriver: 把 ClientToolResultStore 落到分布式存储。
+ *
+ * 与 PermissionStoreDriver 同结构，用于 PR #7.1 client-side tool 流程。
+ * 解决 InMemoryClientToolStore 不支持跨进程/跨节点的问题。
+ *
+ * 当前提供两个实现：
+ *   - InMemoryClientToolStore（store.ts 内，单进程默认）
+ *   - CloudBaseDbClientToolDriver（生产用，落 CloudBase 数据库）
+ */
+export interface ClientToolResultStoreDriver {
+  put(args: { projectKey: string; entry: PendingClientToolResult }): Promise<void>
+  get(args: { projectKey: string; conversationId: string; toolUseId: string }): Promise<PendingClientToolResult | null>
+  delete(args: { projectKey: string; conversationId: string; toolUseId: string }): Promise<void>
+  scanRecent(args: {
+    projectKey: string
+    conversationId: string
+    toolName: string
+  }): Promise<PendingClientToolResult | null>
 }

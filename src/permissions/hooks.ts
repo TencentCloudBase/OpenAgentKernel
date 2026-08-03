@@ -9,15 +9,37 @@
  *        - 有 'deny'  → 返回 deny + 用户拒绝理由（**不**带 sentinel）
  *      - 没有 → 检查规则，需要审批 → 写 store + 返回 deny + sentinel
  *      - 不需要审批 → 返回 {} 放行
- *   3. 事件翻译层（event-translator）识别 sentinel 后吐出 'tool_approval_required' 事件
+ *   3. AcpStreamAdapter 识别 sentinel 后吐出 ACP `tool_confirm` 更新
  *      并吃掉这条假 deny tool_result，避免污染业务事件流和 transcript
  *
  * 这里 "sentinel" 是把 magic string 塞进 `permissionDecisionReason`——这是 SDK Hook
- * 接口能传递信号的唯一通道。具体实现是一个 JSON 字符串，业务侧不会看到（被 translator 吃掉）。
+ * 接口能传递信号的唯一通道。具体实现是一个 JSON 字符串，业务侧不会看到（被 AcpStreamAdapter 吃掉）。
  */
 
 import type { ApprovalDecision, PendingApproval, PermissionConfig } from '../public/types.js'
 import { compileRequireApprovalPredicate, DEFAULT_APPROVAL_TIMEOUT_MS, isStaleApproval } from './store.js'
+
+/**
+ * Magic string used inside `updatedInput` to inject a client-supplied tool
+ * result back into a custom tool's execute() call. The client-tool stub
+ * reads this key and returns its content as the tool result, so the SDK
+ * writes a real (non-error) tool_result to the transcript.
+ */
+export const OAK_CLIENT_TOOL_RESULT_KEY = '__oak_client_tool_result__'
+
+/**
+ * Pending entry shape for client-side tools (mirrors PendingApproval but
+ * carries `output` instead of `decision`).
+ */
+export interface PendingClientToolResult {
+  conversationId: string
+  toolUseId: string
+  toolName: string
+  toolInput: unknown
+  /** Set once the host calls session.respondToolUse(). */
+  result?: { output: unknown; isError: boolean }
+  createdAt: number
+}
 
 /**
  * Sentinel：识别 deny reason 是 kernel 自己塞的"中断信号"还是模型/真实 deny。
@@ -61,7 +83,7 @@ export function createHookLocalState(): PreToolUseHookLocalState {
 
 /**
  * Sentinel reason payload（写到 permissionDecisionReason 的 JSON 字符串）。
- * event-translator 解析这个 JSON 把 toolUseId / toolName / input 还原成 'tool_approval_required' 事件。
+ * AcpStreamAdapter 解析这个 JSON，把 toolUseId / toolName / input 还原成 ACP `tool_confirm`。
  */
 export interface InterruptSignalPayload {
   [OAK_INTERRUPT_SENTINEL]: true
@@ -101,6 +123,58 @@ export function parseInterruptSignal(reason: string): InterruptSignalPayload | n
 }
 
 // ─────────────────────────────────────────────────────────
+// Client-tool sentinel (PR #7.1)
+// ─────────────────────────────────────────────────────────
+//
+// Same idea as the approval sentinel but signals "stop the turn — this tool
+// must be executed by the client". Used for tools whose definitions live in
+// AgentConfig.tools[] and whose `execute()` is a stub: the kernel never
+// actually runs them, it pauses the turn (via permissionDecision='deny' +
+// sentinel) and emits an ACP `tool_confirm` update so the host can
+// run the tool elsewhere and feed the result back via session.send({type:
+// 'tool_result'}).
+//
+// Wire format mirrors InterruptSignalPayload to share parser code; the
+// discriminator is OAK_CLIENT_TOOL_SENTINEL (different magic string).
+
+export const OAK_CLIENT_TOOL_SENTINEL = '__OAK_CLIENT_TOOL__'
+
+export interface ClientToolSignalPayload {
+  [OAK_CLIENT_TOOL_SENTINEL]: true
+  conversationId: string
+  toolUseId: string
+  toolName: string
+  toolInput: unknown
+}
+
+export function parseClientToolSignal(reason: string): ClientToolSignalPayload | null {
+  if (!reason.includes(OAK_CLIENT_TOOL_SENTINEL)) return null
+  try {
+    const parsed = JSON.parse(reason) as Partial<ClientToolSignalPayload>
+    if (parsed[OAK_CLIENT_TOOL_SENTINEL] === true) return parsed as ClientToolSignalPayload
+  } catch {
+    /* fall through */
+  }
+  return null
+}
+
+// ─────────────────────────────────────────────────────────
+// AskUserQuestion (agent 主动向用户提问)
+// ─────────────────────────────────────────────────────────
+//
+// AskUserQuestion 已去特化为普通 client-tool：模型调用内置 AskUserQuestion 工具
+// (mcp__kernel__AskUserQuestion) 时，走与 client-tool 完全相同的
+// deny + OAK_CLIENT_TOOL_SENTINEL + resume 范式：
+//   1. PreToolUse hook 拦截（isClientTool 含 isAskUserQuestion 判定）
+//   2. 写 PendingClientToolResult（toolName='AskUserQuestion', toolInput={question,options}）
+//   3. deny + client-tool sentinel → AcpStreamAdapter emit `request_permission`
+//      (toolCall.title='AskUserQuestion', rawInput 携带 question/options)
+//   4. Host 收集回答 → session.respondToolUse() → resume，hook 从 store 读到结果放行
+// 客户端按 toolCall.title==='AskUserQuestion' 渲染问卷 UI（特化在客户端）。
+//
+// 不再有独立的 OAK_ASK_USER_SENTINEL / ask_user variant。
+
+// ─────────────────────────────────────────────────────────
 // Hook factory
 // ─────────────────────────────────────────────────────────
 
@@ -109,6 +183,39 @@ export interface PreToolUsePermissionHookArgs {
   permissions: PermissionConfig
   /** 闭包共享单轮状态（同一 SDK query 内复用） */
   localState: PreToolUseHookLocalState
+  /**
+   * Names of user-defined client-side tools (config.tools[].name). When the
+   * model invokes one of these, the hook denies with a client-tool sentinel
+   * so the SDK never calls execute(); the runtime intercepts the sentinel
+   * to surface an ACP `tool_confirm` update and pause the turn.
+   *
+   * On resume, the hook reads the host-supplied result from the
+   * clientToolStore and ALLOWs the call after rewriting `updatedInput` to
+   * carry the result under OAK_CLIENT_TOOL_RESULT_KEY. The wrapped MCP
+   * stub reads this key and returns its content as the tool result.
+   */
+  clientToolNames?: ReadonlySet<string>
+  /**
+   * Store for pending client-side tool results AND askUser pending entries.
+   *
+   * askUser(内置工具)和 clientTool(用户声明工具)共用同一存储:
+   * 两者流程完全一致(模型在 turn 中请求外部输入,host 在 turn 间填充结果),
+   * 区别只是 toolName —— askUser 的 toolName 是 'askUser',question/options 通过
+   * toolInput 携带,host 调 respondToolUse() 时把 { answer } 放进 result.output。
+   *
+   * On resume, the hook reads the host-supplied result from this store and
+   * ALLOWs the call after rewriting `updatedInput` to carry the result under
+   * OAK_CLIENT_TOOL_RESULT_KEY. The wrapped MCP stub reads this key and
+   * returns its content as the tool result.
+   */
+  clientToolStore?: ClientToolResultStore
+}
+
+export interface ClientToolResultStore {
+  put(entry: PendingClientToolResult): Promise<void>
+  get(key: { conversationId: string; toolUseId: string }): Promise<PendingClientToolResult | null>
+  delete(key: { conversationId: string; toolUseId: string }): Promise<void>
+  scanRecent?(key: { conversationId: string; toolName: string }): Promise<PendingClientToolResult | null>
 }
 
 /**
@@ -156,7 +263,7 @@ export function createPreToolUsePermissionHook(
   toolUseID: string | undefined,
   options: { signal: AbortSignal },
 ) => Promise<PreToolUseHookOutput | Record<string, never>> {
-  const { conversationId, permissions, localState } = args
+  const { conversationId, permissions, localState, clientToolNames, clientToolStore } = args
   const requirePredicate = compileRequireApprovalPredicate(permissions.requireApproval)
   const store = permissions.store
   const timeoutMs = permissions.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS
@@ -168,6 +275,93 @@ export function createPreToolUsePermissionHook(
     const toolName = input.tool_name
     const toolInput = input.tool_input
     const toolUseId = input.tool_use_id ?? toolUseID ?? ''
+
+    // ── PR #7.1: client-side tool flow ─────────────────────────────────
+    // Tools whose names appear in clientToolNames have stub execute()s in
+    // an in-process MCP server (mcp__custom__<name>). The kernel must NOT
+    // run them; instead pause the turn and let the host execute the tool.
+    //
+    // Lookup is by the bare tool name (config.tools[].name), but the SDK
+    // reports the prefixed form 'mcp__custom__<bare>'. Strip the prefix
+    // before matching.
+    //
+    // AskUserQuestion (mcp__kernel__AskUserQuestion) is treated as a built-in
+    // client-tool: it follows the exact same deny+sentinel+resume flow. The
+    // host collects the user's answer and feeds it back via respondToolUse().
+    const bareToolName = toolName.startsWith('mcp__custom__')
+      ? toolName.slice('mcp__custom__'.length)
+      : toolName.startsWith('mcp__kernel__')
+        ? toolName.slice('mcp__kernel__'.length)
+        : toolName
+    const isAskUserQuestion = bareToolName === 'AskUserQuestion'
+    const isClientTool = isAskUserQuestion || (!!clientToolNames && clientToolNames.has(bareToolName))
+
+    if (isClientTool && clientToolStore) {
+      // Phase A: a result is already waiting in the store (resume path).
+      // Allow the call — the MCP stub will read the result from the store
+      // directly (Claude Agent SDK does NOT pass `updatedInput` to MCP
+      // servers, so we cannot inject via hook output). The stub deletes
+      // the entry after reading.
+      //
+      // We check by toolUseId first (exact match), then by toolName scan.
+      if (toolUseId) {
+        const existing = await clientToolStore.get({ conversationId, toolUseId })
+        if (existing?.result) {
+          // Don't delete — MCP stub will read and delete
+          return {}
+        }
+      }
+      if (clientToolStore.scanRecent) {
+        const scanned = await clientToolStore.scanRecent({ conversationId, toolName: bareToolName })
+        if (scanned?.result) {
+          // Don't delete — MCP stub will read and delete
+          return {}
+        }
+      }
+
+      // Phase B: no result → pause. Mirror the approval flow: write a
+      // pending entry, return deny + sentinel. AcpStreamAdapter detects the
+      // sentinel and emits an ACP `tool_confirm` update.
+      if (!toolUseId) {
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'deny',
+            permissionDecisionReason: JSON.stringify({
+              reason: 'Internal error: missing toolUseId for client-side tool flow.',
+              type: 'oak_internal_error',
+            }),
+          },
+        }
+      }
+      const pending: PendingClientToolResult = {
+        conversationId,
+        toolUseId,
+        toolName: bareToolName,
+        toolInput,
+        createdAt: Date.now(),
+      }
+      await clientToolStore.put(pending)
+
+      const signal: ClientToolSignalPayload = {
+        [OAK_CLIENT_TOOL_SENTINEL]: true,
+        conversationId,
+        toolUseId,
+        toolName: bareToolName,
+        toolInput,
+      }
+      const reasonForModel =
+        `Tool call deferred to the client (toolUseId=${toolUseId}). ` +
+        `Do not retry this tool yourself; the client is executing it. ` +
+        `Stop the current turn and wait for the next user message.`
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason: JSON.stringify({ ...signal, message: reasonForModel }),
+        },
+      }
+    }
 
     // 没配 store → 直接放行（PR #7.0 防御：缺 store 时审批无法持久化，避免误暂停）
     if (!store) {
@@ -325,7 +519,7 @@ export function createPreToolUsePermissionHook(
     // permissionDecisionReason 这段 JSON 既是 kernel 内部的 sentinel，又会被 SDK
     // 当作 tool_result 喂给模型 context（SDK 接口约束）。我们让它对模型也"读得通"：
     // 加一个明确的 message 字段，引导模型停止重试、等待审批。
-    // event-translator 仍然识别 sentinel 字段并把这条消息从业务事件流里吃掉。
+    // AcpStreamAdapter 仍然识别 sentinel 字段并把这条消息从业务事件流里吃掉。
     const reasonForModel =
       `Tool call paused for user approval (toolUseId=${toolUseId}). ` +
       `Do not retry this tool yourself; the user is reviewing it. ` +

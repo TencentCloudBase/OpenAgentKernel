@@ -12,8 +12,9 @@
  * `@cloudbase/node-sdk` 按需懒加载（与 CloudBaseDbDriver 一致）。
  */
 
+import cloudbase from '@cloudbase/node-sdk'
 import * as fs from 'node:fs/promises'
-import { ResourceError, StorageError } from '../internal/errors.js'
+import { StorageError } from '../internal/errors.js'
 import type { AttachmentInput } from '../public/types.js'
 import { assertSupportedImageMime, guessMimeFromBytes, guessMimeFromPath } from './mime.js'
 import type { ResolveContext, ResolvedAttachment, StorageProvider } from './types.js'
@@ -75,34 +76,14 @@ export class CloudBaseStorage implements StorageProvider {
 
   private async getApp(): Promise<CloudBaseApp> {
     if (this.app) return this.app
-    const mod = await this.requireCloudBase()
-    const init = (mod.default ?? mod) as { init(opts: Record<string, unknown>): CloudBaseApp }
-    if (typeof init.init !== 'function') {
-      throw new ResourceError(
-        '@cloudbase/node-sdk loaded but `.init()` not available. ' + 'Check the version (>= 3.0.0 required).',
-      )
-    }
-    this.app = init.init({
+    this.app = cloudbase.init({
       region: this.creds.region,
       ...(this.creds.envId ? { env: this.creds.envId } : {}),
       ...(this.creds.secretId ? { secretId: this.creds.secretId } : {}),
       ...(this.creds.secretKey ? { secretKey: this.creds.secretKey } : {}),
       ...(this.creds.sessionToken ? { sessionToken: this.creds.sessionToken } : {}),
-    })
+    }) as unknown as CloudBaseApp
     return this.app
-  }
-
-  private async requireCloudBase(): Promise<{ default?: unknown; init?: unknown }> {
-    try {
-      const dynamicImport = new Function('p', 'return import(p)') as (
-        p: string,
-      ) => Promise<{ default?: unknown; init?: unknown }>
-      return await dynamicImport('@cloudbase/node-sdk')
-    } catch {
-      throw new ResourceError(
-        '@cloudbase/node-sdk failed to load. Reinstall @cloudbase/open-agent-kernel or check your node_modules.',
-      )
-    }
   }
 
   // ─── StorageProvider 接口实现 ──────────────────────────────────

@@ -28,10 +28,24 @@ import type {
   SessionStore,
   SettingSource,
 } from '@anthropic-ai/claude-agent-sdk'
-import { ClaudeHomeSyncEngine, CloudBaseCosClaudeHomeStore, deriveClaudeConfigDir } from '../claude-home/index.js'
+import { createSdkMcpServer, tool as sdkTool } from '@anthropic-ai/claude-agent-sdk'
+import { z } from 'zod'
+import {
+  createPreToolUsePermissionHook,
+  OAK_CLIENT_TOOL_RESULT_KEY,
+  type PreToolUseHookLocalState,
+  type ClientToolResultStore,
+} from '../permissions/hooks.js'
+import {
+  ClaudeHomeSyncEngine,
+  CloudBaseCosClaudeHomeStore,
+  createWorkspaceCwdArchiveEngine,
+  deriveAgentConfigDir,
+  deriveClaudeConfigDir,
+  WorkspaceCwdArchiveEngine,
+} from '../claude-home/index.js'
 import { ConfigError, InvalidConfigError } from '../internal/errors.js'
-import { createPreToolUsePermissionHook, type PreToolUseHookLocalState } from '../permissions/hooks.js'
-import type { AgentConfig, SandboxConfig, UserMemoryConfig } from '../public/types.js'
+import type { AgentConfig, SandboxConfig, ToolDefinition, UserMemoryConfig } from '../public/types.js'
 import { createSandboxMcpServer } from '../sandbox/sandbox-tools.js'
 import type { SandboxInstance, SandboxRuntime } from '../sandbox/types.js'
 import { WorkspaceSnapshotEngine } from '../sandbox/workspace-snapshot/index.js'
@@ -44,15 +58,6 @@ import { resolveCredential, type ResolvedCredential } from './credential-factory
  * 参考：https://cloud.tencent.com/document/product/1823/130079
  */
 const DEFAULT_API_TIMEOUT_MS = 600_000
-
-/**
- * 当启用 sessionStore 时，SDK 仍要求子进程做"本地双写"。
- * 我们把 CLAUDE_CONFIG_DIR 指到操作系统临时目录，避免污染用户 HOME。
- * 启用 sessionStore 时设置 OAK_SESSION_LOCAL_DIR 可覆盖。
- */
-function getSessionLocalDir(): string {
-  return process.env.OAK_SESSION_LOCAL_DIR ?? process.env.TMPDIR ?? '/tmp'
-}
 
 export interface BuiltClaudeQueryParams {
   /** Claude SDK query() 的 options */
@@ -74,6 +79,20 @@ export interface BuiltClaudeQueryParams {
    *   - session.snapshotWorkspace() / getRestoreStatus() 转发到 engine
    */
   snapshotEngine?: WorkspaceSnapshotEngine
+  /**
+   * OAK_DEBUG=1 时返回:我们指定给 SDK 的 claude CLI debug-file 绝对路径。
+   * SDK 把子进程 --debug 的详细输出写到这个文件(而非 stderr),调用方(create-agent)
+   * 在 query 结束后(尤其 0 消息时)读取它,把子进程 init/退出原因打到日志。
+   */
+  debugFilePath?: string
+  /**
+   * workspacePersist 启用时返回:cwd 工作目录持久化引擎(无沙箱场景)。
+   * 调用方(create-agent)挂到 send 两端:
+   *   send-start → cwdPersistEngine.pullOnSendStart()
+   *   send-end   → cwdPersistEngine.pushOnSendEnd()
+   * 与沙箱 snapshotEngine 互斥(启用沙箱时本字段为 undefined)。
+   */
+  cwdPersistEngine?: WorkspaceCwdArchiveEngine
 }
 
 /**
@@ -94,11 +113,25 @@ export function buildClaudeQueryOptions(
   config: AgentConfig,
   extra: {
     sandboxInstance?: SandboxInstance
+    /**
+     * 沙箱模式 hint,决定内置工具默认开关 + cwdPersistEngine 是否互斥。
+     *   - 'local'  : sandbox.provider='local'(宿主进程本地 FS + SDK 内置工具)
+     *   - 'remote' : AGS/TRW 等远程沙箱(有 HTTP 数据面 + 自带 workspaceSnapshot)
+     *   - 'none'   : 无沙箱(纯对话,或 workspacePersist 独立持久化)
+     * 未传时按 sandboxInstance 推断:有 instance → 'remote',否则 'none'。
+     */
+    sandboxMode?: SandboxMode
     extraMcpServers?: Record<string, SdkMcpServerConfig>
     conversationId?: string
     hookLocalState?: PreToolUseHookLocalState
+    /** PR #7.1: names of user-defined client-side tools (for hook routing). */
+    clientToolNames?: ReadonlySet<string>
+    /** PR #7.1: store for client-supplied tool results (in-memory by default). */
+    clientToolStore?: import('../permissions/hooks.js').ClientToolResultStore
     /** Task 9 for userMemory:agent.startSession({ userId }) 透传过来 */
     userId?: string
+    /** workspacePersist:cwd 持久化的 per-session key 命名空间。 */
+    sessionId?: string
   } = {},
 ): BuiltClaudeQueryParams {
   const credential = resolveCredential({
@@ -129,13 +162,6 @@ export function buildClaudeQueryOptions(
   let claudeConfigDir: string | undefined
   let syncEngine: ClaudeHomeSyncEngine | undefined
   const userMemoryEnabled = isUserMemoryEnabled(config.userMemory)
-  if (userMemoryEnabled && !config.credentials) {
-    throw new InvalidConfigError(
-      'AgentConfig.userMemory requires AgentConfig.credentials (secretId and secretKey). ' +
-        'TCB_API_KEY accessKey only supports FlexDB session and HITL persistence.',
-    )
-  }
-
   if (userMemoryEnabled && extra.userId) {
     try {
       claudeConfigDir = deriveClaudeConfigDir(config.envId, extra.userId)
@@ -160,11 +186,15 @@ export function buildClaudeQueryOptions(
     }
   }
 
-  // effectiveCwd 优先级:
+  // effectiveCwd:
   //   1) 用户传 cwd → 用 userCwd(平台资产路径,如 /app/skills-bundle)
-  //   2) userMemory 启用 → 用 claudeConfigDir 上一级(确保 SDK projects/<cwd-hash>/ 跨节点稳定)
-  //   3) 都没有 → ephemeral 随机(v0 行为)
-  const effectiveCwd = userCwd ?? (claudeConfigDir !== undefined ? path.dirname(claudeConfigDir) : deriveEphemeralCwd())
+  //   2) 没传 → process.cwd()(进程实际工作目录)
+  //
+  // 职责边界:cwd 是"运行环境"的事,kernel 不替宿主猜可写目录。没传 cwd 时,最诚实的
+  // 兜底是 process.cwd() —— 不自作主张造 ephemeral 目录(那是越权:kernel 不知道宿主
+  // 哪里可写、session 目录怎么隔离/GC)。需要可写、隔离的工作目录时,由调用方(agent
+  // runtime)显式传 config.cwd(它才掌握运行环境)。
+  const effectiveCwd = userCwd ?? process.cwd()
 
   // settingSources 启用条件:任一资产层需要文件加载
   //   - 用户传 cwd → 'project'(skills、项目 CLAUDE.md)
@@ -200,10 +230,19 @@ export function buildClaudeQueryOptions(
 
   // CLAUDE_CONFIG_DIR 单一来源(优先级):
   //   1) userMemory.enabled + userId → per-user 派生路径
-  //   2) sessionStore enablePersist → tmpdir(避免污染 host)
-  //   3) 都没有 → 不设置(SDK 用默认)
-  // 显式合并避免依赖 spread 顺序,后续维护更稳。
-  const configDirOverride = claudeConfigDir ?? (enablePersist ? getSessionLocalDir() : undefined)
+  //   2) 其余所有情况 → tmpdir(/tmp 下的可写目录)
+  //
+  // 为什么不再用 `enablePersist ? ... : undefined`:
+  //   claude CLI 把 CLAUDE_CONFIG_DIR 当成自己的"home"——配置、sessions、锁文件、
+  //   XDG state/cache 等都落在它下面。不设置时 SDK 回落到宿主 $HOME/.claude。
+  //   在云函数(SCF/CloudRun)里 $HOME 通常指向只读路径(/root 等),CLI 在产出任何
+  //   stream message 之前就因 EROFS/EACCES 崩溃 → 上层收不到任何事件(静默)。
+  //   所以无论是否启用持久化,都把 CLAUDE_CONFIG_DIR 兜底到 Agent 全局配置目录
+  //   <workRoot>/.oak/agent/.claude(workRoot = OAK_SESSION_LOCAL_DIR ?? os.tmpdir())。
+  //   这样不需要去改进程的 HOME 环境变量(那会影响同进程其它库),只用 claude 官方
+  //   推荐的 CLAUDE_CONFIG_DIR 机制做隔离。
+  // 优先级:userMemory 派生的 per-user 目录(.oak/users/<env>/<user>/.claude)> Agent 全局兜底。
+  const configDirOverride = claudeConfigDir ?? deriveAgentConfigDir()
 
   // 透传给 SDK 子进程的环境变量
   const env: Record<string, string | undefined> = {
@@ -214,7 +253,30 @@ export function buildClaudeQueryOptions(
     API_TIMEOUT_MS: String(DEFAULT_API_TIMEOUT_MS),
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     CLAUDE_AGENT_SDK_CLIENT_APP: `@cloudbase/open-agent-kernel/${PACKAGE_VERSION}`,
-    ...(configDirOverride ? { CLAUDE_CONFIG_DIR: configDirOverride } : {}),
+    // claude CLI 的"home":配置/sessions/锁文件/XDG state 等都落在这里。
+    // 始终设置,避免回落到云函数里只读的宿主 $HOME/.claude(见 configDirOverride 注释)。
+    CLAUDE_CONFIG_DIR: configDirOverride,
+    // OAK_DEBUG 时打开 SDK 自身的内部 logger(M6):它会把 spawn 命令行、子进程 exit
+    // 原因、"Non-JSON stdout: ..."、transcript-mirror 写失败等关键诊断打到 stderr。
+    // 这是"子进程 exit code 0 却 0 条消息"这类静默失败的唯一窗口 —— --debug 只让
+    // 子进程更啰嗦,而 DEBUG_CLAUDE_AGENT_SDK 让父进程 SDK 把 spawn/exit 细节吐出来。
+    ...(process.env.OAK_DEBUG === '1' ? { DEBUG_CLAUDE_AGENT_SDK: '1' } : {}),
+  }
+
+  // ── OAK_DEBUG:指定 claude CLI 的 debug-file ────────────────────────
+  // 重要:SDK 在没传 debugFile 时会自己派生一个默认 debug-file 路径,把子进程 --debug
+  // 的详细输出全写进去(不进 stderr)——这就是 stderr 回调收不到东西的原因。
+  // 我们主动指定到可写的 CLAUDE_CONFIG_DIR/debug/ 下,且把路径回传给 create-agent,
+  // 让它在 query 结束后(尤其 0 消息时)读取并打到日志 —— 拿到子进程 init/退出真因。
+  let debugFilePath: string | undefined
+  if (process.env.OAK_DEBUG === '1') {
+    try {
+      const debugDir = path.join(configDirOverride, 'debug')
+      mkdirSync(debugDir, { recursive: true })
+      debugFilePath = path.join(debugDir, `oak-${Date.now()}-${randomBytes(3).toString('hex')}.txt`)
+    } catch {
+      debugFilePath = undefined // mkdir 失败就算了,回退到 SDK 默认行为
+    }
   }
 
   // 诊断日志（OAK_DEBUG=1 时打开）
@@ -228,25 +290,37 @@ export function buildClaudeQueryOptions(
       apiKeySource: credential.apiKeySource,
       apiKeyPreview: keyPreview,
       sessionStore: enablePersist ? 'enabled' : 'disabled',
+      cwd: effectiveCwd,
+      claudeConfigDir: configDirOverride,
     })
   }
 
-  // ── 决定权限模式（PR #7.0）──────────────────────────────────
-  // PR #5 阶段为了让 mcpServers 工具直接放行，默认走 permissionMode='bypassPermissions'。
-  // PR #7.0 起，如果用户配了 permissions.requireApproval，则启用 PreToolUse hook 实现审批流，
-  // permissionMode 不再 bypass（让 hook 决策生效）。
+  // ── 决定权限模式（PR #7.0 / PR #7.1）─────────────────────────
+  // PreToolUse hook 启用条件：
+  //   - 用户配了 permissions.requireApproval（PR #7.0 审批流），或
+  //   - 用户声明了 config.tools[]（PR #7.1 client-side 工具流），或
+  //   - 上述任一并提供了 conversationId + hookLocalState（runtime 必须配齐）
+  const hasClientTools = Boolean(config.tools && config.tools.length > 0)
+  const hasApproval = config.permissions !== undefined && config.permissions.requireApproval !== undefined
+  // askUser 现在复用 clientToolStore(askUser 是 clientTool 的特化,toolName='askUser')。
+  // clientToolStore 在 create-agent 里始终注入(askUser 是内置工具),所以 hasAskUser 始终 true。
+  const hasAskUser = Boolean(extra.clientToolStore)
   const userHasApprovalConfig =
-    config.permissions !== undefined &&
-    config.permissions.requireApproval !== undefined &&
-    Boolean(extra.conversationId) &&
-    Boolean(extra.hookLocalState)
+    (hasApproval || hasClientTools || hasAskUser) && Boolean(extra.conversationId) && Boolean(extra.hookLocalState)
+
+  // sandboxMode hint:决定内置工具默认开关 + sandboxMcpServer 是否注入 + cwdPersistEngine 是否互斥。
+  // local provider → 'local'(SDK 内置工具直接操作本地 cwd,不注入 sandbox MCP);
+  // 有远程 sandboxInstance → 'remote'(走 AGS HTTP 数据面);其余 → 'none'。
+  const sandboxMode: SandboxMode = extra.sandboxMode ?? (extra.sandboxInstance ? 'remote' : 'none')
 
   // ── 合并 mcpServers：用户配置 + 沙箱 MCP（PR #6A）+ 内置 cloudbase MCP（PR #6.5）─
   // 沙箱实例由 create-agent 在 send 前 acquire 好后传入，这里只是注入。
+  // local provider 的实例无 HTTP 数据面(request() 抛错),不注入 sandbox MCP ——
+  // 改由 SDK 内置工具直接操作本地 cwd。
   const mergedMcpServers: Record<string, SdkMcpServerConfig> | undefined = (() => {
     const userServers = config.mcpServers ? validateMcpServers(config.mcpServers) : undefined
     const merged: Record<string, SdkMcpServerConfig> = { ...(userServers ?? {}) }
-    if (extra.sandboxInstance) {
+    if (extra.sandboxInstance && sandboxMode === 'remote') {
       // key 'sandbox' 决定工具名前缀：mcp__sandbox__bash 等
       merged.sandbox = createSandboxMcpServer(extra.sandboxInstance)
     }
@@ -254,16 +328,37 @@ export function buildClaudeQueryOptions(
       // PR #6.5：cloudbase MCP（mcp__cloudbase__*）等额外内置 server
       Object.assign(merged, extra.extraMcpServers)
     }
+    // ── 内置 askUser 工具 → SDK MCP server 'kernel' (mcp__kernel__askUser)
+    // 模型可通过此工具主动向用户提问,kernel 用 sentinel 中断 turn,
+    // Host 收集回答后调 respondToolUse() resume(askUser 复用 clientToolStore)。
+    if (extra.clientToolStore) {
+      merged.kernel = createBuiltinAskUserMcpServer(extra.clientToolStore, extra.conversationId)
+    }
+    // ── 用户自定义 ToolDefinition[] → SDK MCP server 'custom' (mcp__custom__*)
+    // SDK 的 query() 不接受 tools 数组——所有工具必须打包成 MCP server 注入。
+    // 用 'custom' 作为 server key（而不是 'kernel'）：模型看到的工具名前缀
+    // mcp__custom__<name> 在语义上明确告诉调用链"这是用户声明的、由 client/上层
+    // 业务代码实现的工具"，与 mcp__sandbox__* / mcp__cloudbase__* 区分开。
+    if (config.tools && config.tools.length > 0) {
+      merged.custom = wrapKernelToolsAsMcpServer(config.tools, {
+        clientToolStore: extra.clientToolStore,
+        conversationId: extra.conversationId,
+      })
+    }
     return Object.keys(merged).length > 0 ? merged : undefined
   })()
 
   // ── PR #7.0：构造 PreToolUse hook（审批桥接）──
   const hooks: ClaudeOptions['hooks'] = (() => {
     if (!userHasApprovalConfig) return undefined
+    // permissions config is optional when only client-tools are configured.
+    const permissionsForHook = config.permissions ?? { requireApproval: undefined }
     const preToolUseHook = createPreToolUsePermissionHook({
       conversationId: extra.conversationId!,
-      permissions: config.permissions!,
+      permissions: permissionsForHook,
       localState: extra.hookLocalState!,
+      ...(extra.clientToolNames ? { clientToolNames: extra.clientToolNames } : {}),
+      ...(extra.clientToolStore ? { clientToolStore: extra.clientToolStore } : {}),
     })
     return {
       PreToolUse: [
@@ -296,15 +391,35 @@ export function buildClaudeQueryOptions(
       })
     : undefined
 
+  // ── cwd 持久化:仅在 sandboxMode='local' 时启用 ──
+  // 三种模式的"cwd 是否会被模型改 + 谁持久化"矩阵:
+  //   - 'none'   : 模型无内置工具,cwd 不会被改 → 不需要持久化
+  //   - 'local'  : 模型用 SDK 内置工具改 cwd → workspacePersist 必须启用(local 无自己的 COS 同步)
+  //   - 'remote' : AGS snapshot 负责 → 互斥禁用
+  // LocalRuntimeSandbox.acquire 只创建/校验目录,不碰 COS;这里补上 tar.gz 单包持久化。
+  const cwdPersistEngine =
+    sandboxMode === 'local'
+      ? resolveCwdPersistEngine(config, {
+          credential,
+          cwd: effectiveCwd,
+          sessionId: extra.sessionId,
+          userId: extra.userId,
+        })
+      : undefined
+
   const options: ClaudeOptions = {
     model: credential.modelId,
     env,
     cwd: effectiveCwd,
+    // ── OAK_DEBUG:把子进程 --debug 详细输出写到我们指定的可写文件(create-agent 会读它)──
+    ...(debugFilePath ? { debugFile: debugFilePath } : {}),
     // ── settingSources(spec §4.1):用户传 cwd→['project'];否则 []（v0 isolation）──
     settingSources,
     strictMcpConfig: true,
     // 持久化策略：注入 store 时必须 true（SDK 强制约束）
     persistSession: enablePersist,
+    // ACP adapter consumes SDK stream_event messages for token/tool input streaming.
+    includePartialMessages: true,
     ...(sessionStore ? { sessionStore } : {}),
     ...(config.session?.flush ? { sessionStoreFlush: config.session.flush } : {}),
     // ── 系统提示 ──
@@ -324,17 +439,122 @@ export function buildClaudeQueryOptions(
     // 因此始终 bypass SDK 的内置权限系统，让 Hook 全权负责。
     permissionMode: 'bypassPermissions' as const,
     allowDangerouslySkipPermissions: true,
-    // ── 内置工具默认全部禁用(沙箱能力通过上面的 mcpServers 提供)──
-    // 例外:启用 skills 时必须保留 'Skill' 工具,否则模型无法 invoke discovered skills
-    // (SDK 文档:"If you also pass an explicit tools list, include 'Skill' in that list
-    //   so Claude can invoke skills.")
-    tools: config.skills?.enabled !== undefined ? ['Skill'] : [],
+    // ── 流式:始终开启 includePartialMessages(AcpStreamAdapter 处理增量)──
+    // SDK 只有此项为 true 才 emit stream_event(增量 chunk);adapter 据此发 agent_message_chunk。
+    // ── 内置工具(默认禁用,local provider 自动开)──
+    // 默认 tools=[](或仅 'Skill'):避免模型操作 kernel 宿主机 FS。
+    //   - sandbox.provider='local' → 自动开 'claude_code' preset(SDK 全部内置工具)
+    //   - 沙箱(ags-stateful)能力另经 mcpServers 提供
+    tools: resolveBuiltinTools(config, sandboxMode),
+    // ── pathToClaudeCodeExecutable 透传 ──
+    // 默认情况下 SDK 用 require.resolve("@anthropic-ai/claude-agent-sdk-<platform>/claude")
+    // 来定位原生二进制。在 SCF 等只读 /var/user 的运行时里,平台包无法预装进
+    // node_modules(云构建会触发 Dependency error / 超体积上限),只能运行时下载到
+    // 可写目录(如 /tmp)。此时通过 OAK_CLAUDE_CODE_EXECUTABLE_PATH 显式指定二进制
+    // 绝对路径,SDK 会直接 spawn 它而跳过 require.resolve 探测。
+    // 该变量未设置时不影响原有行为(SDK 仍走默认解析)。
+    // 注意:用 OAK_ 前缀而非 CLAUDE_,因为我们把整份 env 透传进 SDK 子进程,CLAUDE_
+    // 前缀的变量会被 Claude CLI 误读,而 OAK_ 命名空间只属于我们自己。
+    ...(process.env.OAK_CLAUDE_CODE_EXECUTABLE_PATH
+      ? { pathToClaudeCodeExecutable: process.env.OAK_CLAUDE_CODE_EXECUTABLE_PATH }
+      : {}),
   }
 
-  return { options, credential, syncEngine, snapshotEngine }
+  return {
+    options,
+    credential,
+    syncEngine,
+    snapshotEngine,
+    ...(debugFilePath ? { debugFilePath } : {}),
+    ...(cwdPersistEngine ? { cwdPersistEngine } : {}),
+  }
 }
 
 // ─── 辅助 ────────────────────────────────────────────────────────
+
+/**
+ * 沙箱模式 hint,影响内置工具默认开关 + cwdPersistEngine 互斥逻辑。
+ * - 'local'  : sandbox.provider='local'(宿主进程本地 FS + SDK 内置工具,无 HTTP 数据面)
+ * - 'remote' : AGS/TRW 等远程沙箱(有 HTTP 数据面 + workspaceSnapshot)
+ * - 'none'   : 无沙箱(纯对话,或 workspacePersist 独立持久化)
+ */
+export type SandboxMode = 'local' | 'remote' | 'none'
+
+/**
+ * 解析 SDK 内置工具集(options.tools)。
+ *
+ *   - sandboxMode === 'local' → 'claude_code' preset(local provider 即用本地 FS,
+ *     SDK 内置 Bash/Read/Write/Edit/Glob/Grep 直接操作 cwd,preset 已含 Skill)
+ *   - 其他 → [](或仅 'Skill' 若启用 skills)
+ *
+ * 安全默认:无 local provider 时模型拿不到本地 Bash/Read/Write,
+ * 避免操作 kernel 宿主机 FS。
+ */
+function resolveBuiltinTools(config: AgentConfig, sandboxMode: SandboxMode): ClaudeOptions['tools'] {
+  const skillsOn = config.skills?.enabled !== undefined
+
+  if (sandboxMode === 'local') {
+    // local provider 默认开 SDK 全部内置工具(preset 已含 Skill)
+    return { type: 'preset', preset: 'claude_code' }
+  }
+
+  // 默认禁用:仅在启用 skills 时保留 'Skill'
+  return skillsOn ? ['Skill'] : []
+}
+
+/**
+ * 构造 cwd 持久化引擎(仅 sandboxMode='local' 时调用)。
+ *
+ * local provider 没有 AGS 那样的远程 snapshot 数据面;OAK 在 send 边界做 tar.gz 单包
+ * 归档(send-start pull、send-end push),per-session 跨容器/请求恢复 cwd。
+ *
+ * 前置条件:
+ *   - 有 sessionId(用作 COS key 命名空间)
+ *   - 有 credentials(COS 操作走 CAM 签名)
+ *
+ * 缺 sessionId → graceful degrade(warn + undefined,不阻塞 send)。
+ * cwd 不可写不在此检查 —— 实际写操作(pullOnSendStart 解包 tar.gz)会 fail-fast,
+ * 错误信息更准确(具体到哪一步、什么 errno)。
+ */
+function resolveCwdPersistEngine(
+  config: AgentConfig,
+  args: {
+    credential: ResolvedCredential
+    cwd: string
+    sessionId: string | undefined
+    userId: string | undefined
+  },
+): WorkspaceCwdArchiveEngine | undefined {
+  // userId 兜底:不要求业务传 userId,缺省用占位(COS key 只用 sessionId)
+  const userId = args.userId ?? 'anonymous'
+
+  if (!args.sessionId) {
+    // eslint-disable-next-line no-console
+    console.warn(`[oak/workspacePersist] sandbox.provider='local' but sessionId missing; skipping cwd persistence.`)
+    return undefined
+  }
+
+  const credentials = config.credentials
+    ? { ...config.credentials, envId: config.credentials.envId ?? config.envId }
+    : undefined
+
+  try {
+    return createWorkspaceCwdArchiveEngine({
+      ...(credentials ? { credentials } : {}),
+      envId: config.envId,
+      userId,
+      sessionId: args.sessionId,
+      cwd: args.cwd,
+    })
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[oak/workspacePersist] failed to construct engine, cwd persistence disabled:',
+      (err as Error)?.message,
+    )
+    return undefined
+  }
+}
 
 function isUserMemoryEnabled(config: UserMemoryConfig | undefined): boolean {
   return config === true || (typeof config === 'object' && config.enabled === true)
@@ -384,6 +604,87 @@ function resolveSnapshotMode(sandboxConfig: SandboxConfig | undefined): boolean 
     )
   }
   return true
+}
+
+/**
+ * Wrap user-supplied ToolDefinition[] as a single SDK MCP server. The Claude
+ * Agent SDK exposes user-provided tools only via `mcpServers` (its query()
+ * options has no `tools` array). We pack all of AgentConfig.tools[] into a
+ * single in-process server keyed `custom`, which makes them visible to the
+ * model as `mcp__custom__<name>`. The 'custom' name signals "user-declared
+ * tool, not a kernel-provided builtin like sandbox/cloudbase".
+ *
+ * The user-facing tool name (config.tools[i].name) is preserved as the
+ * MCP-server-tool name. Consumers see `mcp__custom__<name>` in tool_call
+ * events — they should match against that prefix when needed (e.g. the
+ * stop-and-resume pump in a runtime that needs to distinguish client-side
+ * custom tools from sandbox tools).
+ *
+ * Each kernel tool's execute() is wrapped to:
+ *   - parse the input through its Zod schema (kernel does this anyway)
+ *   - call the user's execute()
+ *   - format the return value as { content: [{type:'text', text:...}] }
+ *     because the SDK's MCP transport requires that wire format.
+ *   - propagate thrown errors as is (PR #7.0 sentinel for HITL flows still
+ *     bubbles up; client-side tool sentinels also bubble up unchanged).
+ */
+function wrapKernelToolsAsMcpServer(
+  tools: ToolDefinition[],
+  opts?: { clientToolStore?: ClientToolResultStore; conversationId?: string },
+): ReturnType<typeof createSdkMcpServer> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sdkTools: any[] = tools.map((t) =>
+    sdkTool(
+      t.name,
+      t.description,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      t.parameters as any,
+      async (input: Record<string, unknown>) => {
+        // PR #7.1: client-side tool fast path.
+        //
+        // Claude Agent SDK does NOT pass `updatedInput` from the PreToolUse
+        // hook to the MCP server's execute(). So we cannot rely on the magic
+        // key injection approach. Instead, the MCP stub checks the
+        // `clientToolStore` directly for a pending result with matching
+        // toolName. The hook stores the result there (via scanRecent) before
+        // allowing the call, so by the time execute() runs, the result is
+        // already waiting.
+        if (opts?.clientToolStore && opts?.conversationId && opts.clientToolStore.scanRecent) {
+          const scanned = await opts.clientToolStore.scanRecent({
+            conversationId: opts.conversationId,
+            toolName: t.name,
+          })
+          if (scanned?.result) {
+            await opts.clientToolStore.delete({
+              conversationId: opts.conversationId,
+              toolUseId: scanned.toolUseId,
+            })
+            const text =
+              typeof scanned.result.output === 'string' ? scanned.result.output : JSON.stringify(scanned.result.output)
+            return {
+              content: [{ type: 'text', text }],
+              isError: !!scanned.result.isError,
+            }
+          }
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const out = await (t.execute as any)(input, {
+          toolUseId: '',
+          conversationId: '',
+          userId: '',
+          envId: '',
+          signal: new AbortController().signal,
+        })
+        const text = typeof out === 'string' ? out : JSON.stringify(out)
+        return { content: [{ type: 'text', text }] }
+      },
+    ),
+  )
+  return createSdkMcpServer({
+    name: 'custom',
+    version: '1.0.0',
+    tools: sdkTools,
+  })
 }
 
 /**
@@ -463,21 +764,62 @@ function extractSessionStore(config: AgentConfig): SessionStore | null {
 }
 
 /**
- * 派生 OAK 自管的纯净 ephemeral cwd(用户没传 cwd 时使用)。
+ * 创建内置 askUser MCP server。
  *
- * 这个目录是空白的,settingSources=[]:SDK 进去什么都读不到,等价 v0 isolation。
- * 进程级:每个 SDK 进程实例化时生成一次,进程结束时清理(我们不主动清,依赖 OS tmpdir GC)。
+ * 注册一个 `askUser` 工具，模型可通过它主动向用户提问。
+ * 工具的 execute() 是 stub——实际执行由 PreToolUse hook 拦截（sentinel 模式），
+ * Host 收集用户回答后调 session.respondToolUse() resume。
  *
- * **必须 mkdir**:SDK spawn 子进程时若 cwd 不存在会 ENOENT 崩溃。
- * 用 crypto.randomBytes 取代 Math.random,避免可预测性(虽然非安全场景)。
+ * resume 时 hook 从 clientToolStore 读到回答 → allow → 此 stub 读取回答并返回。
+ * askUser 在 store 里的 toolName='askUser',result.output={answer}。
  */
-let ephemeralCwdCache: string | undefined
-function deriveEphemeralCwd(): string {
-  if (ephemeralCwdCache) return ephemeralCwdCache
-  const random = randomBytes(4).toString('hex')
-  ephemeralCwdCache = path.join(os.tmpdir(), `oak-ephemeral-${random}`)
-  mkdirSync(ephemeralCwdCache, { recursive: true })
-  return ephemeralCwdCache
+function createBuiltinAskUserMcpServer(
+  clientToolStore: ClientToolResultStore,
+  conversationId?: string,
+): ReturnType<typeof createSdkMcpServer> {
+  const askUserTool = sdkTool(
+    'AskUserQuestion',
+    'Ask the user a question and wait for their answer. Use this when you need clarification, confirmation, or a choice from the user.',
+    {
+      question: z.string().describe('The question to ask the user'),
+      options: z
+        .array(z.string())
+        .optional()
+        .describe('Optional predefined answer options for the user to choose from'),
+    },
+    async (_input: Record<string, unknown>) => {
+      // Resume path: check if an answer is already stashed in the store.
+      // AskUserQuestion 的 toolName='AskUserQuestion',scanRecent 按 toolName 匹配。
+      if (conversationId && clientToolStore.scanRecent) {
+        const scanned = await clientToolStore.scanRecent({
+          conversationId,
+          toolName: 'AskUserQuestion',
+        })
+        if (scanned?.result) {
+          await clientToolStore.delete({
+            conversationId,
+            toolUseId: scanned.toolUseId,
+          })
+          // result.output 是 { answer: string }(respondAskUser 写入时包装的)
+          const output = scanned.result.output as { answer?: string } | string
+          const text = typeof output === 'string' ? output : (output.answer ?? JSON.stringify(output))
+          return {
+            content: [{ type: 'text', text }],
+          }
+        }
+      }
+      // Should not reach here in normal flow — the hook intercepts before execute().
+      return {
+        content: [{ type: 'text', text: '(AskUserQuestion: no answer available)' }],
+        isError: true,
+      }
+    },
+  )
+  return createSdkMcpServer({
+    name: 'kernel',
+    version: '1.0.0',
+    tools: [askUserTool],
+  })
 }
 
 /**

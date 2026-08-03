@@ -27,6 +27,27 @@ export interface ClaudeHomeSyncEngineOptions {
   store: ClaudeHomeSyncStore
   ctx: ClaudeHomeContext
   localDir: string
+  /**
+   * 同步白名单规则:relPath → 是否同步(只作用于文件)。默认 matchesSyncRule
+   * (userMemory:仅 memory .md)。cwd 持久化注入自己的规则(全量 + 排除规则)。
+   */
+  matchRule?: (relPath: string) => boolean
+  /**
+   * 目录剪枝:relPath(目录)→ 是否跳过整棵子树(true=跳过)。默认 undefined = 不剪枝
+   * (userMemory 是白名单匹配,必须递归进所有目录才能找到 projects/<id>/memory/)。
+   * cwd 持久化提供它,在顶层就剪掉 node_modules/.git/.oak 等,避免遍历开销。
+   */
+  pruneDir?: (relPath: string) => boolean
+  /**
+   * 是否在 pull 后写入默认 settings.json(autoMemoryEnabled:true)。默认 true(userMemory)。
+   * cwd 持久化传 false —— 工作目录不该被注入 SDK settings。
+   */
+  ensureSettings?: boolean
+  /**
+   * 跳过大于此字节数的文件(避免 cwd 全量同步把大产物推上 COS)。
+   * 默认 undefined = 不限制(userMemory:memory .md 都很小)。
+   */
+  maxFileBytes?: number
 }
 
 export class ClaudeHomeSyncEngine {
@@ -58,7 +79,10 @@ export class ClaudeHomeSyncEngine {
   async pullOnSendStart(): Promise<void> {
     await fs.mkdir(this.opts.localDir, { recursive: true })
     this.baseline = await this.opts.store.pull(this.opts.ctx, this.opts.localDir)
-    await this.ensureUserSettings()
+    // cwd 持久化传 ensureSettings:false —— 工作目录不注入 SDK settings.json
+    if (this.opts.ensureSettings !== false) {
+      await this.ensureUserSettings()
+    }
     if (process.env.OAK_DEBUG === '1') {
       const cosPrefix = `oak/users/${this.opts.ctx.userId}/claude-home/`
       // eslint-disable-next-line no-console
@@ -248,6 +272,9 @@ export class ClaudeHomeSyncEngine {
   }
 
   private async walkDir(absDir: string, relPrefix: string, out: Map<RelativePath, string>): Promise<void> {
+    const matchRule = this.opts.matchRule ?? matchesSyncRule
+    const pruneDir = this.opts.pruneDir
+    const maxFileBytes = this.opts.maxFileBytes
     let entries: import('node:fs').Dirent[]
     try {
       entries = await fs.readdir(absDir, { withFileTypes: true })
@@ -258,9 +285,19 @@ export class ClaudeHomeSyncEngine {
       const relPath = relPrefix ? `${relPrefix}/${entry.name}` : entry.name
       const absPath = path.join(absDir, entry.name)
       if (entry.isDirectory()) {
+        if (pruneDir?.(relPath)) continue // cwd:在 node_modules/.git 等顶层剪枝
         await this.walkDir(absPath, relPath, out)
       } else if (entry.isFile()) {
-        if (!matchesSyncRule(relPath)) continue
+        if (!matchRule(relPath)) continue
+        // 大文件跳过(cwd 全量同步防爆量);规则只看 relPath,大小在这里查
+        if (maxFileBytes !== undefined) {
+          try {
+            const st = await fs.stat(absPath)
+            if (st.size > maxFileBytes) continue
+          } catch {
+            continue
+          }
+        }
         const buf = await fs.readFile(absPath)
         out.set(relPath, sha256OfBuffer(buf))
       }

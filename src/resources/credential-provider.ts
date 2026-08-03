@@ -8,7 +8,7 @@
  *
  * 凭证来源优先级（高 → 低）：
  *   1. ModelSpec.apiKey（用户在 AgentConfig.model 里直传）
- *   2. process.env.TCB_API_KEY（CloudBase 环境服务端 APIKey；也可复用于 AGS 数据面）
+ *   2. process.env.CLOUDBASE_APIKEY（CloudBase 环境服务端 APIKey；也可复用于 AGS 数据面）
  *   3. 抛错（不再用占位符，避免误用）
  */
 
@@ -19,17 +19,6 @@ export interface ResolvedApiKey {
   apiKey: string
   /** 凭证来源（用于诊断日志） */
   source: 'config' | 'env_tcb_api_key'
-}
-
-/**
- * 解析 CloudBase 数据面可使用的 accessKey。
- *
- * 这里只读取 TCB_API_KEY，不能复用 ModelSpec.apiKey（它可能是第三方模型 key）
- * 或 sandbox 的 API key。
- */
-export function resolveCloudBaseAccessKey(): string | undefined {
-  const accessKey = process.env.TCB_API_KEY
-  return typeof accessKey === 'string' && accessKey.length > 0 ? accessKey : undefined
 }
 
 /**
@@ -45,14 +34,14 @@ export function resolveApiKey(explicitKey?: string): ResolvedApiKey {
   }
 
   // 2. CloudBase 环境服务端 APIKey
-  const tcbApiKey = resolveCloudBaseAccessKey()
-  if (tcbApiKey) {
+  const tcbApiKey = process.env.CLOUDBASE_APIKEY
+  if (typeof tcbApiKey === 'string' && tcbApiKey.length > 0) {
     return { apiKey: tcbApiKey, source: 'env_tcb_api_key' }
   }
 
   throw new ResourceError(
     'No API key found. Set one of:\n' +
-      '  - process.env.TCB_API_KEY (CloudBase environment server APIKey)\n' +
+      '  - process.env.CLOUDBASE_APIKEY (CloudBase environment server APIKey)\n' +
       '  - AgentConfig.model.apiKey (programmatic)\n' +
       '\n' +
       'Get a CloudBase server APIKey from the CloudBase environment settings.',

@@ -6,6 +6,7 @@
  *
  * 配置：examples/config.local.json（见 config.example.json）
  */
+import { printAcpUpdate } from './_shared/acp.js'
 import { getEnvId, getModel } from './_shared/env.js'
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
@@ -23,25 +24,7 @@ async function main(): Promise<void> {
   process.stdout.write('Assistant: ')
 
   for await (const event of session.send('你好，请用一句话介绍你自己。')) {
-    switch (event.type) {
-      case 'message_delta':
-        process.stdout.write(event.text)
-        break
-      case 'tool_call':
-        console.log(`\n[tool_call] ${event.toolName}(${JSON.stringify(event.input)})`)
-        break
-      case 'tool_result':
-        console.log(`\n[tool_result] ${JSON.stringify(event.output)}`)
-        break
-      case 'session_idle':
-        console.log(`\n\n[session_idle] reason=${event.reason}`)
-        break
-      case 'error':
-        console.error(`\n[error] ${event.error.message}`)
-        break
-      default:
-        break
-    }
+    printAcpUpdate(event)
   }
 }
 

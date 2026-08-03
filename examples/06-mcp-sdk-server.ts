@@ -14,6 +14,7 @@
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/06-mcp-sdk-server.ts
  */
+import { printAcpUpdate } from './_shared/acp.js'
 import { getEnvId, getModel } from './_shared/env.js'
 
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
@@ -53,15 +54,7 @@ async function main(): Promise<void> {
   console.log('User: 帮我算一下 23 * 47 + 100')
   process.stdout.write('Assistant: ')
   for await (const e of session.send('帮我算一下 23 * 47 + 100')) {
-    if (e.type === 'message_delta') {
-      process.stdout.write(e.text)
-    } else if (e.type === 'tool_call') {
-      process.stdout.write(`\n  → calling ${e.toolName}(${JSON.stringify(e.input)})\n  `)
-    } else if (e.type === 'tool_result') {
-      process.stdout.write(`\n  ← result: ${JSON.stringify(e.output)}\n  `)
-    } else if (e.type === 'error') {
-      console.error('\n[error]', e.error.message)
-    }
+    printAcpUpdate(e)
   }
 
   console.log('\n\n--- Done ---')

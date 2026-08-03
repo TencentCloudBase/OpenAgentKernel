@@ -11,30 +11,21 @@
  * 运行：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/09-sandbox-shared.ts
  */
+import { printAcpUpdate } from './_shared/acp.js'
 import { getEnvId, getModel, getPlatformCredentials } from './_shared/env.js'
 
-import { createAgent } from '@cloudbase/open-agent-kernel'
-import type { SessionEvent } from '@cloudbase/open-agent-kernel'
+import { createAgent, type AcpSessionUpdate } from '@cloudbase/open-agent-kernel'
 
 async function streamSession(
   label: string,
-  session: { send: (input: string) => AsyncIterable<SessionEvent> },
+  session: { send: (input: string) => AsyncIterable<AcpSessionUpdate> },
   prompt: string,
 ): Promise<void> {
   console.log(`\n=== ${label} ===`)
   console.log('User:', prompt, '\n')
   process.stdout.write('Assistant: ')
   for await (const e of session.send(prompt)) {
-    if (e.type === 'message_delta') {
-      process.stdout.write(e.text)
-    } else if (e.type === 'tool_call') {
-      process.stdout.write(`\n  → ${e.toolName}(${JSON.stringify(e.input).slice(0, 200)})\n  `)
-    } else if (e.type === 'tool_result') {
-      const out = JSON.stringify(e.output).slice(0, 300)
-      process.stdout.write(`\n  ← ${out}\n  `)
-    } else if (e.type === 'error') {
-      console.error('\n[error]', e.error.message)
-    }
+    printAcpUpdate(e)
   }
   console.log()
 }
