@@ -119,4 +119,19 @@ describe('createAgent — default storage', () => {
       }),
     ).toThrow(/requires AgentConfig\.credentials/)
   })
+
+  it('enables CloudBase Storage with accessKey-only credentials', () => {
+    createAgent({
+      envId: 'env-test',
+      model: 'glm-5.1',
+      credentials: { accessKey: 'ak-test' },
+    })
+
+    expect(mocks.cloudBaseStorage).toHaveBeenCalledWith({
+      credentials: {
+        envId: 'env-test',
+        accessKey: 'ak-test',
+      },
+    })
+  })
 })

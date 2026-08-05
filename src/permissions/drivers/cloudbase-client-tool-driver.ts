@@ -29,6 +29,8 @@ import type { ClientToolResultStoreDriver } from './types.js'
 /** CloudBase Node SDK 凭证 */
 export interface CloudBaseClientToolCredentials {
   envId: string
+  /** CloudBase 平台 API Key。存在时优先于 secretId/secretKey */
+  accessKey?: string
   secretId?: string
   secretKey?: string
   sessionToken?: string
@@ -46,6 +48,7 @@ const ENTRY_TYPE = 'client_tool'
 
 interface ResolvedCredentials {
   envId?: string
+  accessKey?: string
   secretId?: string
   secretKey?: string
   sessionToken?: string
@@ -71,6 +74,7 @@ function resolveCredentials(opts?: CloudBaseDbClientToolDriverOptions): Resolved
   }
   return {
     envId,
+    ...(creds?.accessKey ? { accessKey: creds.accessKey } : {}),
     ...(creds?.secretId ? { secretId: creds.secretId } : {}),
     ...(creds?.secretKey ? { secretKey: creds.secretKey } : {}),
     ...(creds?.sessionToken ? { sessionToken: creds.sessionToken } : {}),
@@ -131,6 +135,7 @@ export class CloudBaseDbClientToolDriver implements ClientToolResultStoreDriver 
     this.app = cloudbase.init({
       env: this.creds.envId,
       region: this.creds.region,
+      ...(this.creds.accessKey ? { accessKey: this.creds.accessKey } : {}),
       secretId: this.creds.secretId,
       secretKey: this.creds.secretKey,
       ...(this.creds.sessionToken ? { sessionToken: this.creds.sessionToken } : {}),

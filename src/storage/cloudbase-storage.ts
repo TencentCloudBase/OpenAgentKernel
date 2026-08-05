@@ -21,8 +21,12 @@ import type { ResolveContext, ResolvedAttachment, StorageProvider } from './type
 
 export interface CloudBaseStorageCredentials {
   envId: string
-  secretId: string
-  secretKey: string
+  /** CloudBase 平台 API Key。存在时优先于 secretId/secretKey */
+  accessKey?: string
+  /** 腾讯云 SecretId。accessKey 未提供时必填 */
+  secretId?: string
+  /** 腾讯云 SecretKey。accessKey 未提供时必填 */
+  secretKey?: string
   sessionToken?: string
   region?: string
 }
@@ -53,6 +57,7 @@ function resolveCredentials(opts?: CloudBaseStorageOptions): ResolvedCredentials
   const creds = opts?.credentials
   return {
     ...(creds?.envId ? { envId: creds.envId } : {}),
+    ...(creds?.accessKey ? { accessKey: creds.accessKey } : {}),
     ...(creds?.secretId ? { secretId: creds.secretId } : {}),
     ...(creds?.secretKey ? { secretKey: creds.secretKey } : {}),
     ...(creds?.sessionToken ? { sessionToken: creds.sessionToken } : {}),
@@ -79,6 +84,7 @@ export class CloudBaseStorage implements StorageProvider {
     this.app = cloudbase.init({
       region: this.creds.region,
       ...(this.creds.envId ? { env: this.creds.envId } : {}),
+      ...(this.creds.accessKey ? { accessKey: this.creds.accessKey } : {}),
       ...(this.creds.secretId ? { secretId: this.creds.secretId } : {}),
       ...(this.creds.secretKey ? { secretKey: this.creds.secretKey } : {}),
       ...(this.creds.sessionToken ? { sessionToken: this.creds.sessionToken } : {}),

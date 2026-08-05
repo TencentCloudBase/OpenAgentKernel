@@ -111,4 +111,24 @@ describe('createAgent — default permission store', () => {
     expect(mocks.cloudBaseDbPermissionDriver).not.toHaveBeenCalled()
     expect(mocks.cloudBasePermissionStore).not.toHaveBeenCalled()
   })
+
+  it('enables CloudBase FlexDB permission store with accessKey-only credentials', () => {
+    createAgent({
+      envId: 'env-test',
+      model: 'glm-5.1',
+      credentials: { accessKey: 'ak-test' },
+      permissions: {
+        requireApproval: '*',
+        tablePrefix: 'perm_',
+      },
+    })
+
+    expect(mocks.cloudBaseDbPermissionDriver).toHaveBeenCalledWith({
+      credentials: {
+        envId: 'env-test',
+        accessKey: 'ak-test',
+      },
+      collectionPrefix: 'perm_',
+    })
+  })
 })

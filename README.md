@@ -572,13 +572,21 @@ const status = await session.getRestoreStatus?.()
 
 ### `PlatformCredentials`
 
+支持两种认证方式（按优先级）：
+
+- **`accessKey`**（CloudBase 平台 API Key）：node-sdk 直接支持 Bearer 认证；manager-node（userMemory 的 cos-store）会自动换取临时 CAM 凭证。**推荐**——只需一个 key 即可使用所有 CloudBase 功能（FlexDB / Storage / userMemory / Sandbox MCP）。
+- **`secretId` + `secretKey`**（腾讯云 CAM 凭证）：直接传给下游 SDK。
+
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|:----:|------|
-| `secretId` | `string` | 是 | 腾讯云 SecretId。 |
-| `secretKey` | `string` | 是 | 腾讯云 SecretKey。 |
+| `accessKey` | `string` | 否* | CloudBase 平台 API Key。存在时优先于 `secretId`/`secretKey`。 |
+| `secretId` | `string` | 否* | 腾讯云 SecretId。`accessKey` 未提供时必填。 |
+| `secretKey` | `string` | 否* | 腾讯云 SecretKey。`accessKey` 未提供时必填。 |
 | `envId` | `string` | 否 | CloudBase 环境 ID。不传时继承 `AgentConfig.envId`。 |
 | `sessionToken` | `string` | 否 | STS 临时凭证 token。 |
 | `region` | `string` | 否 | 地域，默认 `ap-shanghai`。 |
+
+*\*`accessKey` 和 `secretId`/`secretKey` 至少提供一种。*
 
 ### `ModelSpec`
 
