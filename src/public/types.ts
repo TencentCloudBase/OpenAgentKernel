@@ -14,14 +14,23 @@ import type { StreamAdapter } from '../adapters/index.js'
 /**
  * 平台凭证，用于初始化 CloudBase 管理端/服务端 SDK。
  *
+ * 支持两种认证方式（按优先级）：
+ *   1. `accessKey`（CloudBase 平台 API Key）：node-sdk 直接支持 Bearer 认证；
+ *      manager-node（cos-store）会自动换取临时 CAM 凭证。
+ *   2. `secretId` + `secretKey`（腾讯云 CAM 凭证）：直接传给下游 SDK。
+ *
  * kernel 不从 `process.env` 读取平台凭证；示例或业务代码可自行从环境变量加载后，
  * 通过 `createAgent({ credentials })` 显式传入。
  */
 export interface PlatformCredentials {
   /** CloudBase 环境 ID；不传时默认继承 AgentConfig.envId */
   envId?: string
-  secretId: string
-  secretKey: string
+  /** CloudBase 平台 API Key。存在时优先于 secretId/secretKey */
+  accessKey?: string
+  /** 腾讯云 SecretId。accessKey 未提供时必填 */
+  secretId?: string
+  /** 腾讯云 SecretKey。accessKey 未提供时必填 */
+  secretKey?: string
   /** STS 临时凭证 token（可选） */
   sessionToken?: string
   /** 默认 ap-shanghai */
@@ -166,13 +175,18 @@ export interface SandboxConfig {
  * 沙箱内 cloudbase-mcp 工具调用使用的用户租户凭证。
  *
  * 注入到沙箱 `/api/workspace/env`：
- *   CLOUDBASE_ENV_ID, TENCENTCLOUD_SECRETID, TENCENTCLOUD_SECRETKEY, TENCENTCLOUD_SESSIONTOKEN
+ *   CLOUDBASE_ENV_ID, CLOUDBASE_APIKEY (accessKey 模式)
+ *   或 TENCENTCLOUD_SECRETID, TENCENTCLOUD_SECRETKEY, TENCENTCLOUD_SESSIONTOKEN (CAM 模式)
  */
 export interface SandboxUserCredentials {
   /** CloudBase 环境 ID（不传则回退到 AgentConfig.envId） */
   envId?: string
-  secretId: string
-  secretKey: string
+  /** CloudBase 平台 API Key。存在时优先于 secretId/secretKey */
+  accessKey?: string
+  /** 腾讯云 SecretId。accessKey 未提供时必填 */
+  secretId?: string
+  /** 腾讯云 SecretKey。accessKey 未提供时必填 */
+  secretKey?: string
   /** 临时 token（CAM 临时凭证场景），可选 */
   sessionToken?: string
 }

@@ -472,9 +472,13 @@ function createSession(deps: SessionDeps): Session {
         const creds = await resolveUserCredentials(config)
         const envBag: Record<string, string> = {
           CLOUDBASE_ENV_ID: creds.envId,
-          TENCENTCLOUD_SECRETID: creds.secretId,
-          TENCENTCLOUD_SECRETKEY: creds.secretKey,
-          TENCENTCLOUD_SESSIONTOKEN: creds.sessionToken ?? '',
+          ...(creds.accessKey
+            ? { CLOUDBASE_APIKEY: creds.accessKey }
+            : {
+                TENCENTCLOUD_SECRETID: creds.secretId ?? '',
+                TENCENTCLOUD_SECRETKEY: creds.secretKey ?? '',
+                TENCENTCLOUD_SESSIONTOKEN: creds.sessionToken ?? '',
+              }),
         }
         await engine.bootstrap(sandbox, { credentials: envBag })
         snapshotBootstrapped = true
@@ -1645,28 +1649,40 @@ async function resolveUserCredentials(config: AgentConfig): Promise<CloudBaseUse
   if (creds) {
     return {
       envId: creds.envId ?? config.envId,
-      secretId: creds.secretId,
-      secretKey: creds.secretKey,
-      sessionToken: creds.sessionToken,
+      ...(creds.accessKey ? { accessKey: creds.accessKey } : {}),
+      ...(creds.secretId ? { secretId: creds.secretId } : {}),
+      ...(creds.secretKey ? { secretKey: creds.secretKey } : {}),
+      ...(creds.sessionToken ? { sessionToken: creds.sessionToken } : {}),
     }
   }
 
   const platformCreds = config.credentials
 
-  if (!platformCreds?.secretId || !platformCreds.secretKey) {
+  // 没有显式 credentials 时,fallback 到 CLOUDBASE_APIKEY env(node-sdk 自身也支持此 fallback,
+  // 但 sandbox MCP 需要主动注入到容器 env,所以这里要显式读出来)
+  if (!platformCreds?.accessKey && (!platformCreds?.secretId || !platformCreds.secretKey)) {
+    const envApiKey = process.env.CLOUDBASE_APIKEY
+    if (typeof envApiKey === 'string' && envApiKey.length > 0) {
+      return {
+        envId: config.envId,
+        accessKey: envApiKey,
+      }
+    }
     throw new InvalidConfigError(
       'CloudBase MCP tools require user credentials. ' +
         'Either set AgentConfig.sandbox.userCredentials, ' +
-        'or pass AgentConfig.credentials. ' +
+        'pass AgentConfig.credentials (accessKey or secretId/secretKey), ' +
+        'or set process.env.CLOUDBASE_APIKEY. ' +
         'To disable cloudbase tools entirely, pass `sandbox: { cloudbaseTools: false }`.',
     )
   }
 
   return {
     envId: platformCreds.envId || config.envId,
-    secretId: platformCreds.secretId,
-    secretKey: platformCreds.secretKey,
-    sessionToken: platformCreds.sessionToken,
+    ...(platformCreds.accessKey ? { accessKey: platformCreds.accessKey } : {}),
+    ...(platformCreds.secretId ? { secretId: platformCreds.secretId } : {}),
+    ...(platformCreds.secretKey ? { secretKey: platformCreds.secretKey } : {}),
+    ...(platformCreds.sessionToken ? { sessionToken: platformCreds.sessionToken } : {}),
   }
 }
 

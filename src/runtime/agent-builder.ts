@@ -165,12 +165,16 @@ export function buildClaudeQueryOptions(
   if (userMemoryEnabled && extra.userId) {
     try {
       claudeConfigDir = deriveClaudeConfigDir(config.envId, extra.userId)
+      // 即使 config.credentials 缺失,也传 { envId } 让 cos-store 能 fallback 到 CLOUDBASE_APIKEY env
+      const storeCreds = config.credentials
+        ? {
+            ...config.credentials,
+            envId: config.credentials.envId ?? config.envId,
+            ...(config.credentials.accessKey ? { apiKey: config.credentials.accessKey } : {}),
+          }
+        : { envId: config.envId }
       syncEngine = new ClaudeHomeSyncEngine({
-        store: new CloudBaseCosClaudeHomeStore({
-          credentials: config.credentials
-            ? { ...config.credentials, envId: config.credentials.envId ?? config.envId }
-            : undefined,
-        }),
+        store: new CloudBaseCosClaudeHomeStore({ credentials: storeCreds }),
         ctx: { envId: config.envId, userId: extra.userId },
         localDir: claudeConfigDir,
       })
@@ -534,13 +538,18 @@ function resolveCwdPersistEngine(
     return undefined
   }
 
+  // 即使 config.credentials 缺失,也传 { envId } 让 cos-store 能 fallback 到 CLOUDBASE_APIKEY env
   const credentials = config.credentials
-    ? { ...config.credentials, envId: config.credentials.envId ?? config.envId }
-    : undefined
+    ? {
+        ...config.credentials,
+        envId: config.credentials.envId ?? config.envId,
+        ...(config.credentials.accessKey ? { apiKey: config.credentials.accessKey } : {}),
+      }
+    : { envId: config.envId }
 
   try {
     return createWorkspaceCwdArchiveEngine({
-      ...(credentials ? { credentials } : {}),
+      credentials,
       envId: config.envId,
       userId,
       sessionId: args.sessionId,

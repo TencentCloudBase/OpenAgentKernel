@@ -38,7 +38,11 @@ export interface DeleteUserMemoryFilesOptions extends UserMemoryFilesOptions {
  */
 export async function writeUserMemoryFiles(opts: WriteUserMemoryFilesOptions): Promise<void> {
   const store = new CloudBaseCosClaudeHomeStore({
-    credentials: { ...opts.credentials, envId: opts.credentials.envId ?? opts.envId },
+    credentials: {
+      ...opts.credentials,
+      envId: opts.credentials.envId ?? opts.envId,
+      ...(opts.credentials.accessKey ? { apiKey: opts.credentials.accessKey } : {}),
+    },
   })
   for (const file of opts.files) {
     const content = typeof file.content === 'string' ? Buffer.from(file.content, 'utf8') : file.content
@@ -53,7 +57,11 @@ export async function writeUserMemoryFiles(opts: WriteUserMemoryFilesOptions): P
  */
 export async function deleteUserMemoryFiles(opts: DeleteUserMemoryFilesOptions): Promise<void> {
   const store = new CloudBaseCosClaudeHomeStore({
-    credentials: { ...opts.credentials, envId: opts.credentials.envId ?? opts.envId },
+    credentials: {
+      ...opts.credentials,
+      envId: opts.credentials.envId ?? opts.envId,
+      ...(opts.credentials.accessKey ? { apiKey: opts.credentials.accessKey } : {}),
+    },
   })
   for (const path of opts.paths) {
     await store.delete({ envId: opts.envId, userId: opts.userId }, path)

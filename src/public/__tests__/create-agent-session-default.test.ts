@@ -59,6 +59,18 @@ describe('createAgent — default session store', () => {
     ).toThrow(/requires AgentConfig\.credentials/)
   })
 
+  it('enables session store with accessKey-only credentials (no CAM secret needed)', async () => {
+    const agent = createAgent({
+      envId: 'env-test',
+      model: 'glm-5.1',
+      credentials: { accessKey: 'ak-test' },
+    })
+
+    await expect(agent.resumeSession('conversation-id')).resolves.toMatchObject({
+      id: 'conversation-id',
+    })
+  })
+
   it('rejects reserved CloudBase database types until their drivers are implemented', () => {
     expect(() => createAgent({ ...baseConfig, session: { database: 'mysql' } })).toThrow(/reserved for future/)
   })

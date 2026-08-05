@@ -218,18 +218,39 @@ describe('buildClaudeQueryOptions — userMemory', () => {
     expect(options.env?.CLAUDE_CONFIG_DIR).toContain(AGENT_FALLBACK)
   })
 
-  it('userMemory + missing credentials → graceful degrade (no syncEngine, no throw)', () => {
-    // COS 凭证缺失时构造 store 抛 InvalidConfigError → agent-builder try/catch 兜住,
-    // syncEngine=undefined,claudeConfigDir 回退到 agent 全局,不影响 send 主流程。
-    expect(() => {
-      const { options, syncEngine } = buildClaudeQueryOptions(
-        { ...baseConfig, credentials: undefined, userMemory: { enabled: true } },
-        { userId: 'alice' },
-      )
-      expect(syncEngine).toBeUndefined()
-      // 降级后回退 agent 全局目录(不是 per-user,也不是 undefined)
-      expect(options.env?.CLAUDE_CONFIG_DIR).toContain(AGENT_FALLBACK)
-    }).not.toThrow()
+  it('userMemory + no credentials but CLOUDBASE_APIKEY env → syncEngine active (env fallback)', () => {
+    // COS 凭证缺失但 process.env.CLOUDBASE_APIKEY 存在 → cos-store resolveCredentials
+    // 走 env fallback 路径,syncEngine 正常创建
+    const { syncEngine } = buildClaudeQueryOptions(
+      { ...baseConfig, credentials: undefined, userMemory: { enabled: true } },
+      { userId: 'alice' },
+    )
+    expect(syncEngine).toBeDefined()
+  })
+
+  it('userMemory + no credentials and no CLOUDBASE_APIKEY env → graceful degrade', () => {
+    // 完全无凭证时构造 store 抛 InvalidConfigError → agent-builder try/catch 兜住,
+    // syncEngine=undefined,不影响 send 主流程。
+    // 用显式 model.apiKey 避免模型网关 resolveApiKey 也依赖 CLOUDBASE_APIKEY
+    const savedKey = process.env.CLOUDBASE_APIKEY
+    delete process.env.CLOUDBASE_APIKEY
+    try {
+      expect(() => {
+        const { options, syncEngine } = buildClaudeQueryOptions(
+          {
+            ...baseConfig,
+            credentials: undefined,
+            model: { id: 'glm-5.1', apiKey: 'explicit-model-key' },
+            userMemory: { enabled: true },
+          },
+          { userId: 'alice' },
+        )
+        expect(syncEngine).toBeUndefined()
+        expect(options.env?.CLAUDE_CONFIG_DIR).toContain(AGENT_FALLBACK)
+      }).not.toThrow()
+    } finally {
+      process.env.CLOUDBASE_APIKEY = savedKey
+    }
   })
 })
 
@@ -360,14 +381,33 @@ describe('buildClaudeQueryOptions — cwdPersistEngine', () => {
     expect(cwdPersistEngine).toBeUndefined()
   })
 
-  it("sandboxMode='local' + missing credentials → graceful degrade (undefined, no throw)", () => {
-    expect(() => {
-      const { cwdPersistEngine } = buildClaudeQueryOptions(
-        { ...baseConfig, credentials: undefined, cwd },
-        { sessionId: 'sess-1', sandboxMode: 'local' },
-      )
-      expect(cwdPersistEngine).toBeUndefined()
-    }).not.toThrow()
+  it("sandboxMode='local' + no credentials but CLOUDBASE_APIKEY env → cwdPersistEngine active (env fallback)", () => {
+    const { cwdPersistEngine } = buildClaudeQueryOptions(
+      { ...baseConfig, credentials: undefined, cwd },
+      { sessionId: 'sess-1', sandboxMode: 'local' },
+    )
+    expect(cwdPersistEngine).toBeDefined()
+  })
+
+  it("sandboxMode='local' + no credentials and no CLOUDBASE_APIKEY env → graceful degrade", () => {
+    const savedKey = process.env.CLOUDBASE_APIKEY
+    delete process.env.CLOUDBASE_APIKEY
+    try {
+      expect(() => {
+        const { cwdPersistEngine } = buildClaudeQueryOptions(
+          {
+            ...baseConfig,
+            credentials: undefined,
+            model: { id: 'glm-5.1', apiKey: 'explicit-model-key' },
+            cwd,
+          },
+          { sessionId: 'sess-1', sandboxMode: 'local' },
+        )
+        expect(cwdPersistEngine).toBeUndefined()
+      }).not.toThrow()
+    } finally {
+      process.env.CLOUDBASE_APIKEY = savedKey
+    }
   })
 })
 

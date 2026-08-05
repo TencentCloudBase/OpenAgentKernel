@@ -45,8 +45,12 @@ const SCHEMA_DISCOVERY_RETRY_DELAY_MS = 3000
  */
 export interface CloudBaseUserCredentials {
   envId: string
-  secretId: string
-  secretKey: string
+  /** CloudBase 平台 API Key。存在时优先于 secretId/secretKey */
+  accessKey?: string
+  /** 腾讯云 SecretId。accessKey 未提供时必填 */
+  secretId?: string
+  /** 腾讯云 SecretKey。accessKey 未提供时必填 */
+  secretKey?: string
   sessionToken?: string
 }
 
