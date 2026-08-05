@@ -4,7 +4,7 @@
  *
  * 当前默认模型路由走 CloudBase AI gateway：
  *   - baseURL = https://${envId}.api.tcloudbasegateway.com/v1/ai/cloudbase
- *   - API Key 从 ModelSpec.apiKey / TCB_API_KEY 加载
+ *   - API Key 从 ModelSpec.apiKey / CLOUDBASE_APIKEY 加载
  *
  * Claude Agent SDK 要求通过环境变量配置网关（不接受 options 直接传 baseURL/apiKey）：
  *   - `ANTHROPIC_BASE_URL`   ← CloudBase AI gateway baseURL

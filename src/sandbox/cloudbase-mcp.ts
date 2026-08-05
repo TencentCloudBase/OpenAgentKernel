@@ -45,8 +45,12 @@ const SCHEMA_DISCOVERY_RETRY_DELAY_MS = 3000
  */
 export interface CloudBaseUserCredentials {
   envId: string
-  secretId: string
-  secretKey: string
+  /** CloudBase 平台 API Key。存在时优先于 secretId/secretKey */
+  accessKey?: string
+  /** 腾讯云 SecretId。accessKey 未提供时必填 */
+  secretId?: string
+  /** 腾讯云 SecretKey。accessKey 未提供时必填 */
+  secretKey?: string
   sessionToken?: string
 }
 
@@ -72,11 +76,17 @@ export interface CloudBaseMcpBundle {
   toolCount: number
   /** degraded 原因（toolCount === 0 时给出） */
   degradedReason?: string
+  /**
+   * 直接执行某个工具（按 bare toolName，不带 mcp__cloudbase__ 前缀）。
+   * 用于 HITL approval resume：approve 后 kernel 直接调用拿结果 patch 进
+   * transcript，避免让模型重新发起调用。未知工具返回 null。
+   */
+  invoke?: (toolName: string, input: Record<string, unknown>) => Promise<{ output: string; isError: boolean } | null>
 }
 
 // ─── JSON Schema → zod raw shape ──────────────────────────────────────
 
-interface JsonSchemaProperty {
+export interface JsonSchemaProperty {
   type?: string
   description?: string
   enum?: string[]
@@ -85,7 +95,7 @@ interface JsonSchemaProperty {
   required?: string[]
 }
 
-interface JsonSchemaObject {
+export interface JsonSchemaObject {
   type?: string
   properties?: Record<string, JsonSchemaProperty>
   required?: string[]
@@ -97,7 +107,9 @@ interface JsonSchemaObject {
  * 直接照搬 stateful-infra 的实现，cloudbase 工具的 schema 都是简单类型（string / number /
  * boolean / array / object / enum），不涉及复杂组合式校验，转换成本低。
  */
-function jsonSchemaToZodRawShape(schema: JsonSchemaObject | undefined): Record<string, z.ZodTypeAny> {
+export function jsonSchemaToZodRawShapeForCloudBaseMcp(
+  schema: JsonSchemaObject | undefined,
+): Record<string, z.ZodTypeAny> {
   if (!schema || schema.type !== 'object' || !schema.properties) return {}
   const shape: Record<string, z.ZodTypeAny> = {}
   const required = new Set(schema.required ?? [])
@@ -492,7 +504,7 @@ export async function createCloudBaseMcpServer(options: CreateCloudBaseMcpOption
   const tools = toolDefs
     .filter((t) => t.name && !SKIP_TOOLS.has(t.name))
     .map((t) => {
-      const zodShape = jsonSchemaToZodRawShape(t.inputSchema)
+      const zodShape = jsonSchemaToZodRawShapeForCloudBaseMcp(t.inputSchema)
       return sdkTool(
         t.name,
         (t.description ?? `CloudBase tool: ${t.name}`) +
@@ -528,6 +540,8 @@ export async function createCloudBaseMcpServer(options: CreateCloudBaseMcpOption
 
   log(`registered ${tools.length} cloudbase tools (skipped ${toolDefs.length - tools.length})`)
 
+  const knownToolNames = new Set(toolDefs.filter((t) => t.name && !SKIP_TOOLS.has(t.name)).map((t) => t.name))
+
   return {
     server: createSdkMcpServer({
       name: 'cloudbase',
@@ -535,5 +549,20 @@ export async function createCloudBaseMcpServer(options: CreateCloudBaseMcpOption
       tools,
     }),
     toolCount: tools.length,
+    invoke: async (toolName, input) => {
+      if (!knownToolNames.has(toolName)) return null
+      try {
+        const output = await callCloudBaseTool({
+          sandbox,
+          toolName,
+          args: input,
+          reInjectCredentials,
+          log,
+        })
+        return { output, isError: isCredentialError(output) }
+      } catch (err) {
+        return { output: err instanceof Error ? err.message : String(err), isError: true }
+      }
+    },
   }
 }

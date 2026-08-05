@@ -12,7 +12,8 @@ import { sha256OfBuffer } from './dedup.js'
 import type { ClaudeHomeContext, ClaudeHomeSyncStore, RelativePath } from './types.js'
 
 function nsKey(ctx: ClaudeHomeContext): string {
-  return `${ctx.envId}|${ctx.userId}`
+  // 折入 sessionId(若有),避免 cwd(per-session)命名空间与 userMemory(per-user)碰撞
+  return `${ctx.envId}|${ctx.userId}|${ctx.sessionId ?? ''}`
 }
 
 export class InMemoryClaudeHomeStore implements ClaudeHomeSyncStore {
@@ -46,5 +47,11 @@ export class InMemoryClaudeHomeStore implements ClaudeHomeSyncStore {
   async delete(ctx: ClaudeHomeContext, relPath: RelativePath): Promise<void> {
     const ns = this.objects.get(nsKey(ctx))
     ns?.delete(relPath)
+  }
+
+  async getObject(ctx: ClaudeHomeContext, relPath: RelativePath): Promise<Buffer | null> {
+    const ns = this.objects.get(nsKey(ctx))
+    const buf = ns?.get(relPath)
+    return buf ? Buffer.from(buf) : null
   }
 }

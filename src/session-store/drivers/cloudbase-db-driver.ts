@@ -3,8 +3,7 @@
  *
  * 凭证模式：
  *   - 推荐通过 CloudBaseDbDriverOptions.credentials 显式注入
- *   - 无 credentials 时可通过 accessKey 使用 CloudBase 数据面认证
- *   - 两者都不传时由 @cloudbase/node-sdk 自身处理运行环境认证
+ *   - 不传时不做 env fallback，由 @cloudbase/node-sdk 自身处理运行环境认证
  *
  * 四张集合：
  *   - {prefix}sessions          一行 = 一个 session（用作 listSessions 索引）
@@ -16,16 +15,20 @@
  */
 
 import type { SessionKey, SessionStoreEntry, SessionSummaryEntry } from '@anthropic-ai/claude-agent-sdk'
+import cloudbase from '@cloudbase/node-sdk'
 
-import { ResourceError } from '../../internal/errors.js'
 import type { MessageStatus } from '../../public/types.js'
 import { encodeSessionKey, type SessionStoreDriver, type SessionMessageMeta } from './types.js'
 
 /** CloudBase Node SDK 凭证 */
 export interface CloudBaseCredentials {
   envId: string
-  secretId: string
-  secretKey: string
+  /** CloudBase 平台 API Key。存在时优先于 secretId/secretKey */
+  accessKey?: string
+  /** 腾讯云 SecretId。accessKey 未提供时必填 */
+  secretId?: string
+  /** 腾讯云 SecretKey。accessKey 未提供时必填 */
+  secretKey?: string
   /** STS 临时凭证 token（可选） */
   sessionToken?: string
   /** 默认 ap-shanghai */
@@ -35,11 +38,6 @@ export interface CloudBaseCredentials {
 export interface CloudBaseDbDriverOptions {
   /** 显式凭证；不传则由 @cloudbase/node-sdk 自身处理运行环境认证 */
   credentials?: CloudBaseCredentials
-  /** 仅用于 FlexDB 数据面的 API Key 认证；credentials 存在时忽略 */
-  accessKey?: {
-    envId: string
-    accessKey: string
-  }
   /**
    * 集合名前缀（默认 `oak_`，与 OpenVibeCoding 的 `vibe_agent_` 区分开，
    * 避免污染同一 envId 下其他业务的命名空间）
@@ -57,6 +55,7 @@ function resolveCredentials(opts?: CloudBaseDbDriverOptions): ResolvedCredential
   const creds = opts?.credentials
   return {
     ...(creds?.envId ? { envId: creds.envId } : {}),
+    ...(creds?.accessKey ? { accessKey: creds.accessKey } : {}),
     ...(creds?.secretId ? { secretId: creds.secretId } : {}),
     ...(creds?.secretKey ? { secretKey: creds.secretKey } : {}),
     ...(creds?.sessionToken ? { sessionToken: creds.sessionToken } : {}),
@@ -78,6 +77,11 @@ interface CloudBaseCollection {
   orderBy(field: string, direction: 'asc' | 'desc'): CloudBaseQuery
   limit(n: number): CloudBaseQuery
   get(): Promise<{ data: Array<Record<string, unknown>> }>
+  createIndex(opts: {
+    indexName: string
+    keys: Array<{ name: string; direction: 1 | -1 }>
+    unique?: boolean
+  }): Promise<unknown>
 }
 
 interface CloudBaseQuery {
@@ -102,14 +106,12 @@ interface CloudBaseApp {
 
 export class CloudBaseDbDriver implements SessionStoreDriver {
   private readonly creds: ResolvedCredentials
-  private readonly accessKey?: NonNullable<CloudBaseDbDriverOptions['accessKey']>
   private readonly prefix: string
   private app: CloudBaseApp | null = null
   private readonly ensuredCollections = new Set<string>()
 
   constructor(opts?: CloudBaseDbDriverOptions) {
     this.creds = resolveCredentials(opts)
-    this.accessKey = opts?.credentials ? undefined : opts?.accessKey
     this.prefix = opts?.collectionPrefix ?? DEFAULT_PREFIX
   }
 
@@ -117,37 +119,15 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
 
   private async getApp(): Promise<CloudBaseApp> {
     if (this.app) return this.app
-    const mod = await this.requireCloudBase()
-    const init = (mod.default ?? mod) as { init(opts: Record<string, unknown>): CloudBaseApp }
-    if (typeof init.init !== 'function') {
-      throw new ResourceError(
-        '@cloudbase/node-sdk loaded but `.init()` not available. ' + 'Check the version (>= 3.0.0 required).',
-      )
-    }
-    this.app = this.accessKey
-      ? init.init({ env: this.accessKey.envId, accessKey: this.accessKey.accessKey })
-      : init.init({
-          region: this.creds.region,
-          ...(this.creds.envId ? { env: this.creds.envId } : {}),
-          ...(this.creds.secretId ? { secretId: this.creds.secretId } : {}),
-          ...(this.creds.secretKey ? { secretKey: this.creds.secretKey } : {}),
-          ...(this.creds.sessionToken ? { sessionToken: this.creds.sessionToken } : {}),
-        })
+    this.app = cloudbase.init({
+      region: this.creds.region,
+      ...(this.creds.envId ? { env: this.creds.envId } : {}),
+      ...(this.creds.accessKey ? { accessKey: this.creds.accessKey } : {}),
+      ...(this.creds.secretId ? { secretId: this.creds.secretId } : {}),
+      ...(this.creds.secretKey ? { secretKey: this.creds.secretKey } : {}),
+      ...(this.creds.sessionToken ? { sessionToken: this.creds.sessionToken } : {}),
+    }) as unknown as CloudBaseApp
     return this.app
-  }
-
-  private async requireCloudBase(): Promise<{ default?: unknown; init?: unknown }> {
-    try {
-      // 用 Function 构造避免 bundler 静态分析硬连接 peer dep
-      const dynamicImport = new Function('p', 'return import(p)') as (
-        p: string,
-      ) => Promise<{ default?: unknown; init?: unknown }>
-      return await dynamicImport('@cloudbase/node-sdk')
-    } catch {
-      throw new ResourceError(
-        '@cloudbase/node-sdk failed to load. Reinstall @cloudbase/open-agent-kernel or check your node_modules.',
-      )
-    }
   }
 
   private async getCollection(name: string): Promise<CloudBaseCollection> {
@@ -162,7 +142,24 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
       }
       this.ensuredCollections.add(fullName)
     }
-    return db.collection(fullName)
+    const col = db.collection(fullName)
+    // Ensure unique index on sessions for (projectKey, sessionId) to prevent duplicates
+    if (name === 'sessions' && !this.ensuredCollections.has(`${fullName}:idx`)) {
+      try {
+        await col.createIndex({
+          indexName: 'uniq_project_session',
+          keys: [
+            { name: 'projectKey', direction: 1 },
+            { name: 'sessionId', direction: 1 },
+          ],
+          unique: true,
+        })
+      } catch {
+        // index already exists, ignore
+      }
+      this.ensuredCollections.add(`${fullName}:idx`)
+    }
+    return col
   }
 
   // ─── SessionStoreDriver 接口实现 ────────────────────────────────
@@ -174,19 +171,39 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
     const now = Date.now()
     const entriesCol = await this.getCollection('session_entries')
 
-    // 读取已存在的 uuid，做幂等
+    // 读取已存在的 uuid，做幂等 / 更新
     const existingUuids = await this.fetchExistingUuids(
       entriesCol,
       sessionKey,
       entries.map((e) => e.uuid).filter((u): u is string => typeof u === 'string'),
     )
 
-    // 准备插入
+    // 准备插入或更新
     const docs: Array<Record<string, unknown>> = []
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i]
       const uuid = typeof entry.uuid === 'string' ? entry.uuid : undefined
       if (uuid !== undefined && existingUuids.has(uuid)) {
+        // Replace the existing entry in place (supports transcript patching,
+        // e.g. patchSentinelToolResult overwriting a sentinel tool_result).
+        //
+        // We update ONLY the fields that change — `entry` (the SDK payload)
+        // plus its two derived columns (`messageId`, `type`). Everything else
+        // (`seq`, `createdAt`, `sessionKey`, …) is left untouched, so the entry
+        // keeps its transcript position and identity. No get()+field re-listing
+        // needed, so there's no risk of dropping columns on replace.
+        //
+        // CRITICAL: `entry` must be wrapped in `_.set()`. A plain
+        // update({ entry }) deep-MERGES nested objects, leaving stale
+        // `entry.message.content[]` blocks (the original bug). `_.set(entry)`
+        // forces a wholesale replacement (verified on live FlexDB).
+        const messageId = (entry as { message?: { id?: string } }).message?.id || uuid || null
+        const type = typeof entry.type === 'string' ? entry.type : 'unknown'
+        await entriesCol.where({ sessionKey, uuid }).update({
+          ...(await this.setCommand('entry', entry)),
+          messageId,
+          type,
+        })
         continue
       }
       docs.push({
@@ -267,6 +284,21 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
     return all.map((row) => row['entry']).filter((e): e is SessionStoreEntry => e !== null && typeof e === 'object')
   }
 
+  async loadRecentEntries(key: SessionKey, limit: number): Promise<SessionStoreEntry[] | null> {
+    const sessionKey = encodeSessionKey(key)
+    const entriesCol = await this.getCollection('session_entries')
+
+    // 只取最近 limit 条：按 seq 降序 + limit，单次查询(不分页)。
+    const { data } = await entriesCol.where({ sessionKey }).orderBy('seq', 'desc').limit(limit).get()
+    if (!data || data.length === 0) return null
+
+    // 查询是 desc，调用方期望 seq 升序，reverse 回来。
+    return data
+      .reverse()
+      .map((row) => row['entry'])
+      .filter((e): e is SessionStoreEntry => e !== null && typeof e === 'object')
+  }
+
   async loadEntriesByMessageIds(key: SessionKey, messageIds: string[]): Promise<SessionStoreEntry[]> {
     if (messageIds.length === 0) return []
     const sessionKey = encodeSessionKey(key)
@@ -282,10 +314,13 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
     const allEntries: SessionStoreEntry[] = []
     for (let i = 0; i < messageIds.length; i += BATCH_SIZE) {
       const batch = messageIds.slice(i, i + BATCH_SIZE)
+      // Note: no limit — the same messageId may have multiple entries
+      // (SDK sends separate entries for text/tool_use/tool_result within
+      // one logical message). Using limit(batch.length) would silently
+      // drop later entries for the same messageId.
       const { data } = await entriesCol
         .where({ sessionKey, messageId: db.command.in(batch) })
         .orderBy('seq', 'asc')
-        .limit(batch.length)
         .get()
       for (const row of data) {
         const entry = row['entry']
@@ -310,6 +345,22 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
       }))
   }
 
+  async getSession(
+    projectKey: string,
+    sessionId: string,
+  ): Promise<{ sessionId: string; mtime: number; userId?: string } | null> {
+    const sessionsCol = await this.getCollection('sessions')
+    const { data } = await sessionsCol.where({ projectKey, sessionId }).get()
+    if (data.length === 0) return null
+    const row = data[0]
+    if (typeof row['sessionId'] !== 'string' || typeof row['mtime'] !== 'number') return null
+    return {
+      sessionId: row['sessionId'] as string,
+      mtime: row['mtime'] as number,
+      userId: typeof row['userId'] === 'string' ? (row['userId'] as string) : undefined,
+    }
+  }
+
   async registerSession(args: {
     projectKey: string
     sessionId: string
@@ -318,17 +369,8 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
     metadata?: Record<string, unknown>
   }): Promise<void> {
     const sessionsCol = await this.getCollection('sessions')
-    const existing = await sessionsCol.where({ projectKey: args.projectKey, sessionId: args.sessionId }).limit(1).get()
-
     const now = Date.now()
-    if (existing.data && existing.data.length > 0) {
-      await sessionsCol.where({ projectKey: args.projectKey, sessionId: args.sessionId }).update({
-        userId: args.userId,
-        ...(args.title !== undefined ? { title: args.title } : {}),
-        ...(args.metadata !== undefined ? { metadata: args.metadata } : {}),
-        mtime: now,
-      })
-    } else {
+    try {
       await sessionsCol.add({
         sessionKey: `${args.projectKey}|${args.sessionId}`,
         projectKey: args.projectKey,
@@ -339,6 +381,19 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
         mtime: now,
         createdAt: now,
       })
+    } catch (err: unknown) {
+      // Duplicate key (unique index violation) → already exists, update instead
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('duplicate') || msg.includes('E11000') || msg.includes('already exists')) {
+        await sessionsCol.where({ projectKey: args.projectKey, sessionId: args.sessionId }).update({
+          userId: args.userId,
+          ...(args.title !== undefined ? { title: args.title } : {}),
+          ...(args.metadata !== undefined ? { metadata: args.metadata } : {}),
+          mtime: now,
+        })
+      } else {
+        throw err
+      }
     }
   }
 
@@ -424,23 +479,8 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
     const now = Date.now()
     const messagesCol = await this.getCollection('session_messages')
 
-    if (process.env.OAK_DEBUG === '1') {
-      // eslint-disable-next-line no-console
-      console.error(
-        '[oak][session-messages] appendSessionMessage start, sessionKey=' +
-          sessionKey +
-          ', entryCount=' +
-          entries.length,
-      )
-    }
-
     // 拉取该 sessionKey 已有的 messageId 集合（幂等检查）
     const existingIds = await this.fetchExistingMessageIds(messagesCol, sessionKey)
-
-    if (process.env.OAK_DEBUG === '1') {
-      // eslint-disable-next-line no-console
-      console.error('[oak][session-messages] existingIds count=' + existingIds.size)
-    }
 
     let processedCount = 0
     let skippedCount = 0
@@ -451,12 +491,6 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
         // entry 本身就是 SessionStoreEntry 对象（包含 type, message, uuid, timestamp 等）
         // 在 CloudBase DB 中，entry 字段存储的是完整的 SessionStoreEntry
         const sdkMsg = entry
-
-        if (process.env.OAK_DEBUG === '1') {
-          const msgType = sdkMsg?.type || 'unknown'
-          // eslint-disable-next-line no-console
-          console.error('[oak][session-messages] sdkMsg.type=' + msgType + ', entry.uuid=' + (entry.uuid || 'null'))
-        }
 
         if (!sdkMsg || typeof sdkMsg !== 'object') {
           skippedCount++
@@ -472,20 +506,12 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
         // 提取关键标识
         const messageId = (sdkMsg as any).message?.id || entry.uuid
         if (!messageId) {
-          if (process.env.OAK_DEBUG === '1') {
-            // eslint-disable-next-line no-console
-            console.error('[oak][session-messages] skipped: no messageId')
-          }
           skippedCount++
           continue
         }
 
         // 幂等检查：已存在则跳过
         if (existingIds.has(messageId)) {
-          if (process.env.OAK_DEBUG === '1') {
-            // eslint-disable-next-line no-console
-            console.error('[oak][session-messages] skipped: already exists, messageId=' + messageId)
-          }
           skippedCount++
           continue
         }
@@ -515,32 +541,11 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
 
         existingIds.add(messageId)
         processedCount++
-
-        if (process.env.OAK_DEBUG === '1') {
-          // eslint-disable-next-line no-console
-          console.error('[oak][session-messages] wrote message, messageId=' + messageId + ', role=' + sdkMsg.type)
-        }
-      } catch (err) {
+      } catch {
         errorCount++
-        if (process.env.OAK_DEBUG === '1') {
-          // eslint-disable-next-line no-console
-          console.error('[oak][session-messages] error processing entry:', (err as Error).message)
-        }
         // 解析失败跳过（可能是非 JSON 数据）
         continue
       }
-    }
-
-    if (process.env.OAK_DEBUG === '1') {
-      // eslint-disable-next-line no-console
-      console.error(
-        '[oak][session-messages] appendSessionMessage done, processed=' +
-          processedCount +
-          ', skipped=' +
-          skippedCount +
-          ', errors=' +
-          errorCount,
-      )
     }
   }
 
@@ -669,6 +674,19 @@ export class CloudBaseDbDriver implements SessionStoreDriver {
     const app = await this.getApp()
     const db = app.database() as unknown as { command: { lt(v: number): unknown } }
     return { [field]: db.command.lt(threshold) }
+  }
+
+  /**
+   * Wrap a value in the FlexDB `_.set()` update operator so `update()` replaces
+   * the field WHOLESALE instead of deep-merging it. Plain `update({ entry })`
+   * deep-merges nested objects — a patched `entry.message.content[]` would keep
+   * stale sentinel blocks. `_.set(entry)` forces full replacement (verified on
+   * live FlexDB). Returned as a query fragment to merge into an update payload.
+   */
+  private async setCommand(field: string, value: unknown): Promise<Record<string, unknown>> {
+    const app = await this.getApp()
+    const db = app.database() as unknown as { command: { set(v: unknown): unknown } }
+    return { [field]: db.command.set(value) }
   }
 
   private async fetchExistingMessageIds(col: CloudBaseCollection, sessionKey: string): Promise<Set<string>> {

@@ -1,23 +1,24 @@
 import { randomUUID } from 'node:crypto'
-import * as path from 'node:path'
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk'
 import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
-import { ClaudeHomeSyncEngine, deriveClaudeConfigDir } from '../claude-home/index.js'
-import { CloudBaseAccessKeyClaudeHomeStore } from '../claude-home/cloudbase-cos-store.js'
+import { AcpStreamAdapter } from '../adapters/index.js'
+import type { AcpStreamMessage } from '../acp/index.js'
 import { InvalidConfigError, ResourceError } from '../internal/errors.js'
 import {
+  createHookLocalState,
+  InMemoryClientToolStore,
+  InMemoryPermissionStore,
+  type ClientToolResultStore,
+  CloudBaseClientToolStore,
+  CloudBaseDbClientToolDriver,
   CloudBaseDbPermissionDriver,
   CloudBasePermissionStore,
-  createHookLocalState,
-  InMemoryPermissionStore,
   type PreToolUseHookLocalState,
 } from '../permissions/index.js'
-import { resolveCloudBaseAccessKey } from '../resources/index.js'
 import { buildClaudeQueryOptions } from '../runtime/agent-builder.js'
-import { createTranslatorState, translateSdkMessage } from '../runtime/event-translator.js'
 import { buildPromptAsync } from '../runtime/prompt-builder.js'
 import { createCloudBaseMcpServer, type CloudBaseUserCredentials } from '../sandbox/cloudbase-mcp.js'
-import { AgsStatefulSandbox } from '../sandbox/index.js'
+import { AgsStatefulSandbox, LocalRuntimeSandbox } from '../sandbox/index.js'
 import type { SandboxInstance, SandboxRuntime } from '../sandbox/types.js'
 import type { WorkspaceSnapshotEngine } from '../sandbox/workspace-snapshot/index.js'
 import { CloudBaseDbDriver, CloudBaseSessionStore } from '../session-store/index.js'
@@ -30,16 +31,14 @@ import type {
   CloudBaseStorageConfig,
   MessagePart,
   MessageRecord,
+  PendingApproval,
   PermissionStore,
   SandboxUserCredentials,
   Session,
-  SessionEvent,
   SessionInput,
   SessionStartOptions,
   SessionSummary,
 } from './types.js'
-
-const userMemoryAccessKeys = new WeakMap<AgentConfig, string>()
 
 type ResolvedPlatformCredentials = NonNullable<AgentConfig['credentials']> & { envId: string }
 
@@ -122,9 +121,6 @@ export function createAgent(config: AgentConfig): Agent {
 
 function normalizeAgentConfig(config: AgentConfig): AgentConfig {
   const credentials = resolvePlatformCredentials(config)
-  const accessKey = credentials ? undefined : resolveCloudBaseAccessKey()
-  assertUserMemoryCredentials(config, accessKey)
-
   const normalizedConfig: AgentConfig = {
     ...config,
     ...(credentials ? { credentials } : {}),
@@ -132,25 +128,10 @@ function normalizeAgentConfig(config: AgentConfig): AgentConfig {
     storage: resolveStorageConfig(config),
   }
 
-  const resolvedConfig: AgentConfig = {
+  return {
     ...normalizedConfig,
-    permissions: resolvePermissionConfig(normalizedConfig, accessKey),
-    session: resolveSessionConfig(normalizedConfig, accessKey),
-  }
-  if (accessKey) userMemoryAccessKeys.set(resolvedConfig, accessKey)
-  return resolvedConfig
-}
-
-function isUserMemoryEnabled(userMemory: AgentConfig['userMemory']): boolean {
-  return userMemory === true || (typeof userMemory === 'object' && userMemory.enabled === true)
-}
-
-function assertUserMemoryCredentials(config: AgentConfig, accessKey?: string): void {
-  if (isUserMemoryEnabled(config.userMemory) && !config.credentials && !accessKey) {
-    throw new InvalidConfigError(
-      'AgentConfig.userMemory requires AgentConfig.credentials (secretId and secretKey) ' +
-        'or process.env.TCB_API_KEY.',
-    )
+    permissions: resolvePermissionConfig(normalizedConfig),
+    session: resolveSessionConfig(normalizedConfig),
   }
 }
 
@@ -170,20 +151,38 @@ function resolveSandboxConfig(config: AgentConfig): AgentConfig['sandbox'] {
 
   if (sandbox.runtime) return sandbox
 
-  const provider = sandbox.provider ?? 'ags-stateful'
+  // 默认 'local':AGS 产品化未就绪前的过渡默认,serverless runtime(SCF/CloudRun)
+  // 开箱即有本地 FS + SDK 内置工具 + workspacePersist 自动持久化 cwd。
+  // 需要使用 AGS 远程沙箱的用户显式配 provider: 'ags-stateful'。
+  const provider = sandbox.provider ?? 'local'
+  if (provider === 'local') {
+    // local provider:无 AGS 控制面,宿主进程本地 FS + SDK 内置工具。
+    // cwd 跨请求持久化由 kernel 自动驱动(see agent-builder.ts cwdPersistEngine)。
+    return {
+      ...sandbox,
+      enabled: true,
+      provider,
+      runtime: new LocalRuntimeSandbox({
+        ...(sandbox.workspaceRoot ? { workspaceRoot: sandbox.workspaceRoot } : {}),
+        ...(config.cwd ? { cwd: config.cwd } : {}),
+      }),
+    }
+  }
+
   if (provider !== 'ags-stateful') {
     throw new InvalidConfigError(
       `AgentConfig.sandbox.provider="${provider}" is not supported yet. ` +
-        'The built-in sandbox currently supports provider="ags-stateful". ' +
+        'The built-in sandbox currently supports provider="local" (default) | "ags-stateful". ' +
         'Pass a custom SandboxRuntime via AgentConfig.sandbox.runtime for advanced scenarios.',
     )
   }
 
-  const apiKey = sandbox.apiKey ?? process.env.TCB_API_KEY ?? process.env.OAK_SANDBOX_API_KEY
+  const apiKey = sandbox.apiKey ?? process.env.CLOUDBASE_APIKEY ?? process.env.OAK_SANDBOX_API_KEY
   if (!apiKey) {
     throw new InvalidConfigError(
-      'AgentConfig.sandbox.enabled=true requires sandbox.apiKey, TCB_API_KEY, or OAK_SANDBOX_API_KEY ' +
-        'for the default AgsStatefulSandbox runtime.',
+      'AgentConfig.sandbox.provider="ags-stateful" requires sandbox.apiKey, CLOUDBASE_APIKEY, or OAK_SANDBOX_API_KEY ' +
+        'for the AgsStatefulSandbox runtime. ' +
+        'If you do not need AGS, drop provider (default is "local").',
     )
   }
 
@@ -250,7 +249,7 @@ function resolveStorageConfig(config: AgentConfig): StorageProvider | undefined 
   })
 }
 
-function resolveSessionConfig(config: AgentConfig, accessKey?: string): AgentConfig['session'] {
+function resolveSessionConfig(config: AgentConfig): AgentConfig['session'] {
   const session = config.session
   if (session?.enabled === false) return undefined
 
@@ -258,7 +257,7 @@ function resolveSessionConfig(config: AgentConfig, accessKey?: string): AgentCon
     return session
   }
 
-  const shouldEnable = session?.enabled === true || config.credentials !== undefined || accessKey !== undefined
+  const shouldEnable = session?.enabled === true || config.credentials !== undefined
   if (!shouldEnable) return session
 
   const provider = session?.provider ?? 'cloudbase'
@@ -277,25 +276,18 @@ function resolveSessionConfig(config: AgentConfig, accessKey?: string): AgentCon
     )
   }
   const credentials = resolvePlatformCredentials(config)
-  if (!credentials && !accessKey) {
+  if (!credentials) {
     throw new InvalidConfigError(
-      'AgentConfig.session.enabled=true requires AgentConfig.credentials or process.env.TCB_API_KEY ' +
-        'for the default CloudBase FlexDB session store.',
+      'AgentConfig.session.enabled=true requires AgentConfig.credentials for the default CloudBase FlexDB session store.',
     )
   }
 
   const projectKey = session?.projectKey ?? config.envId
-  const driver = credentials
-    ? new CloudBaseDbDriver({
-        credentials,
-        collectionPrefix: session?.tablePrefix,
-      })
-    : new CloudBaseDbDriver({
-        accessKey: { envId: config.envId, accessKey: accessKey as string },
-        collectionPrefix: session?.tablePrefix,
-      })
   const store = new CloudBaseSessionStore({
-    driver,
+    driver: new CloudBaseDbDriver({
+      credentials,
+      collectionPrefix: session?.tablePrefix,
+    }),
     projectKey,
   })
 
@@ -308,25 +300,45 @@ function resolveSessionConfig(config: AgentConfig, accessKey?: string): AgentCon
   }
 }
 
-function resolvePermissionConfig(config: AgentConfig, accessKey?: string): AgentConfig['permissions'] {
+function resolvePermissionConfig(config: AgentConfig): AgentConfig['permissions'] {
   const permissions = config.permissions
   if (!permissions || permissions.requireApproval === undefined || permissions.store) return permissions
 
   const credentials = resolvePlatformCredentials(config)
-  if (!credentials && !accessKey) return permissions
+  if (!credentials) return permissions
 
   return {
     ...permissions,
     store: new CloudBasePermissionStore({
       projectKey: config.envId,
       driver: new CloudBaseDbPermissionDriver({
-        ...(credentials
-          ? { credentials }
-          : { accessKey: { envId: config.envId, accessKey: accessKey as string } }),
+        credentials,
         collectionPrefix: permissions.tablePrefix,
       }),
     }),
   }
+}
+
+/**
+ * 解析 ClientToolResultStore:
+ *   - 用户显式传 config.toolStore → 原样尊重
+ *   - 有 credentials → 自动 CloudBase 化(支持多实例部署,askUser/clientTool 跨节点可恢复)
+ *   - 否则 → InMemoryClientToolStore(单进程兜底)
+ *
+ * store 始终启用:askUser 是内置工具,即使 config.tools 为空也可能被模型调用。
+ */
+function resolveClientToolStoreConfig(config: AgentConfig): ClientToolResultStore {
+  const userStore = config.toolStore as ClientToolResultStore | undefined
+  if (userStore) return userStore
+
+  const credentials = resolvePlatformCredentials(config)
+  if (credentials) {
+    return new CloudBaseClientToolStore({
+      projectKey: config.envId,
+      driver: new CloudBaseDbClientToolDriver({ credentials }),
+    })
+  }
+  return new InMemoryClientToolStore()
 }
 
 // ============================================================
@@ -352,6 +364,11 @@ function createSession(deps: SessionDeps): Session {
   const cloudbaseToolsEnabled = isCloudbaseToolsEnabled(config)
   let cloudbaseMcpServer: SdkMcpServerConfig | undefined
   let cloudbaseMcpPromise: Promise<SdkMcpServerConfig | undefined> | undefined
+  // HITL approval 直调：cloudbase bundle 暴露的 invoke(toolName, input)。
+  // approve 一个 mcp__cloudbase__* 工具后，kernel 直接调它拿结果 patch 进 transcript。
+  let cloudbaseInvoke:
+    | ((toolName: string, input: Record<string, unknown>) => Promise<{ output: string; isError: boolean } | null>)
+    | undefined
 
   // Spec B(Task 8):workspace snapshot engine 由 buildClaudeQueryOptions 在
   // 第一次 send 时构造并通过本闭包变量记录。bootstrap 仅执行一次(首次 acquire 之后)。
@@ -360,13 +377,26 @@ function createSession(deps: SessionDeps): Session {
   let snapshotBootstrapped = false
   let snapshotBootstrapPromise: Promise<void> | undefined
 
-  // PR #7.0/7.1：审批 store 已在 normalizeAgentConfig 中按可用 DB 凭证默认 CloudBase 化；
-  // CAM credentials 和 TCB_API_KEY 都未提供时仍回落到进程内单例。
+  // PR #7.0/7.1：审批 store 已在 normalizeAgentConfig 中按 credentials 默认 CloudBase 化；
+  // 未提供 credentials 时仍回落到进程内单例。
   // 仅在用户配了 requireApproval 时启用；不配则 hook 整体不注入。
   const permissionStore: PermissionStore | undefined =
     config.permissions?.requireApproval !== undefined
       ? (config.permissions.store ?? createDefaultPermissionStore())
       : undefined
+
+  // PR #7.1: client-side tools store + name set. The set lets the
+  // PreToolUse hook recognise mcp__custom__* tools (custom = user-declared,
+  // execute() in the wrapped MCP server is a stub). The store carries
+  // host-supplied tool results between SDK turns (turn-1 emits
+  // tool_use_required; respondToolUse() stashes; turn-2 reads).
+  //
+  // **也承载 askUser 流程**:askUser 是内置工具,始终可能被模型调用,所以
+  // store 必须始终启用(即使 config.tools 为空)。未提供 credentials 时回落到
+  // 进程内 InMemoryClientToolStore(单进程可用,多实例部署会失效——生产环境
+  // 应配 credentials 让 kernel 自动 CloudBase 化,见 resolveClientToolStoreConfig)。
+  const clientToolNames: Set<string> = new Set((config.tools ?? []).map((t) => t.name))
+  const clientToolStore: ClientToolResultStore = resolveClientToolStoreConfig(config)
 
   async function ensureSandbox(): Promise<SandboxInstance | undefined> {
     if (!sandboxRuntime) return undefined
@@ -407,6 +437,7 @@ function createSession(deps: SessionDeps): Session {
                 (bundle.degradedReason ? ` reason=${bundle.degradedReason}` : ''),
             )
           }
+          cloudbaseInvoke = bundle.invoke
           return bundle.server as SdkMcpServerConfig
         } catch (err) {
           // eslint-disable-next-line no-console
@@ -431,7 +462,7 @@ function createSession(deps: SessionDeps): Session {
    *   持久化为 .workspace-env.json,init body 的 env 必须跟它语义一致)
    *
    * 失败处理:bootstrap 抛出(SandboxRestoreFailed / 网络错误)时让异常向上冒,
-   * 由 runClaudeQuery 的 catch 块翻译为 'error' 事件 + session_idle('error')。
+   * 由 runClaudeQuery 的 catch 块翻译为 ACP log + agent_phase idle。
    * 这是 spec §6.2"restore failed → 视为致命"行为。
    */
   async function ensureSnapshotBootstrap(engine: WorkspaceSnapshotEngine, sandbox: SandboxInstance): Promise<void> {
@@ -441,9 +472,13 @@ function createSession(deps: SessionDeps): Session {
         const creds = await resolveUserCredentials(config)
         const envBag: Record<string, string> = {
           CLOUDBASE_ENV_ID: creds.envId,
-          TENCENTCLOUD_SECRETID: creds.secretId,
-          TENCENTCLOUD_SECRETKEY: creds.secretKey,
-          TENCENTCLOUD_SESSIONTOKEN: creds.sessionToken ?? '',
+          ...(creds.accessKey
+            ? { CLOUDBASE_APIKEY: creds.accessKey }
+            : {
+                TENCENTCLOUD_SECRETID: creds.secretId ?? '',
+                TENCENTCLOUD_SECRETKEY: creds.secretKey ?? '',
+                TENCENTCLOUD_SESSIONTOKEN: creds.sessionToken ?? '',
+              }),
         }
         await engine.bootstrap(sandbox, { credentials: envBag })
         snapshotBootstrapped = true
@@ -468,7 +503,7 @@ function createSession(deps: SessionDeps): Session {
     id: conversationId,
     userId,
 
-    send(input: string | SessionInput): AsyncIterable<SessionEvent> {
+    send(input: string | SessionInput): AsyncIterable<AcpStreamMessage> {
       abortController = new AbortController()
       const isContinuation = hasStarted
       hasStarted = true
@@ -485,6 +520,8 @@ function createSession(deps: SessionDeps): Session {
         ensureSnapshotBootstrap,
         onSnapshotEngine,
         permissionStore,
+        ...(clientToolNames.size > 0 ? { clientToolNames } : {}),
+        clientToolStore,
       })
     },
 
@@ -498,7 +535,7 @@ function createSession(deps: SessionDeps): Session {
      *
      * 调用方不需要持有"那次 send 的 generator"——业务可在任意进程 / 节点（store 共享前提下）调本方法。
      */
-    respondApproval(opts: { toolUseId: string; decision: ApprovalDecision }): AsyncIterable<SessionEvent> {
+    respondApproval(opts: { toolUseId: string; decision: ApprovalDecision }): AsyncIterable<AcpStreamMessage> {
       abortController = new AbortController()
       return runApprovalResume({
         config,
@@ -512,6 +549,45 @@ function createSession(deps: SessionDeps): Session {
         ensureSnapshotBootstrap,
         onSnapshotEngine,
         permissionStore,
+        ...(clientToolNames.size > 0 ? { clientToolNames } : {}),
+        clientToolStore,
+        // approve 后用于直调被批准的 cloudbase 工具（getter 读最新值，
+        // 因为 cloudbaseInvoke 在 ensureCloudbaseMcp 完成后才赋值）
+        getDirectInvoker: () => cloudbaseInvoke,
+      })
+    },
+
+    /**
+     * PR #7.1: respond to a client-side tool_confirm pause.
+     *
+     * Wire flow:
+     *   1. Stash the host-supplied result in the in-memory clientToolStore.
+     *   2. Resume the SDK with a short prompt asking the model to retry
+     *      the same tool. The PreToolUse hook will scan the store, find the
+     *      result, allow + inject it via updatedInput so the wrapped MCP
+     *      stub returns it as the actual tool_result. The transcript ends
+     *      up with a clean (non-error) tool_result for the new tool_use_id;
+     *      the original (errored, sentinel-bearing) tool_result remains in
+     *      the transcript but is harmless because the hook's deny outcome
+     *      already aborted that branch of reasoning.
+     */
+    respondToolUse(opts: { toolUseId: string; output: unknown; isError?: boolean }): AsyncIterable<AcpStreamMessage> {
+      abortController = new AbortController()
+      return runClientToolResume({
+        config,
+        conversationId,
+        userId,
+        toolUseId: opts.toolUseId,
+        output: opts.output,
+        isError: opts.isError ?? false,
+        abortController,
+        ensureSandbox,
+        ensureCloudbaseMcp,
+        ensureSnapshotBootstrap,
+        onSnapshotEngine,
+        permissionStore,
+        clientToolNames,
+        clientToolStore,
       })
     },
 
@@ -549,10 +625,6 @@ function createSession(deps: SessionDeps): Session {
         }
       }
 
-      if (process.env.OAK_DEBUG === '1') {
-        console.error('[oak][getHistory] entryMap size:', entryMap.size, ', metas:', metas.length)
-      }
-
       // 4. 用元数据顺序组装 MessageRecord
       const result: MessageRecord[] = []
       for (const meta of metas) {
@@ -574,6 +646,7 @@ function createSession(deps: SessionDeps): Session {
 
       // metas 是 desc 排序，返回给用户改为 asc（时间正序）
       result.reverse()
+
       return aggregateHistory(result)
     },
 
@@ -675,12 +748,12 @@ function createSession(deps: SessionDeps): Session {
           sessionId: conversationId,
           userId,
         })
-        .catch(() => {
-          // 注册失败不阻塞 session 创建
-          if (process.env.OAK_DEBUG === '1') {
-            // eslint-disable-next-line no-console
-            console.error('[oak] registerSession failed (non-blocking)')
-          }
+        .catch((err) => {
+          // Registration failure is non-fatal for session creation,
+          // but always log it (not just in OAK_DEBUG mode) so operators
+          // can detect lost writes in SCF/cloudrun environments.
+          // eslint-disable-next-line no-console
+          console.error('[oak] registerSession failed:', err)
         })
     }
   }
@@ -793,10 +866,14 @@ function aggregateHistory(records: MessageRecord[]): MessageRecord[] {
   for (const msg of records) {
     if (msg.role !== 'user') continue
 
-    // 检测 HITL sentinel
+    // 检测内部 sentinel（HITL approval / client-tool / askUser）
     const isSentinel = msg.parts.some(
       (p) =>
-        p.type === 'tool_result' && typeof p.output === 'string' && (p.output as string).includes('__OAK_INTERRUPT__'),
+        p.type === 'tool_result' &&
+        typeof p.output === 'string' &&
+        ((p.output as string).includes('__OAK_INTERRUPT__') ||
+          (p.output as string).includes('__OAK_CLIENT_TOOL__') ||
+          (p.output as string).includes('__OAK_ASK_USER__')),
     )
     if (isSentinel) {
       for (const p of msg.parts) {
@@ -903,9 +980,13 @@ interface RunClaudeQueryArgs {
   /** Spec B(Task 8):把 buildClaudeQueryOptions 拿到的 engine 上抛给 session 闭包 */
   onSnapshotEngine: (engine: WorkspaceSnapshotEngine | undefined) => void
   permissionStore?: PermissionStore
+  /** PR #7.1: names of user-defined client-side tools (config.tools[].name set). */
+  clientToolNames?: ReadonlySet<string>
+  /** PR #7.1: store for client-supplied tool results AND askUser pending entries. */
+  clientToolStore?: ClientToolResultStore
 }
 
-async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<SessionEvent, void, unknown> {
+async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<AcpStreamMessage, void, unknown> {
   const {
     config,
     input,
@@ -919,16 +1000,21 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
     ensureSnapshotBootstrap,
     onSnapshotEngine,
     permissionStore,
+    clientToolNames,
+    clientToolStore,
   } = args
 
   let q: ReturnType<typeof claudeQuery> | undefined
   let syncEngine: ReturnType<typeof buildClaudeQueryOptions>['syncEngine']
   let snapshotEngine: ReturnType<typeof buildClaudeQueryOptions>['snapshotEngine']
   let sandbox: SandboxInstance | undefined
+  let debugFilePath: string | undefined
+  let cwdPersistEngine: ReturnType<typeof buildClaudeQueryOptions>['cwdPersistEngine']
   // Spec B(Task 8):仅当 snapshot bootstrap 成功完成(或无需 bootstrap)时才置 true。
   // 若 bootstrap 抛错(SandboxRestoreFailed / 网络),finally 必须跳过 send-end snapshot,
   // 否则会在 broken state 上再花 30s timeout 做 snapshot,可能把不完整状态推上 COS。
   let bootstrapOk = false
+  const debug = process.env.OAK_DEBUG === '1'
   try {
     sandbox = await ensureSandbox()
     const cloudbaseMcp = sandbox ? await ensureCloudbaseMcp(sandbox) : undefined
@@ -940,61 +1026,25 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
     const effectivePermissions = config.permissions ? { ...config.permissions, store: permissionStore } : undefined
     const effectiveConfig = effectivePermissions ? { ...config, permissions: effectivePermissions } : config
 
-    const accessKey = userMemoryAccessKeys.get(config)
-    const accessKeyUserMemoryEnabled = Boolean(
-      accessKey && !effectiveConfig.credentials && isUserMemoryEnabled(effectiveConfig.userMemory),
-    )
-    let built = buildClaudeQueryOptions(
-      accessKeyUserMemoryEnabled ? { ...effectiveConfig, userMemory: false } : effectiveConfig,
-      {
-        sandboxInstance: sandbox,
-        extraMcpServers: cloudbaseMcp ? { cloudbase: cloudbaseMcp } : undefined,
-        conversationId,
-        hookLocalState,
-        userId,
-      },
-    )
-
-    if (accessKeyUserMemoryEnabled) {
-      try {
-        const claudeConfigDir = deriveClaudeConfigDir(effectiveConfig.envId, userId)
-        const accessKeySyncEngine = new ClaudeHomeSyncEngine({
-          store: new CloudBaseAccessKeyClaudeHomeStore({
-            envId: effectiveConfig.envId,
-            accessKey: accessKey as string,
-          }),
-          ctx: { envId: effectiveConfig.envId, userId },
-          localDir: claudeConfigDir,
-        })
-        const settingSources = [...(built.options.settingSources ?? [])]
-        if (!settingSources.includes('user')) settingSources.push('user')
-
-        // Build all accessKey user-memory state first, then replace the result in
-        // one assignment. If construction fails, the builder result remains
-        // untouched and this turn follows the same graceful-degrade semantics as
-        // the existing CAM path.
-        built = {
-          ...built,
-          options: {
-            ...built.options,
-            env: { ...(built.options.env ?? {}), CLAUDE_CONFIG_DIR: claudeConfigDir },
-            cwd: effectiveConfig.cwd ?? path.dirname(claudeConfigDir),
-            settingSources,
-            persistSession: true,
-          },
-          syncEngine: accessKeySyncEngine,
-        }
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          '[oak/userMemory] failed to construct sync engine, sync disabled this turn:',
-          (err as Error)?.message,
-        )
-      }
-    }
+    const built = buildClaudeQueryOptions(effectiveConfig, {
+      sandboxInstance: sandbox,
+      // sandboxMode hint:local provider 走 'local',有 remote sandboxInstance 走 'remote',
+      // 否则 'none'。决定内置工具默认开关 + cwdPersistEngine 是否互斥。
+      sandboxMode: effectiveConfig.sandbox?.provider === 'local' ? 'local' : sandbox ? 'remote' : 'none',
+      extraMcpServers: cloudbaseMcp ? { cloudbase: cloudbaseMcp } : undefined,
+      conversationId,
+      hookLocalState,
+      ...(clientToolNames ? { clientToolNames } : {}),
+      ...(clientToolStore ? { clientToolStore } : {}),
+      userId,
+      // cwd 持久化用 conversationId 作 per-session key(同 session 跨请求复用)
+      sessionId: conversationId,
+    })
     const options = built.options
     syncEngine = built.syncEngine
     snapshotEngine = built.snapshotEngine
+    debugFilePath = built.debugFilePath
+    cwdPersistEngine = built.cwdPersistEngine
     onSnapshotEngine(snapshotEngine)
 
     // ── Spec B(Task 8):workspace snapshot bootstrap(首次 send + 启用时)───
@@ -1020,6 +1070,16 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
       }
     }
 
+    // ── workspacePersist: send-start pull cwd(失败不抛,记 warning)───
+    if (cwdPersistEngine) {
+      try {
+        await cwdPersistEngine.pullOnSendStart()
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[oak/workspacePersist] pullOnSendStart failed:', (err as Error)?.message)
+      }
+    }
+
     const storage = extractStorageProvider(config)
     const promptStream = buildPromptAsync({
       input,
@@ -1032,21 +1092,39 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
       ...options,
       abortController,
       ...(isContinuation ? { resume: sessionId } : { sessionId }),
+      // ── 诊断:捕获 claude CLI 子进程的 stderr ──────────────────────
+      // 这是定位"收不到 stream event"的头号信号。默认 SDK 把子进程 stderr 设为
+      // "ignore",CLI 若在启动阶段崩溃(HOME 不可写 / root+bypassPermissions 被拒 /
+      // 找不到 executable),错误全被吞掉,上层只看到一个空的消息流。
+      // 注入 stderr 回调后,CLI 的崩溃原文会被打到 server 日志(非 SSE,不泄露给前端)。
+      // 注意:子进程 --debug 的详细输出被 SDK 重定向到 debugFile(由 agent-builder 指定),
+      // 不进 stderr;stderr 只承载真正写到 stderr 的内容(spawn 失败、native crash 等)。
+      // debugFile 内容在 query 结束后由下方逻辑读取打日志。
+      ...(debug
+        ? {
+            stderr: (data: string) => {
+              // eslint-disable-next-line no-console
+              console.error('[oak][claude-cli stderr]', data.trimEnd())
+            },
+          }
+        : {}),
     }
 
     q = claudeQuery({ prompt: promptStream as never, options: sdkOptions })
-    const translatorState = createTranslatorState()
-    for await (const sdkMsg of q) {
-      for (const event of translateSdkMessage(sdkMsg, translatorState)) {
-        yield event
-      }
-    }
+    const adapter = config.streamAdapter ?? new AcpStreamAdapter()
+    yield* adapter.adapt(q, {
+      conversationId,
+      sessionId,
+      userId,
+      turnId: randomUUID(),
+    })
   } catch (err) {
-    yield {
-      type: 'error',
-      error: err instanceof Error ? err : new Error(String(err)),
+    if (process.env.OAK_DEBUG === '1') {
+      // eslint-disable-next-line no-console
+      console.error('[oak] query threw during message loop:', err instanceof Error ? err.stack : err)
+      await dumpClaudeDebugFile(debugFilePath)
     }
-    yield { type: 'session_idle', reason: 'error' }
+    yield* createErrorUpdates('Agent run failed')
   } finally {
     // ── userMemory: send-end push(abort/异常都触发,失败不抛)───
     if (syncEngine) {
@@ -1055,6 +1133,16 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn('[oak/userMemory] pushOnSendEnd failed:', (err as Error)?.message)
+      }
+    }
+
+    // ── workspacePersist: send-end push cwd(abort/异常都触发,失败不抛)───
+    if (cwdPersistEngine) {
+      try {
+        await cwdPersistEngine.pushOnSendEnd()
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[oak/workspacePersist] pushOnSendEnd failed:', (err as Error)?.message)
       }
     }
 
@@ -1072,14 +1160,113 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<Session
         }
         // TODO(metrics):emit oak_workspace_snapshot_duration_ms histogram(spec §6.1)
       } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err)
-        // OAK SessionEvent union 暂无独立 'warning' 成员;复用 'error' 事件传递,
-        // 用确定性错误名让上层(协议适配 / 业务 logger)能识别为非致命快照警告。
-        const warning = new Error(`workspace_snapshot_failed: ${reason}`)
-        warning.name = 'WorkspaceSnapshotFailedWarning'
-        yield { type: 'error', error: warning }
+        void err
+        yield {
+          sessionUpdate: 'log',
+          level: 'error',
+          message: 'Workspace snapshot failed',
+          timestamp: Date.now(),
+        }
       }
     }
+  }
+}
+
+function* createErrorUpdates(message: string): Generator<AcpStreamMessage, void, unknown> {
+  yield {
+    sessionUpdate: 'log',
+    level: 'error',
+    message,
+    timestamp: Date.now(),
+  }
+  yield {
+    sessionUpdate: 'agent_phase',
+    phase: 'idle',
+    timestamp: Date.now(),
+  }
+}
+
+// ============================================================
+// 内部：resume 通用 helper（approval / client-tool 共用）
+// ============================================================
+
+/**
+ * resume 阶段共用的上下文。approval 和 client-tool 两条 resume 路径
+ * 都把这些字段从各自的 args 里解构出来,再传给 resumeQuery。
+ */
+interface ResumeContext {
+  config: AgentConfig
+  conversationId: string
+  userId: string
+  abortController: AbortController
+  ensureSandbox: () => Promise<SandboxInstance | undefined>
+  ensureCloudbaseMcp: (sandbox: SandboxInstance) => Promise<SdkMcpServerConfig | undefined>
+  ensureSnapshotBootstrap: (engine: WorkspaceSnapshotEngine, sandbox: SandboxInstance) => Promise<void>
+  onSnapshotEngine: (engine: WorkspaceSnapshotEngine | undefined) => void
+  permissionStore?: PermissionStore
+  clientToolNames?: ReadonlySet<string>
+  clientToolStore?: ClientToolResultStore
+}
+
+/**
+ * 以 isContinuation=true 调一轮 runClaudeQuery。approval 直调 / client-tool
+ * resume / approval prompt-resume 三处共用,消除 ~15 行重复的 runClaudeQuery({...}) 块。
+ */
+async function* resumeQuery(ctx: ResumeContext, input: string): AsyncGenerator<AcpStreamMessage, void, unknown> {
+  yield* runClaudeQuery({
+    config: ctx.config,
+    input,
+    abortController: ctx.abortController,
+    sessionId: ctx.conversationId,
+    conversationId: ctx.conversationId,
+    userId: ctx.userId,
+    isContinuation: true,
+    ensureSandbox: ctx.ensureSandbox,
+    ensureCloudbaseMcp: ctx.ensureCloudbaseMcp,
+    ensureSnapshotBootstrap: ctx.ensureSnapshotBootstrap,
+    onSnapshotEngine: ctx.onSnapshotEngine,
+    permissionStore: ctx.permissionStore,
+    ...(ctx.clientToolNames ? { clientToolNames: ctx.clientToolNames } : {}),
+    ...(ctx.clientToolStore ? { clientToolStore: ctx.clientToolStore } : {}),
+  })
+}
+
+/**
+ * approve 后尝试直调 cloudbase 工具,patch sentinel tool_result。
+ * 仅对 kernel 能直接执行的工具(mcp__cloudbase__*)有效;内置工具(Bash/Write
+ * 等)无 direct invoker,返回 false 让调用方走 prompt 重发。
+ *
+ * @returns true = 直调+patch 成功(调用方用最小 prompt resume)
+ */
+async function tryDirectInvokeApproval(
+  ctx: ResumeContext,
+  existing: PendingApproval,
+  toolUseId: string,
+  decision: ApprovalDecision,
+  getDirectInvoker?: () =>
+    | ((toolName: string, input: Record<string, unknown>) => Promise<{ output: string; isError: boolean } | null>)
+    | undefined,
+): Promise<boolean> {
+  if (decision.kind !== 'allow') return false
+  const invoker = getDirectInvoker?.()
+  if (!invoker) return false
+
+  const bareToolName = existing.toolName.startsWith('mcp__cloudbase__')
+    ? existing.toolName.replace('mcp__cloudbase__', '')
+    : existing.toolName
+  try {
+    const effectiveInput =
+      (decision.updatedInput as Record<string, unknown> | undefined) ??
+      (existing.toolInput as Record<string, unknown> | undefined)
+    const result = await invoker(bareToolName, effectiveInput ?? {})
+    if (!result) return false
+    return patchSentinelToolResult(ctx.config, ctx.conversationId, toolUseId, result.output, result.isError)
+  } catch (err) {
+    if (process.env.OAK_DEBUG === '1') {
+      // eslint-disable-next-line no-console
+      console.error('[oak][approval] direct invoke failed, fallback to prompt resume:', err)
+    }
+    return false
   }
 }
 
@@ -1099,9 +1286,18 @@ interface RunApprovalResumeArgs {
   ensureSnapshotBootstrap: (engine: WorkspaceSnapshotEngine, sandbox: SandboxInstance) => Promise<void>
   onSnapshotEngine: (engine: WorkspaceSnapshotEngine | undefined) => void
   permissionStore?: PermissionStore
+  clientToolNames?: ReadonlySet<string>
+  clientToolStore?: ClientToolResultStore
+  /**
+   * 返回 cloudbase 工具的直调函数（approve 后直接执行拿结果 patch transcript）。
+   * 用 getter 而非直接传值：cloudbaseInvoke 在 ensureCloudbaseMcp 完成后才有值。
+   */
+  getDirectInvoker?: () =>
+    | ((toolName: string, input: Record<string, unknown>) => Promise<{ output: string; isError: boolean } | null>)
+    | undefined
 }
 
-async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<SessionEvent, void, unknown> {
+async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<AcpStreamMessage, void, unknown> {
   const {
     config,
     conversationId,
@@ -1114,60 +1310,262 @@ async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<S
     ensureSnapshotBootstrap,
     onSnapshotEngine,
     permissionStore,
+    clientToolNames,
+    clientToolStore,
+    getDirectInvoker,
   } = args
 
   if (!permissionStore) {
-    yield {
-      type: 'error',
-      error: new InvalidConfigError(
-        'session.respondApproval requires AgentConfig.permissions.requireApproval to be configured. ' +
-          'Without permissions config, no approval flow exists to resume.',
-      ),
-    }
-    yield { type: 'session_idle', reason: 'error' }
+    yield* createErrorUpdates('Approval resume is not configured')
     return
   }
 
   const existing = await permissionStore.get({ conversationId, toolUseId })
   if (!existing) {
-    yield {
-      type: 'error',
-      error: new ResourceError('No pending approval found. It may have expired or already been resolved.'),
-    }
-    yield { type: 'session_idle', reason: 'error' }
+    yield* createErrorUpdates('No pending approval found')
     return
   }
   if (existing.decision) {
-    yield {
-      type: 'error',
-      error: new ResourceError(`Approval for toolUseId=${toolUseId} has already been resolved.`),
-    }
-    yield { type: 'session_idle', reason: 'error' }
+    yield* createErrorUpdates('Approval has already been resolved')
     return
   }
 
   await permissionStore.put({ ...existing, decision })
 
-  // 用具体的 prompt 触发一轮 resume：让模型明确知道"刚才那个工具被批准/拒绝了，请重新调用"。
-  // 为什么不能用空 prompt：SDK 的 resume 默认会让模型自由继续，模型可能"理解错"上下文，
-  // 这里用确定指令引导模型重发同样的工具调用，PreToolUse hook 这次从 store 读到 decision → 放行/拒绝。
-  const resumePrompt = buildResumePrompt(existing.toolName, decision)
-
-  yield* runClaudeQuery({
+  const ctx: ResumeContext = {
     config,
-    input: resumePrompt,
-    abortController,
-    sessionId: conversationId,
     conversationId,
     userId,
-    isContinuation: true,
+    abortController,
     ensureSandbox,
     ensureCloudbaseMcp,
     ensureSnapshotBootstrap,
     onSnapshotEngine,
     permissionStore,
-  })
+    clientToolNames,
+    clientToolStore,
+  }
+
+  // ── approve 直调（cloudbase 工具）──
+  // approve 后 kernel 直接调工具拿结果 patch 进 transcript,模型看到正常结果
+  // 继续,不重发。内置工具(Bash/Write 等)无 direct invoker → 走下方 prompt 重发。
+  if (await tryDirectInvokeApproval(ctx, existing, toolUseId, decision, getDirectInvoker)) {
+    yield* resumeQuery(ctx, '[系统通知] 请继续。')
+    return
+  }
+
+  // ── prompt 重发（内置工具，或直调失败的 fallback）──
+  // 确定性 prompt + 注入原始 toolInput，强制模型用相同参数重发，避免改写命令/重复调用。
+  // resume 后 PreToolUse hook 按 toolName 命中 store 里的 decision → 放行真实执行。
+  yield* resumeQuery(ctx, buildResumePrompt(existing.toolName, decision, existing.toolInput))
 }
+
+// ============================================================
+// 内部：注入客户端工具结果并 resume agent 运行（PR #7.1）
+// ============================================================
+
+/**
+ * 把 transcript 里指定 toolUseId 的 sentinel tool_result（is_error=true）
+ * patch 成真实结果。client-tool 和 approval 直调共用。
+ *
+ * 原理：hook deny 工具时 SDK 记了一条 tool_result(is_error, sentinel content)。
+ * resume 时 SDK 重放 transcript，模型看到 error 会重试（新 toolUseId，导致 mismatch）。
+ * patch 成正常结果后，模型看到干净结果，自然继续，不重发。
+ *
+ * @returns 是否成功 patch
+ */
+async function patchSentinelToolResult(
+  config: AgentConfig,
+  conversationId: string,
+  toolUseId: string,
+  output: unknown,
+  isError: boolean,
+): Promise<boolean> {
+  const resultText = typeof output === 'string' ? output : JSON.stringify(output)
+  const store = config.session?.store as
+    | {
+        loadRecent?: (key: { projectKey: string; sessionId: string }, limit: number) => Promise<unknown[] | null>
+        load?: (key: { projectKey: string; sessionId: string }) => Promise<unknown[] | null>
+        append?: (key: { projectKey: string; sessionId: string }, entries: unknown[]) => Promise<void>
+      }
+    | undefined
+  const projectKey = config.session?.projectKey ?? config.envId
+  const sessionKey = { projectKey, sessionId: conversationId }
+
+  if (!store?.append) return false
+  // 优先用 loadRecent(只拉最近 N 条);store 不支持时退回全量 load。
+  // sentinel 必然是最近写入的几条之一,一轮 tool_use+tool_result 通常 2 条,
+  // 取 20 条足够覆盖,且避免长 session 全量 load 在轮询里被放大。
+  const RECENT_LIMIT = 20
+  const loadEntries = store.loadRecent
+    ? () => store.loadRecent!(sessionKey, RECENT_LIMIT)
+    : store.load
+      ? () => store.load!(sessionKey)
+      : null
+  if (!loadEntries) return false
+
+  try {
+    // 轮询等待 sentinel entry 落盘。
+    //
+    // SDK 的 sentinel tool_result append() 是在 generator 返回「之后」通过
+    // setTimeout 调度的 deferred 写入(不是 generator 内的 await，已验证：
+    // generator 结束 ≠ sentinel 落盘，需要 ~50-150ms）。本函数在「下一个 HTTP
+    // 请求」里跑，所以要轮询直到 sentinel 出现。命中通常 1-3 次(50-150ms)；
+    // 上限 1s。每次只拉最近 RECENT_LIMIT 条(loadRecent)，避免长 session 全量拉取。
+    //
+    // 这是「优化路径」的等待窗口，不是正确性保证：若超时返回 false，上游
+    // runClientToolResume 会回退到 retry prompt，hook 的 scanRecent 仍能从
+    // clientToolStore 确定性地注入结果(见 runClientToolResume 的 fallback 分支)。
+    // 命中则省掉一次模型重发 tool_call 的往返。
+    let entries: Array<Record<string, unknown>> | null = null
+    for (let attempt = 0; attempt < 20; attempt++) {
+      entries = (await loadEntries()) as Array<Record<string, unknown>> | null
+      if (entries) {
+        const found = entries.some((e) => {
+          const msg = e.message as { content?: unknown[] } | undefined
+          if (!Array.isArray(msg?.content)) return false
+          return msg.content.some(
+            (b) =>
+              typeof b === 'object' &&
+              b !== null &&
+              (b as { type?: string }).type === 'tool_result' &&
+              (b as { tool_use_id?: string }).tool_use_id === toolUseId &&
+              (b as { is_error?: boolean }).is_error,
+          )
+        })
+        if (found) break
+      }
+      await new Promise((r) => setTimeout(r, 50))
+    }
+
+    if (!entries) return false
+    for (const entry of entries) {
+      const msg = entry.message as
+        | { content?: Array<{ type: string; tool_use_id?: string; is_error?: boolean; content?: unknown }> }
+        | undefined
+      const blocks = msg?.content
+      if (!Array.isArray(blocks)) continue
+
+      let patched = false
+      for (const block of blocks) {
+        if (block.type === 'tool_result' && block.tool_use_id === toolUseId && block.is_error) {
+          // SDK 正常 tool_result 的 content 是纯字符串（已验证）
+          block.content = resultText
+          block.is_error = isError
+          // 同步 entry 级 toolUseResult（SDK 据此判断工具执行状态）
+          ;(entry as Record<string, unknown>).toolUseResult = {
+            stdout: resultText,
+            stderr: '',
+            interrupted: false,
+            isImage: false,
+            noOutputExpected: false,
+          }
+          patched = true
+        }
+      }
+      if (patched) {
+        await store.append(sessionKey, [entry]) // upsert by uuid
+        await new Promise((r) => setTimeout(r, 200)) // FlexDB 最终一致，等传播
+        return true
+      }
+    }
+    return false
+  } catch (err) {
+    if (process.env.OAK_DEBUG === '1') {
+      // eslint-disable-next-line no-console
+      console.error('[oak][patchSentinelToolResult] failed:', err)
+    }
+    return false
+  }
+}
+
+interface RunClientToolResumeArgs {
+  config: AgentConfig
+  conversationId: string
+  userId: string
+  toolUseId: string
+  output: unknown
+  isError: boolean
+  abortController: AbortController
+  ensureSandbox: () => Promise<SandboxInstance | undefined>
+  ensureCloudbaseMcp: (sandbox: SandboxInstance) => Promise<SdkMcpServerConfig | undefined>
+  ensureSnapshotBootstrap: (engine: WorkspaceSnapshotEngine, sandbox: SandboxInstance) => Promise<void>
+  onSnapshotEngine: (engine: WorkspaceSnapshotEngine | undefined) => void
+  permissionStore?: PermissionStore
+  clientToolNames: ReadonlySet<string>
+  clientToolStore?: ClientToolResultStore
+}
+
+async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerator<AcpStreamMessage, void, unknown> {
+  const {
+    config,
+    conversationId,
+    userId,
+    toolUseId,
+    output,
+    isError,
+    abortController,
+    ensureSandbox,
+    ensureCloudbaseMcp,
+    ensureSnapshotBootstrap,
+    onSnapshotEngine,
+    permissionStore,
+    clientToolNames,
+    clientToolStore,
+  } = args
+
+  if (!clientToolStore) {
+    yield* createErrorUpdates('Client tool resume is not configured')
+    return
+  }
+
+  const existing = await clientToolStore.get({ conversationId, toolUseId })
+  if (!existing) {
+    yield* createErrorUpdates('No pending client tool found')
+    return
+  }
+  if (existing.result) {
+    yield* createErrorUpdates('Client tool result has already been resolved')
+    return
+  }
+
+  await clientToolStore.put({ ...existing, result: { output, isError } })
+
+  // Patch the sentinel tool_result so the model sees a clean result on resume
+  // (no retry, no toolUseId mismatch). Best-effort — falls back to retry prompt.
+  const patched = await patchSentinelToolResult(config, conversationId, toolUseId, output, isError)
+
+  // patch 成功 → 最小 prompt(模型看到干净结果,自然继续)
+  // patch 失败 → 回退到"请重新调用"prompt(hook 从 clientToolStore 注入结果)
+  const resumePrompt = patched
+    ? `[系统通知] 请继续。`
+    : isError
+      ? `[系统通知] 用户为刚才的工具调用 \`${existing.toolName}\` 提供了执行错误结果。请重新调用该工具以获取结果（hook 会注入），然后基于错误结果继续。`
+      : `[系统通知] 用户为刚才的工具调用 \`${existing.toolName}\` 提供了实际执行结果。请重新调用该工具以获取该结果（hook 会自动注入），然后基于结果继续。`
+
+  const ctx: ResumeContext = {
+    config,
+    conversationId,
+    userId,
+    abortController,
+    ensureSandbox,
+    ensureCloudbaseMcp,
+    ensureSnapshotBootstrap,
+    onSnapshotEngine,
+    permissionStore,
+    clientToolNames,
+    clientToolStore,
+  }
+  yield* resumeQuery(ctx, resumePrompt)
+}
+
+// ============================================================
+// 内部：askUser resume 已合并到 runClientToolResume
+// ============================================================
+// askUser 现在用统一的 tool_use_required 事件 + respondToolUse API:
+//   host 收到 tool_use_required(toolName='askUser') → 收集 answer →
+//   调 respondToolUse({ toolUseId, output: { answer }, isError: false })。
+// 不再有独立的 runAskUserResume / respondAskUser API。
 
 /**
  * 构造 resume 阶段给模型的引导 prompt。
@@ -1175,14 +1573,18 @@ async function* runApprovalResume(args: RunApprovalResumeArgs): AsyncGenerator<S
  * - allow：让模型重新发起被审批的工具调用（hook 这次会放行）
  * - deny：告诉模型用户拒绝了，不要再重试
  */
-function buildResumePrompt(toolName: string, decision: ApprovalDecision): string {
+function buildResumePrompt(toolName: string, decision: ApprovalDecision, toolInput?: unknown): string {
   if (decision.kind === 'allow') {
-    const updated = decision.updatedInput
-      ? `（用户修改了参数为 ${JSON.stringify(decision.updatedInput)}，请按这些参数调用）`
-      : ''
+    // 优先使用用户修改后的参数；否则注入原始参数，强制模型用相同参数重发，
+    // 避免模型自由发挥改写命令（这是 approve 后重复/变更 tool_call 的根因）。
+    const effectiveInput = decision.updatedInput ?? toolInput
+    const inputHint =
+      effectiveInput !== undefined
+        ? `请使用以下完全相同的参数调用，不要改动：\n${JSON.stringify(effectiveInput)}`
+        : '请使用与刚才完全相同的参数调用。'
     return (
-      `[系统通知] 用户已批准刚才的工具调用 \`${toolName}\`${updated}。` +
-      '请立即重新调用该工具完成原任务，不要再询问用户。'
+      `[系统通知] 用户已批准刚才的工具调用 \`${toolName}\`。` +
+      `请立即重新调用该工具完成原任务，不要再询问用户，也不要改写参数。${inputHint}`
     )
   }
   // deny
@@ -1247,28 +1649,40 @@ async function resolveUserCredentials(config: AgentConfig): Promise<CloudBaseUse
   if (creds) {
     return {
       envId: creds.envId ?? config.envId,
-      secretId: creds.secretId,
-      secretKey: creds.secretKey,
-      sessionToken: creds.sessionToken,
+      ...(creds.accessKey ? { accessKey: creds.accessKey } : {}),
+      ...(creds.secretId ? { secretId: creds.secretId } : {}),
+      ...(creds.secretKey ? { secretKey: creds.secretKey } : {}),
+      ...(creds.sessionToken ? { sessionToken: creds.sessionToken } : {}),
     }
   }
 
   const platformCreds = config.credentials
 
-  if (!platformCreds?.secretId || !platformCreds.secretKey) {
+  // 没有显式 credentials 时,fallback 到 CLOUDBASE_APIKEY env(node-sdk 自身也支持此 fallback,
+  // 但 sandbox MCP 需要主动注入到容器 env,所以这里要显式读出来)
+  if (!platformCreds?.accessKey && (!platformCreds?.secretId || !platformCreds.secretKey)) {
+    const envApiKey = process.env.CLOUDBASE_APIKEY
+    if (typeof envApiKey === 'string' && envApiKey.length > 0) {
+      return {
+        envId: config.envId,
+        accessKey: envApiKey,
+      }
+    }
     throw new InvalidConfigError(
       'CloudBase MCP tools require user credentials. ' +
         'Either set AgentConfig.sandbox.userCredentials, ' +
-        'or pass AgentConfig.credentials. ' +
+        'pass AgentConfig.credentials (accessKey or secretId/secretKey), ' +
+        'or set process.env.CLOUDBASE_APIKEY. ' +
         'To disable cloudbase tools entirely, pass `sandbox: { cloudbaseTools: false }`.',
     )
   }
 
   return {
     envId: platformCreds.envId || config.envId,
-    secretId: platformCreds.secretId,
-    secretKey: platformCreds.secretKey,
-    sessionToken: platformCreds.sessionToken,
+    ...(platformCreds.accessKey ? { accessKey: platformCreds.accessKey } : {}),
+    ...(platformCreds.secretId ? { secretId: platformCreds.secretId } : {}),
+    ...(platformCreds.secretKey ? { secretKey: platformCreds.secretKey } : {}),
+    ...(platformCreds.sessionToken ? { sessionToken: platformCreds.sessionToken } : {}),
   }
 }
 
@@ -1292,8 +1706,26 @@ function createSessionsManagement(config: AgentConfig): Agent['sessions'] {
         updatedAt: s.mtime,
       }))
     },
-    async get(_conversationId): Promise<SessionSummary | null> {
-      return null
+    async get(conversationId): Promise<SessionSummary | null> {
+      const store = config.session?.store as
+        | {
+            getSession?: (
+              k: string,
+              sid: string,
+            ) => Promise<{ sessionId: string; mtime: number; userId?: string } | null>
+          }
+        | undefined
+      if (!store?.getSession) return null
+      const projectKey = config.session?.projectKey ?? config.envId
+      const hit = await store.getSession(projectKey, conversationId)
+      if (!hit) return null
+      return {
+        conversationId: hit.sessionId,
+        userId: hit.userId ?? '',
+        status: 'idle' as const,
+        createdAt: hit.mtime,
+        updatedAt: hit.mtime,
+      }
     },
     async delete(conversationId): Promise<void> {
       const store = config.session?.store as
@@ -1315,5 +1747,40 @@ function mapSummary(raw: unknown): SessionSummary {
     createdAt: typeof r.mtime === 'number' ? r.mtime : 0,
     updatedAt: typeof r.mtime === 'number' ? r.mtime : 0,
     metadata: typeof r.data === 'object' && r.data !== null ? (r.data as Record<string, unknown>) : {},
+  }
+}
+
+/**
+ * 读取 claude CLI 的 debug-file 并打到 console.error(OAK_DEBUG 诊断用)。
+ *
+ * SDK 把子进程 --debug 的详细输出写到 debug-file(不进 stderr),这是定位
+ * "子进程 exit code 0 却 0 条消息"这类静默失败的唯一窗口:文件里通常含
+ * spawn 命令行、模型 API 请求/响应、写文件失败、stdin 协议握手等真因。
+ *
+ * 只读尾部(最多 ~16KB),避免日志爆量;读不到文件不报错(graceful)。
+ */
+async function dumpClaudeDebugFile(debugFilePath: string | undefined): Promise<void> {
+  if (!debugFilePath) return
+  try {
+    const { readFile, stat } = await import('node:fs/promises')
+    const st = await stat(debugFilePath).catch(() => undefined)
+    if (!st || st.size === 0) {
+      // eslint-disable-next-line no-console
+      console.error(
+        `[oak][claude-debug] debug-file empty or missing at ${debugFilePath} ` +
+          `(size=${st?.size ?? 'n/a'}). 子进程可能在写 debug-file 之前就退出,或该路径不可写。`,
+      )
+      return
+    }
+    const MAX = 16 * 1024
+    const buf = await readFile(debugFilePath)
+    const tail = buf.length > MAX ? buf.subarray(buf.length - MAX).toString('utf8') : buf.toString('utf8')
+    // eslint-disable-next-line no-console
+    console.error(
+      `[oak][claude-debug] ${debugFilePath} (size=${buf.length}B, showing last ${Math.min(buf.length, MAX)}B):\n${tail}`,
+    )
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[oak][claude-debug] failed to read debug-file:', (err as Error)?.message)
   }
 }

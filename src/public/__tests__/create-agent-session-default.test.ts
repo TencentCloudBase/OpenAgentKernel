@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { createAgent } from '../create-agent.js'
 import type { AgentConfig } from '../types.js'
 
@@ -11,18 +11,7 @@ const baseConfig: AgentConfig = {
   },
 }
 
-const originalTcbApiKey = process.env.TCB_API_KEY
-
 describe('createAgent — default session store', () => {
-  beforeEach(() => {
-    delete process.env.TCB_API_KEY
-  })
-
-  afterAll(() => {
-    if (originalTcbApiKey === undefined) delete process.env.TCB_API_KEY
-    else process.env.TCB_API_KEY = originalTcbApiKey
-  })
-
   it('enables CloudBase FlexDB session store by default when credentials are provided', async () => {
     const agent = createAgent(baseConfig)
 
@@ -60,7 +49,7 @@ describe('createAgent — default session store', () => {
     })
   })
 
-  it('requires credentials or TCB_API_KEY when session.enabled=true uses the default CloudBase FlexDB store', () => {
+  it('requires credentials when session.enabled=true uses the default CloudBase FlexDB store', () => {
     expect(() =>
       createAgent({
         envId: 'env-test',
@@ -68,6 +57,18 @@ describe('createAgent — default session store', () => {
         session: { enabled: true },
       }),
     ).toThrow(/requires AgentConfig\.credentials/)
+  })
+
+  it('enables session store with accessKey-only credentials (no CAM secret needed)', async () => {
+    const agent = createAgent({
+      envId: 'env-test',
+      model: 'glm-5.1',
+      credentials: { accessKey: 'ak-test' },
+    })
+
+    await expect(agent.resumeSession('conversation-id')).resolves.toMatchObject({
+      id: 'conversation-id',
+    })
   })
 
   it('rejects reserved CloudBase database types until their drivers are implemented', () => {

@@ -4,10 +4,9 @@
  * 存储在统一的 `oak_state` 表中（type='permission'），与其他临时状态共享同一集合。
  * 这样每个小租户环境只需开通 1 张临时状态表，而不是每个功能开一张。
  *
- * 凭证模式（与 CloudBaseDbDriver 一致；CloudBaseStorage 仍只支持 CAM credentials）：
+ * 凭证模式（与 CloudBaseDbDriver / CloudBaseStorage 一致）：
  *   - 推荐通过 CloudBaseDbPermissionDriverOptions.credentials 显式注入
- *   - 无 credentials 时可通过 accessKey 使用 CloudBase 数据面认证
- *   - 两者都不传时由 @cloudbase/node-sdk 自身处理运行环境认证
+ *   - 不传时不做 env fallback，由 @cloudbase/node-sdk 自身处理运行环境认证
  *
  * oak_state 文档结构（type='permission'）：
  *   {
@@ -30,15 +29,20 @@
  * `@cloudbase/node-sdk` 按需懒加载。
  */
 
-import { ResourceError } from '../../internal/errors.js'
+import cloudbase from '@cloudbase/node-sdk'
+
 import type { PendingApproval } from '../../public/types.js'
 import type { PermissionStoreDriver } from './types.js'
 
 /** CloudBase Node SDK 凭证（与 CloudBaseDbDriver / CloudBaseStorage 同 shape） */
 export interface CloudBasePermissionCredentials {
   envId: string
-  secretId: string
-  secretKey: string
+  /** CloudBase 平台 API Key。存在时优先于 secretId/secretKey */
+  accessKey?: string
+  /** 腾讯云 SecretId。accessKey 未提供时必填 */
+  secretId?: string
+  /** 腾讯云 SecretKey。accessKey 未提供时必填 */
+  secretKey?: string
   /** STS 临时凭证 token（可选） */
   sessionToken?: string
   /** 默认 ap-shanghai */
@@ -48,11 +52,6 @@ export interface CloudBasePermissionCredentials {
 export interface CloudBaseDbPermissionDriverOptions {
   /** 显式凭证；不传则由 @cloudbase/node-sdk 自身处理运行环境认证 */
   credentials?: CloudBasePermissionCredentials
-  /** 仅用于 FlexDB 数据面的 API Key 认证；credentials 存在时忽略 */
-  accessKey?: {
-    envId: string
-    accessKey: string
-  }
   /**
    * 集合名前缀（默认 `oak_`）。
    * 最终集合名为 `{prefix}state`（统一临时状态表）。
@@ -79,6 +78,7 @@ function resolveCredentials(opts?: CloudBaseDbPermissionDriverOptions): Resolved
   const creds = opts?.credentials
   return {
     ...(creds?.envId ? { envId: creds.envId } : {}),
+    ...(creds?.accessKey ? { accessKey: creds.accessKey } : {}),
     ...(creds?.secretId ? { secretId: creds.secretId } : {}),
     ...(creds?.secretKey ? { secretKey: creds.secretKey } : {}),
     ...(creds?.sessionToken ? { sessionToken: creds.sessionToken } : {}),
@@ -123,7 +123,6 @@ interface CloudBaseApp {
 
 export class CloudBaseDbPermissionDriver implements PermissionStoreDriver {
   private readonly creds: ResolvedCredentials
-  private readonly accessKey?: NonNullable<CloudBaseDbPermissionDriverOptions['accessKey']>
   private readonly prefix: string
   private readonly expiresAfterMs: number
   private app: CloudBaseApp | null = null
@@ -131,7 +130,6 @@ export class CloudBaseDbPermissionDriver implements PermissionStoreDriver {
 
   constructor(opts?: CloudBaseDbPermissionDriverOptions) {
     this.creds = resolveCredentials(opts)
-    this.accessKey = opts?.credentials ? undefined : opts?.accessKey
     this.prefix = opts?.collectionPrefix ?? DEFAULT_PREFIX
     this.expiresAfterMs = opts?.expiresAfterMs ?? DEFAULT_EXPIRES_AFTER_MS
   }
@@ -140,36 +138,15 @@ export class CloudBaseDbPermissionDriver implements PermissionStoreDriver {
 
   private async getApp(): Promise<CloudBaseApp> {
     if (this.app) return this.app
-    const mod = await this.requireCloudBase()
-    const init = (mod.default ?? mod) as { init(opts: Record<string, unknown>): CloudBaseApp }
-    if (typeof init.init !== 'function') {
-      throw new ResourceError(
-        '@cloudbase/node-sdk loaded but `.init()` not available. ' + 'Check the version (>= 3.0.0 required).',
-      )
-    }
-    this.app = this.accessKey
-      ? init.init({ env: this.accessKey.envId, accessKey: this.accessKey.accessKey })
-      : init.init({
-          region: this.creds.region,
-          ...(this.creds.envId ? { env: this.creds.envId } : {}),
-          ...(this.creds.secretId ? { secretId: this.creds.secretId } : {}),
-          ...(this.creds.secretKey ? { secretKey: this.creds.secretKey } : {}),
-          ...(this.creds.sessionToken ? { sessionToken: this.creds.sessionToken } : {}),
-        })
+    this.app = cloudbase.init({
+      region: this.creds.region,
+      ...(this.creds.envId ? { env: this.creds.envId } : {}),
+      ...(this.creds.accessKey ? { accessKey: this.creds.accessKey } : {}),
+      ...(this.creds.secretId ? { secretId: this.creds.secretId } : {}),
+      ...(this.creds.secretKey ? { secretKey: this.creds.secretKey } : {}),
+      ...(this.creds.sessionToken ? { sessionToken: this.creds.sessionToken } : {}),
+    })
     return this.app
-  }
-
-  private async requireCloudBase(): Promise<{ default?: unknown; init?: unknown }> {
-    try {
-      const dynamicImport = new Function('p', 'return import(p)') as (
-        p: string,
-      ) => Promise<{ default?: unknown; init?: unknown }>
-      return await dynamicImport('@cloudbase/node-sdk')
-    } catch {
-      throw new ResourceError(
-        '@cloudbase/node-sdk failed to load. Reinstall @cloudbase/open-agent-kernel or check your node_modules.',
-      )
-    }
   }
 
   private async getCollection(): Promise<CloudBaseCollection> {

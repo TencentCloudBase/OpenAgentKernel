@@ -8,9 +8,16 @@
 
 import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
 import type { z } from 'zod'
+import type { AcpSessionUpdate, AcpStreamMessage } from '../acp/index.js'
+import type { StreamAdapter } from '../adapters/index.js'
 
 /**
  * 平台凭证，用于初始化 CloudBase 管理端/服务端 SDK。
+ *
+ * 支持两种认证方式（按优先级）：
+ *   1. `accessKey`（CloudBase 平台 API Key）：node-sdk 直接支持 Bearer 认证；
+ *      manager-node（cos-store）会自动换取临时 CAM 凭证。
+ *   2. `secretId` + `secretKey`（腾讯云 CAM 凭证）：直接传给下游 SDK。
  *
  * kernel 不从 `process.env` 读取平台凭证；示例或业务代码可自行从环境变量加载后，
  * 通过 `createAgent({ credentials })` 显式传入。
@@ -18,8 +25,12 @@ import type { z } from 'zod'
 export interface PlatformCredentials {
   /** CloudBase 环境 ID；不传时默认继承 AgentConfig.envId */
   envId?: string
-  secretId: string
-  secretKey: string
+  /** CloudBase 平台 API Key。存在时优先于 secretId/secretKey */
+  accessKey?: string
+  /** 腾讯云 SecretId。accessKey 未提供时必填 */
+  secretId?: string
+  /** 腾讯云 SecretKey。accessKey 未提供时必填 */
+  secretKey?: string
   /** STS 临时凭证 token（可选） */
   sessionToken?: string
   /** 默认 ap-shanghai */
@@ -55,23 +66,39 @@ export interface SandboxConfig {
   /**
    * 是否启用默认 sandbox。
    *
-   * - `true`：使用内置默认 provider（当前为 `ags-stateful`），并补齐默认 runtime/scope
+   * - `true`：使用内置默认 provider（见 `provider` 字段，默认 `ags-stateful`），并补齐默认 runtime/scope
    * - `false` / 未配置 sandbox：不启用 sandbox
    *
    * 如果显式传了 `runtime`，即使不传 `enabled` 也会启用 sandbox。
    */
   enabled?: boolean
   /**
-   * 默认 sandbox 产品类型。当前仅内置 `ags-stateful`。
+   * 沙箱产品类型。当前内置：
+   * - `local`（默认）：OAK 宿主进程本地 FS + Claude SDK 内置工具（过渡方案，AGS 产品化未就绪时的默认）
+   * - `ags-stateful`：腾讯云 AGS Agent Sandbox 产品 + TRW 远程数据面（需要 CLOUDBASE_APIKEY）
+   *
+   * 选 `local` 时：
+   *   - SDK 内置工具(Bash/Read/Write/Edit/Glob/Grep)默认开启(local provider 即用本地 FS,
+   *     无需经 mcp__sandbox__* HTTP 数据面)
+   *   - 不暴露 HTTP 数据面 —— `SandboxInstance.request()` 会抛 SandboxError
+   *   - cwd 跨请求持久化由 kernel 自动驱动(在 send 边界做 tar.gz 单包 COS 同步)
    *
    * 未来可扩展到其他 CloudBase/第三方 sandbox 产品；高级用户也可直接传 `runtime`。
    */
-  provider?: 'ags-stateful'
+  provider?: 'local' | 'ags-stateful'
+  /**
+   * local provider 的工作区根目录。未设置时按 session 上下文推导：
+   * `OAK_WORKSPACE_ROOT` 或 `os.tmpdir()/oak-workspaces/{envId}/{userId}/{conversationId}`。
+   *
+   * 与 `AgentConfig.cwd` 必须一致(若两者都设置)——local 模式下 SDK 内置工具以 cwd
+   * 为工作目录,COS 同步同一目录树。
+   */
+  workspaceRoot?: string
   /**
    * 默认 AGS 数据面认证 JWT。
    *
    * 仅在 `enabled: true` 且未显式传 `runtime` 时用于构造默认 AgsStatefulSandbox。
-   * 不传时读取 `TCB_API_KEY` 或 `OAK_SANDBOX_API_KEY`。
+   * 不传时读取 `CLOUDBASE_APIKEY` 或 `OAK_SANDBOX_API_KEY`。
    */
   apiKey?: string
   /**
@@ -148,13 +175,18 @@ export interface SandboxConfig {
  * 沙箱内 cloudbase-mcp 工具调用使用的用户租户凭证。
  *
  * 注入到沙箱 `/api/workspace/env`：
- *   CLOUDBASE_ENV_ID, TENCENTCLOUD_SECRETID, TENCENTCLOUD_SECRETKEY, TENCENTCLOUD_SESSIONTOKEN
+ *   CLOUDBASE_ENV_ID, CLOUDBASE_APIKEY (accessKey 模式)
+ *   或 TENCENTCLOUD_SECRETID, TENCENTCLOUD_SECRETKEY, TENCENTCLOUD_SESSIONTOKEN (CAM 模式)
  */
 export interface SandboxUserCredentials {
   /** CloudBase 环境 ID（不传则回退到 AgentConfig.envId） */
   envId?: string
-  secretId: string
-  secretKey: string
+  /** CloudBase 平台 API Key。存在时优先于 secretId/secretKey */
+  accessKey?: string
+  /** 腾讯云 SecretId。accessKey 未提供时必填 */
+  secretId?: string
+  /** 腾讯云 SecretKey。accessKey 未提供时必填 */
+  secretKey?: string
   /** 临时 token（CAM 临时凭证场景），可选 */
   sessionToken?: string
 }
@@ -234,7 +266,7 @@ export type McpServerConfig = SdkMcpServerConfig
 // ============================================================
 
 /**
- * 审批决策（用户对 tool_approval_required 的响应）。
+ * 审批决策（用户对 ACP request_permission 的响应）。
  *
  * 这是协议无关的超集——业务侧的 ACP / AG-UI / 自家 SSE 等协议只需要把
  * 自己的决策枚举映射成下面的字段即可。
@@ -293,8 +325,8 @@ export interface PendingApproval {
 /**
  * 审批状态外部存储接口（让 HITL 支持分布式扩展）。
  *
- * - 不传 store 且已提供 credentials 或 TCB_API_KEY：kernel 默认使用 CloudBase FlexDB 分布式存储
- * - 不传 store 且两种凭证都没有：kernel 使用进程内 `InMemoryPermissionStore`（单进程可用）
+ * - 不传 store 且已提供 credentials：kernel 默认使用 CloudBase FlexDB 分布式存储
+ * - 不传 store 且未提供 credentials：kernel 使用进程内 `InMemoryPermissionStore`（单进程可用）
  * - 传 store：可跨节点 / 跨进程 resume；同一 conversationId 的请求可路由到任意节点
  *
  * 接口与 SessionStoreDriver 同套路：内置 InMemory（默认）+ CloudBaseDb（生产）+ 用户可自实现。
@@ -339,8 +371,8 @@ export interface PermissionConfig {
   /**
    * 审批状态存储。
    *
-   * 不传且已提供 credentials 或 TCB_API_KEY：默认使用 CloudBase FlexDB 分布式存储；
-   * 不传且两种凭证都没有：走进程内 `InMemoryPermissionStore`。
+   * 不传且已提供 credentials：默认使用 CloudBase FlexDB 分布式存储；
+   * 不传且未提供 credentials：走进程内 `InMemoryPermissionStore`。
    */
   store?: PermissionStore
 
@@ -443,18 +475,45 @@ export interface AgentConfig {
 
   // ── 资源锚点 ────────────────────────────────────
   envId: string
-  /**
-   * CAM 平台凭证，用于 CloudBase 管理面、COS 和数据面。
-   * 不传时仅 FlexDB session/HITL 可回退到 process.env.TCB_API_KEY。
-   */
+  /** 平台凭证，用于初始化 CloudBase SDK。不传则依赖下游 SDK 自身行为或按能力报错。 */
   credentials?: PlatformCredentials
 
   // ── 模型 ────────────────────────────────────────
   model: ModelInput
   systemPrompt?: string
 
+  /**
+   * 是否启用流式增量输出。默认 true。
+   *
+   * 启用时 SDK 透传 includePartialMessages,事件流发出增量 message_delta(逐字),
+   * 最终再发一个 message_complete(完整文本)。
+   * 关闭时不发增量,assistant 文本一次性作为 message_delta + message_complete 发出。
+   *
+   * 注:部署形态若在网关层缓冲整个响应(如 SCF web-function 只投递最后一次 write),
+   * 即使开了流式,前端也要等整轮结束才一次性收到 —— 那是网关行为,与本开关无关。
+   */
+  stream?: boolean
+
   // ── 能力 ────────────────────────────────────────
   tools?: ToolDefinition<any, any>[]
+  /**
+   * Client-side tool 结果存储（PR #7.1 分布式支持）。
+   *
+   * - 不传：kernel 使用进程内 `InMemoryClientToolStore`（单进程可用）
+   * - 传：可跨节点 / 跨进程 resume；同一 conversationId 的请求可路由到任意节点
+   *
+   * 推荐用法：
+   *   ```ts
+   *   import { CloudBaseClientToolStore, CloudBaseDbClientToolDriver } from '@cloudbase/open-agent-kernel'
+   *   toolStore: new CloudBaseClientToolStore({
+   *     driver: new CloudBaseDbClientToolDriver(),
+   *     projectKey: envId,
+   *   })
+   *   ```
+   *
+   * 类型故意宽泛（unknown），避免公共类型层依赖底层实现。
+   */
+  toolStore?: unknown
   mcpServers?: Record<string, McpServerConfig>
   /** 子 agent（handoffs） */
   handoffs?: Agent[]
@@ -513,10 +572,6 @@ export interface AgentConfig {
    *
    * 默认:disabled(等价 v0 行为)。
    *
-   * 依赖:提供 AgentConfig.credentials(CAM,走 manager-node 目录枚举),或仅有
-   * TCB_API_KEY(走 COS 数据面 + sidecar manifest 索引)。accessKey 模式下历史
-   * projects/* 与 agent-memory/* 无法自动发现(数据面无列目录接口),CLAUDE.md 可自动补录。
-   *
    * 依赖:启用时该 envId 必须开通 CloudBase COS。COS 不可达时记 warning,
    * 不阻塞 send(graceful degrade — agent 仍可工作,只是这次不同步)。
    *
@@ -528,15 +583,21 @@ export interface AgentConfig {
 
   // ── 钩子 ────────────────────────────────────────
   hooks?: AgentHooks
+
+  /**
+   * @internal 高级覆盖：未传时使用内置 AcpStreamAdapter。
+   * 常规用户无需声明此字段，session.send() 默认输出 ACP session/update。
+   */
+  streamAdapter?: StreamAdapter<AcpStreamMessage>
 }
 
 /**
  * 会话持久化配置。
  *
  * 默认行为：
- * - 传了 `AgentConfig.credentials` 或设置了 `process.env.TCB_API_KEY`，且未显式关闭时，
- *   自动使用 CloudBase FlexDB 持久化 session，表前缀默认 `oak_`，projectKey 默认 `envId`。
- * - 两者都没有时保持本地临时 transcript，避免无凭证 quickstart 报错。
+ * - 传了 `AgentConfig.credentials` 且未显式关闭时，自动使用 CloudBase FlexDB
+ *   持久化 session，表前缀默认 `oak_`，projectKey 默认 `envId`。
+ * - 未传 credentials 时保持本地临时 transcript，避免无凭证 quickstart 报错。
  * - 传 `enabled: false` 可显式关闭默认持久化。
  *
  * 注意：本接口刻意不导出底层 SDK 的 `SessionStore` 类型，避免锁定 runtime。
@@ -547,8 +608,7 @@ export interface SessionConfig {
   /**
    * 是否启用 session 持久化。
    *
-   * - `undefined`：有 credentials 或 TCB_API_KEY 时默认启用 CloudBase FlexDB；
-   *   两者都没有时不启用
+   * - `undefined`：有 credentials 时默认启用 CloudBase FlexDB；无 credentials 时不启用
    * - `false`：显式关闭持久化
    * - `true`：强制启用；若缺少所需配置会在 createAgent 阶段报错
    */
@@ -685,21 +745,27 @@ export interface Session {
    * 发送用户消息，返回事件流。
    * 字符串糖：等价于 { type: 'message', content: input }
    */
-  send(input: string | SessionInput): AsyncIterable<SessionEvent>
+  send(input: string | SessionInput): AsyncIterable<AcpStreamMessage>
 
   /**
    * 响应工具审批（PR #7.0）。
    *
-   * 当事件流给出 `tool_approval_required` 后，业务收集到用户决策（allow/deny/scope/...）
-   * 调本方法注入决策。kernel 把决策写入 PermissionStore，然后内部 resume 一次 SDK 运行：
-   * Hook 再次触发时从 store 读到决策并放行 / 拒绝，agent 继续往下跑。
+   * 当 ACP 更新流给出 `session/request_permission` JSON-RPC REQUEST 后，业务收集到
+   * 用户决策（allow/deny/scope/...）调本方法注入决策。kernel 把决策写入 PermissionStore，
+   * 然后内部 resume 一次 SDK 运行。
    *
-   * 返回的事件流是"决策注入后"的运行流（可能包含 message_delta / tool_call /
-   * tool_result / 再次的 tool_approval_required / session_idle 等）。
-   *
-   * 注意：调用方应确保同一 toolUseId 不被并发响应；重复响应会用最后一次为准。
+   * 返回的事件流是"决策注入后"的 ACP 流（AcpStreamMessage 联合：标准 session updates +
+   * 可能的 JSON-RPC REQUESTs）。
    */
-  respondApproval(opts: { toolUseId: string; decision: ApprovalDecision }): AsyncIterable<SessionEvent>
+  respondApproval(opts: { toolUseId: string; decision: ApprovalDecision }): AsyncIterable<AcpStreamMessage>
+
+  /**
+   * PR #7.1: 注入客户端工具结果并 resume agent 运行。
+   *
+   * 客户端执行完 `client/<ToolName>` REQUEST 对应的工具后，调本方法把结果回灌给 kernel。
+   * 返回的事件流是"结果注入后"的 ACP 流。
+   */
+  respondToolUse(opts: { toolUseId: string; output: unknown; isError?: boolean }): AsyncIterable<AcpStreamMessage>
 
   /** 拉取历史消息 */
   getHistory(opts?: { limit?: number; before?: number }): Promise<MessageRecord[]>
@@ -763,67 +829,6 @@ export type AttachmentInput =
   | { type: 'file'; source: string | Uint8Array; mimeType?: string }
   | { type: 'url'; url: string; mimeType?: string }
   | { type: 'cos'; fileId: string; mimeType?: string }
-
-// ============================================================
-// Session 事件流
-// ============================================================
-
-export type SessionEvent =
-  | { type: 'message_delta'; text: string }
-  | { type: 'message_complete'; text: string }
-  | {
-      type: 'tool_call'
-      toolUseId: string
-      toolName: string
-      input: unknown
-    }
-  | {
-      type: 'tool_result'
-      toolUseId: string
-      toolName: string
-      output: unknown
-      isError: boolean
-    }
-  | {
-      /**
-       * 工具调用需要用户审批（PR #7.0）。
-       *
-       * 收到此事件后，本轮 SDK 运行会自然结束（紧跟 `session_idle.requires_action`）。
-       * 业务收集到决策后调 `session.respondApproval({ toolUseId, decision })` 继续。
-       *
-       * 协议无关字段：客户端协议（ACP/AG-UI/SSE）适配只需把这些字段映射到自家协议。
-       */
-      type: 'tool_approval_required'
-      toolUseId: string
-      toolName: string
-      input: unknown
-      /**
-       * 给客户端 UI 的辅助提示，**协议无关**。
-       * - displayName：UI 按钮 / 标题用的短名
-       * - description：长描述（"will read files in ~/Downloads"）
-       * - suggestedScopes：UI 可呈现的"作用范围"选项（once/session/forever）
-       */
-      hints?: {
-        displayName?: string
-        description?: string
-        suggestedScopes?: Array<'once' | 'session' | 'forever'>
-      }
-      /**
-       * Resume token（业务可不持久化，conversationId + toolUseId 就够 resumeApproval；
-       * 此字段留作未来跨进程 RunState 持久化的扩展点）。
-       */
-      runStateJson: string
-    }
-  | {
-      type: 'handoff'
-      fromAgent: string
-      toAgent: string
-    }
-  | {
-      type: 'session_idle'
-      reason: 'completed' | 'requires_action' | 'aborted' | 'error'
-    }
-  | { type: 'error'; error: Error }
 
 // ============================================================
 // 历史消息记录（PR #4.6 扩展）

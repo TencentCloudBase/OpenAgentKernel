@@ -4,6 +4,7 @@
 
 export {
   InMemoryPermissionStore,
+  InMemoryClientToolStore,
   DEFAULT_APPROVAL_TIMEOUT_MS,
   compileRequireApprovalPredicate,
   isStaleApproval,
@@ -11,11 +12,17 @@ export {
 
 export {
   OAK_INTERRUPT_SENTINEL,
+  OAK_CLIENT_TOOL_SENTINEL,
+  OAK_CLIENT_TOOL_RESULT_KEY,
   isInterruptSignal,
   parseInterruptSignal,
+  parseClientToolSignal,
   createPreToolUsePermissionHook,
   createHookLocalState,
   type InterruptSignalPayload,
+  type ClientToolSignalPayload,
+  type ClientToolResultStore,
+  type PendingClientToolResult,
   type PreToolUseHookLocalState,
 } from './hooks.js'
 
@@ -31,3 +38,14 @@ export {
   type CloudBaseDbPermissionDriverOptions,
   type CloudBasePermissionCredentials,
 } from './drivers/cloudbase-db-driver.js'
+
+// PR #7.1：分布式 ClientToolResultStore（CloudBase DB driver）
+export { CloudBaseClientToolStore, type CloudBaseClientToolStoreOptions } from './cloudbase-client-tool-store.js'
+
+export type { ClientToolResultStoreDriver } from './drivers/types.js'
+
+export {
+  CloudBaseDbClientToolDriver,
+  type CloudBaseDbClientToolDriverOptions,
+  type CloudBaseClientToolCredentials,
+} from './drivers/cloudbase-client-tool-driver'

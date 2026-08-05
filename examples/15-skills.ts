@@ -21,6 +21,7 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { isSkillToolCall, printAcpUpdate } from './_shared/acp.js'
 import { getEnvId, getModel, loadEnv } from './_shared/env.js'
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
@@ -74,10 +75,10 @@ async function main() {
   console.log('[example] session started, sending prompt...\n')
   let sawSkillInvocation = false
   for await (const event of session.send('请问候我')) {
-    if (event.type === 'message_delta') process.stdout.write(event.text)
-    if (event.type === 'tool_call' && event.toolName === 'Skill') {
+    printAcpUpdate(event)
+    if (isSkillToolCall(event)) {
       sawSkillInvocation = true
-      console.log(`\n[example] ✓ Skill tool invoked with input:`, event.input)
+      console.log(`\n[example] ✓ Skill tool invoked with input:`, event.rawInput)
     }
   }
   console.log('\n[example] done.')

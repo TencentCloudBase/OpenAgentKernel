@@ -6,4 +6,4 @@
 
 export { defaultCloudBaseAiBaseUrl } from './name-resolver.js'
 
-export { resolveApiKey, resolveCloudBaseAccessKey, type ResolvedApiKey } from './credential-provider.js'
+export { resolveApiKey, type ResolvedApiKey } from './credential-provider.js'

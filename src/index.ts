@@ -10,6 +10,65 @@
 
 // 公共 API：唯一的入口点
 export { createAgent } from './public/create-agent.js'
+export { AcpStreamAdapter } from './adapters/index.js'
+
+export type { AcpStreamAdapterOptions, StreamAdapter, StreamAdapterContext } from './adapters/index.js'
+export type {
+  // Top-level union
+  AcpSessionUpdate,
+  // JSON-RPC stream messages
+  AcpStreamMessage,
+  JsonRpcNotification,
+  JsonRpcRequestMessage,
+  // OAK convenience alias
+  AcpTextBlock,
+  // OAK _meta extension namespace
+  OakMeta,
+  // Standard ACP types (re-exported from @agentclientprotocol/sdk)
+  SessionUpdate,
+  ToolCall,
+  ToolCallUpdate,
+  ToolKind,
+  ToolCallStatus,
+  ToolCallLocation,
+  ToolCallContent,
+  ContentChunk,
+  ContentBlock,
+  TextContent,
+  Plan,
+  PlanEntry,
+  PlanUpdate,
+  PlanRemoved,
+  UsageUpdate,
+  AvailableCommandsUpdate,
+  AvailableCommand,
+  CurrentModeUpdate,
+  ConfigOptionUpdate,
+  SessionInfoUpdate,
+  PermissionOption,
+  PermissionOptionKind,
+  PermissionOptionId,
+  RequestPermissionRequest,
+  RequestPermissionOutcome,
+  SelectedPermissionOutcome,
+  Diff,
+  Terminal,
+  Cost,
+  MessageId,
+  // OAK extension variants
+  LogUpdate,
+  ArtifactUpdate,
+  HistoryPageUpdate,
+  AgentPhaseUpdate,
+  RequestPermissionUpdate,
+  AskUserUpdate,
+  // OAK history types
+  HistoryMessage,
+  HistoryMessagePart,
+  HistoryMessagePartToolCall,
+  HistoryMessagePartToolResult,
+  AgentPhaseName,
+} from './acp/index.js'
 
 // 公共类型：完整对外契约
 export type {
@@ -21,7 +80,6 @@ export type {
   SessionSummary,
   // 输入 / 事件
   SessionInput,
-  SessionEvent,
   MessageRecord,
   MessagePart,
   AttachmentInput,
@@ -92,10 +150,16 @@ export {
   type DeleteUserMemoryFilesOptions,
 } from './user-memory/index.js'
 
-// Sandbox：可选用于让 agent 在远程容器里跑文件系统/shell（PR #6A）
+// Sandbox：可选用于让 agent 通过 local/AGS runtime 跑文件系统/shell
+//   - provider='ags-stateful'（默认）：腾讯云 AGS Agent Sandbox + TRW 远程数据面
+//   - provider='local'：宿主进程本地 FS + Claude SDK 内置工具（过渡方案）
 export {
   AgsStatefulSandbox,
   type AgsStatefulSandboxOptions,
+  LocalRuntimeSandbox,
+  type LocalRuntimeSandboxOptions,
+  createCloudBaseMcpServerInProcess,
+  type CreateCloudBaseMcpInProcessOptions,
   type SandboxRuntime,
   type SandboxInstance,
   type SandboxAcquireContext,

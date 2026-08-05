@@ -1,124 +1,104 @@
 /**
- * Example 12: PR #7.0 —— ACP 协议适配演示
+ * Example 12: built-in ACP HITL flow
  *
- * 演示 kernel 的 HITL 事件流如何映射到 ACP 协议：
- *   - kernel 出 'tool_approval_required' → 业务发 ACP `session/request_permission`
- *   - ACP 客户端回 selectedOption.optionId → 业务调 session.respondApproval()
+ * 演示 OAK 内置 ACP 输出后的 HITL 事件：
+ *   - session.send() 直接输出 ACP `request_permission`（OAK stop-and-resume 适配）
+ *   - 业务拿到用户决策后调用 session.respondApproval()
  *
- * **重点：协议适配代码完全在用户业务侧**，kernel 不内置 ACP——这就是
- * "kernel 是协议中立的纯库" 的真实含义。下面的 `AcpAdapter` 是 30 行业务代码示意。
- *
- * 真实生产中，AcpAdapter 一边接 @zed-industries/agent-client-protocol（或自家实现），
- * 另一边消费 kernel SessionEvent。
- *
- * 运行（本 example 不依赖真实 ACP 客户端，模拟一个"Always allow_once" 客户端）：
+ * 运行（本 example 不依赖真实 ACP 客户端，模拟一个 "allow" 客户端）：
  *   pnpm dlx tsx packages/open-agent-kernel/examples/12-hitl-acp-adapter.ts
  */
 import { getEnvId, getModel } from './_shared/env.js'
 
-import { CloudBaseSessionStore, createAgent, InMemoryDriver, type SessionEvent } from '@cloudbase/open-agent-kernel'
+import { CloudBaseSessionStore, createAgent, InMemoryDriver, type AcpSessionUpdate } from '@cloudbase/open-agent-kernel'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod'
 
 // ─────────────────────────────────────────────────────────────────────
-// 模拟一个 ACP 客户端协议形态（实际项目里来自 @zed-industries/agent-client-protocol）
+// 模拟一个 ACP 客户端协议形态（实际项目里来自 @agentclientprotocol/sdk）
 // ─────────────────────────────────────────────────────────────────────
 
 /**
- * ACP `session/request_permission` 请求体（精简版，对齐 ACP spec）。
+ * ACP `session/request_permission` 请求体（对齐 ACP spec + OAK stop-and-resume 适配）。
+ *
+ * OAK 把它作为 sessionUpdate 通知发出（而非 JSON-RPC 反向 request），
+ * payload shape 与标准 RequestPermissionRequest 一致：
+ *   - `toolCall`: 标准 ToolCallUpdate（toolCallId / title / kind / rawInput / locations）
+ *   - `options`: 标准 PermissionOption[]（optionId / name / kind）
  */
 interface AcpPermissionRequest {
   toolCall: {
     toolCallId: string
-    toolName: string
-    args: unknown
+    title: string
+    kind: string
+    rawInput: unknown
   }
   options: Array<{
     optionId: string
-    label: string
-    /** 决策语义类别 */
+    name: string
     kind: 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always'
   }>
 }
 
 /**
- * ACP 客户端的批准响应。
+ * ACP 客户端的批准响应（对齐标准 RequestPermissionResponse.outcome）。
  */
 interface AcpPermissionResponse {
-  outcome: { kind: 'selected'; optionId: string } | { kind: 'cancelled' }
+  outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' }
 }
 
 /**
  * 模拟的 ACP 客户端（实际是 WebSocket / JSON-RPC 双向连接）。
- * 这里直接 hardcode "总是 allow_once"。
+ * 这里直接 hardcode "allow"。
  */
 async function fakeAcpRequestPermission(req: AcpPermissionRequest): Promise<AcpPermissionResponse> {
-  console.log(`\n[ACP server → client] session/request_permission`)
-  console.log(`  toolCall.toolName: ${req.toolCall.toolName}`)
-  console.log(`  toolCall.args:     ${JSON.stringify(req.toolCall.args)}`)
-  console.log(`  options:           ${req.options.map((o) => o.optionId).join(', ')}`)
-  console.log(`[ACP client → server] selected: allow_once  (模拟)`)
+  console.log(`\n[ACP server → client] request_permission`)
+  console.log(`  toolCall.title:    ${req.toolCall.title}`)
+  console.log(`  toolCall.kind:     ${req.toolCall.kind}`)
+  console.log(`  toolCall.rawInput: ${JSON.stringify(req.toolCall.rawInput)}`)
+  console.log(`  options:           ${req.options.map((o) => `${o.optionId}(${o.kind})`).join(', ')}`)
+  console.log(`[ACP client → server] selected: allow  (模拟)`)
   await new Promise((r) => setTimeout(r, 50))
-  return { outcome: { kind: 'selected', optionId: 'allow_once' } }
+  return { outcome: { outcome: 'selected', optionId: 'allow' } }
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// AcpAdapter：把 kernel SessionEvent ↔ ACP 协议来回映射（业务侧 ~30 行）
+// ACP HITL pump：消费 OAK 内置 ACP 更新，遇到 request_permission 后注入审批决策
 // ─────────────────────────────────────────────────────────────────────
 
 /**
- * 把一次 send / respondApproval 的事件流跑完，遇到 tool_approval_required
- * 自动通过 ACP 协议跟客户端交互拿决策，再 respondApproval 注入。
- *
- * 这是协议适配层的最小骨架——你可以原样套到自家 ACP server 实现。
+ * 把一次 send / respondApproval 的 ACP 更新流跑完。
  */
 async function pumpThroughAcp(
-  events: AsyncIterable<SessionEvent>,
-  session: { respondApproval: (opts: any) => AsyncIterable<SessionEvent> },
+  events: AsyncIterable<AcpSessionUpdate>,
+  session: { respondApproval: (opts: any) => AsyncIterable<AcpSessionUpdate> },
 ): Promise<void> {
   for await (const e of events) {
-    if (e.type === 'message_delta') {
-      process.stdout.write(e.text)
-    } else if (e.type === 'tool_call') {
-      console.log(`\n[kernel → ACP] session_update.tool_call: ${e.toolName}`)
-    } else if (e.type === 'tool_result') {
-      const out = JSON.stringify(e.output).slice(0, 100)
-      console.log(`\n[kernel → ACP] session_update.tool_call_update: result=${out}`)
-    } else if (e.type === 'tool_approval_required') {
-      // ── kernel → ACP 映射 ──
+    if (e.sessionUpdate === 'agent_message_chunk') {
+      process.stdout.write(e.content.type === 'text' ? e.content.text : '')
+    } else if (e.sessionUpdate === 'tool_call') {
+      process.stdout.write(`\n[kernel ACP] tool_call: ${e.title} (kind=${e.kind})\n`)
+    } else if (e.sessionUpdate === 'tool_call_update') {
+      const out = JSON.stringify(e.rawOutput ?? e.content ?? null).slice(0, 100)
+      process.stdout.write(`\n[kernel ACP] tool_call_update: status=${e.status} out=${out}\n`)
+    } else if (e.sessionUpdate === 'request_permission') {
       const acpReq: AcpPermissionRequest = {
         toolCall: {
-          toolCallId: e.toolUseId,
-          toolName: e.toolName,
-          args: e.input,
+          toolCallId: e.toolCall.toolCallId,
+          title: e.toolCall.title,
+          kind: e.toolCall.kind ?? 'other',
+          rawInput: e.toolCall.rawInput,
         },
-        options: (e.hints?.suggestedScopes ?? ['once', 'session']).flatMap((scope) => {
-          if (scope === 'once') {
-            return [
-              { optionId: 'allow_once', label: '本次允许', kind: 'allow_once' as const },
-              { optionId: 'reject_once', label: '本次拒绝', kind: 'reject_once' as const },
-            ]
-          }
-          if (scope === 'session') {
-            return [
-              {
-                optionId: 'allow_always',
-                label: '本会话内总是允许',
-                kind: 'allow_always' as const,
-              },
-            ]
-          }
-          return []
-        }),
+        options: e.options,
       }
       const acpResp = await fakeAcpRequestPermission(acpReq)
 
       // ── ACP 响应 → kernel 决策 ──
-      if (acpResp.outcome.kind === 'cancelled') {
+      if (acpResp.outcome.outcome === 'cancelled') {
         // 客户端取消 → kernel 视为 deny+interrupt
         await pumpThroughAcp(
           session.respondApproval({
-            toolUseId: e.toolUseId,
+            toolUseId: e.toolCall.toolCallId,
             decision: { kind: 'deny', reason: 'ACP client cancelled', interrupt: true },
           }),
           session,
@@ -127,11 +107,11 @@ async function pumpThroughAcp(
       }
       const optionId = acpResp.outcome.optionId
       const decision =
-        optionId === 'allow_once'
+        optionId === 'allow'
           ? ({ kind: 'allow', scope: 'once' } as const)
           : optionId === 'allow_always'
             ? ({ kind: 'allow', scope: 'session' } as const)
-            : optionId === 'reject_once'
+            : optionId === 'reject'
               ? ({ kind: 'deny', scope: 'once', reason: 'User rejected' } as const)
               : ({
                   kind: 'deny',
@@ -140,12 +120,12 @@ async function pumpThroughAcp(
                 } as const)
 
       // ── 注入决策并继续消费事件流（递归式抽干）──
-      await pumpThroughAcp(session.respondApproval({ toolUseId: e.toolUseId, decision }), session)
+      await pumpThroughAcp(session.respondApproval({ toolUseId: e.toolCall.toolCallId, decision }), session)
       return
-    } else if (e.type === 'session_idle') {
-      console.log(`\n[kernel → ACP] session_update.idle: ${e.reason}`)
-    } else if (e.type === 'error') {
-      console.error(`\n[kernel → ACP] error: ${e.error.message}`)
+    } else if (e.sessionUpdate === 'agent_phase' && e.phase === 'idle') {
+      process.stdout.write('\n[kernel ACP] idle\n')
+    } else if (e.sessionUpdate === 'log') {
+      process.stdout.write(`\n[kernel ACP] log: ${e.message}\n`)
     }
   }
 }

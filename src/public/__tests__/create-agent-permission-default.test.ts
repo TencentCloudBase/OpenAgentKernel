@@ -1,8 +1,7 @@
-import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { PendingApproval, PermissionStore } from '../types.js'
 
 const mocks = vi.hoisted(() => ({
-  cloudBaseDbDriver: vi.fn(),
   cloudBaseDbPermissionDriver: vi.fn(),
   cloudBasePermissionStore: vi.fn(),
 }))
@@ -37,40 +36,15 @@ vi.mock('../../permissions/index.js', async (importOriginal) => {
   }
 })
 
-vi.mock('../../session-store/index.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../session-store/index.js')>()
-
-  class MockCloudBaseDbDriver {
-    constructor(opts?: unknown) {
-      mocks.cloudBaseDbDriver(opts)
-    }
-  }
-
-  return {
-    ...actual,
-    CloudBaseDbDriver: MockCloudBaseDbDriver,
-  }
-})
-
 const { createAgent } = await import('../create-agent.js')
-const originalTcbApiKey = process.env.TCB_API_KEY
 
 describe('createAgent — default permission store', () => {
   beforeEach(() => {
-    delete process.env.TCB_API_KEY
-    mocks.cloudBaseDbDriver.mockClear()
     mocks.cloudBaseDbPermissionDriver.mockClear()
     mocks.cloudBasePermissionStore.mockClear()
   })
 
-  afterAll(() => {
-    if (originalTcbApiKey === undefined) delete process.env.TCB_API_KEY
-    else process.env.TCB_API_KEY = originalTcbApiKey
-  })
-
-  it('prefers credentials for the default permission store when TCB_API_KEY is also present', () => {
-    process.env.TCB_API_KEY = 'ignored-access-key'
-
+  it('enables CloudBase FlexDB permission store by default when credentials and requireApproval are provided', () => {
     createAgent({
       envId: 'env-test',
       model: 'glm-5.1',
@@ -97,62 +71,6 @@ describe('createAgent — default permission store', () => {
         projectKey: 'env-test',
       }),
     )
-  })
-
-  it('uses TCB_API_KEY accessKey for default session and HITL persistence without credentials', async () => {
-    process.env.TCB_API_KEY = 'test-access-key'
-
-    const agent = createAgent({
-      envId: 'env-test',
-      model: 'glm-5.1',
-      session: { tablePrefix: 'session_' },
-      permissions: {
-        requireApproval: '*',
-        tablePrefix: 'perm_',
-      },
-    })
-
-    expect(mocks.cloudBaseDbDriver).toHaveBeenCalledWith({
-      accessKey: { envId: 'env-test', accessKey: 'test-access-key' },
-      collectionPrefix: 'session_',
-    })
-    expect(mocks.cloudBaseDbPermissionDriver).toHaveBeenCalledWith({
-      accessKey: { envId: 'env-test', accessKey: 'test-access-key' },
-      collectionPrefix: 'perm_',
-    })
-    expect(mocks.cloudBasePermissionStore).toHaveBeenCalledWith(
-      expect.objectContaining({
-        projectKey: 'env-test',
-      }),
-    )
-    await expect(agent.resumeSession('conversation-id')).resolves.toMatchObject({
-      id: 'conversation-id',
-    })
-  })
-
-  it('accepts userMemory in TCB_API_KEY-only mode', () => {
-    process.env.TCB_API_KEY = 'test-access-key'
-
-    expect(() =>
-      createAgent({
-        envId: 'env-test',
-        model: 'glm-5.1',
-        userMemory: true,
-      }),
-    ).not.toThrow()
-  })
-
-  it('still rejects userMemory when neither CAM credentials nor TCB_API_KEY is available', () => {
-    expect(() =>
-      createAgent({
-        envId: 'env-test',
-        model: {
-          id: 'glm-5.1',
-          apiKey: 'model-key-is-not-a-cloudbase-access-key',
-        },
-        userMemory: true,
-      }),
-    ).toThrow(/userMemory requires AgentConfig\.credentials.*TCB_API_KEY/)
   })
 
   it('keeps custom permission store untouched', () => {
@@ -192,5 +110,25 @@ describe('createAgent — default permission store', () => {
 
     expect(mocks.cloudBaseDbPermissionDriver).not.toHaveBeenCalled()
     expect(mocks.cloudBasePermissionStore).not.toHaveBeenCalled()
+  })
+
+  it('enables CloudBase FlexDB permission store with accessKey-only credentials', () => {
+    createAgent({
+      envId: 'env-test',
+      model: 'glm-5.1',
+      credentials: { accessKey: 'ak-test' },
+      permissions: {
+        requireApproval: '*',
+        tablePrefix: 'perm_',
+      },
+    })
+
+    expect(mocks.cloudBaseDbPermissionDriver).toHaveBeenCalledWith({
+      credentials: {
+        envId: 'env-test',
+        accessKey: 'ak-test',
+      },
+      collectionPrefix: 'perm_',
+    })
   })
 })

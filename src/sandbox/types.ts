@@ -3,6 +3,7 @@
  *
  * SandboxRuntime 抽象不同后端：
  * - PR #6A：`AgsStatefulSandbox`（腾讯云 Agent Sandbox 产品）
+ * - `LocalRuntimeSandbox`（provider='local'，宿主进程本地 FS + SDK 内置工具）
  * - 未来：`LocalDockerSandbox` / `E2bSandbox` 等
  *
  * 协议设计参考 OpenVibeCoding `feature/stateful-infra` 分支
@@ -18,12 +19,17 @@ import type { PlatformCredentials } from '../public/types.js'
  * 实例在 session 生命周期内 by 调用方持有，session 结束时调用 `release()`。
  */
 export interface SandboxInstance {
-  /** 实例唯一 ID（例：AGS InstanceId） */
+  /** 实例唯一 ID（例：AGS InstanceId，或 `local:<conversationId>`） */
   readonly id: string
+  /** 实例后端类型（'local' / 'ags-stateful' 等）。未提供时由 runtime.backend 判定。 */
+  readonly backend?: string
+  /** local provider 的实际工作目录。AGS 等远程 runtime 不需要提供。 */
+  readonly workspaceRoot?: string
 
   /**
    * 在沙箱内调用一次 HTTP 接口（数据面）。
    * AGS 模式下：`POST /api/tools/{name}` / `PUT /api/workspace/env` 等。
+   * local 模式下调用会抛 SandboxError（无 HTTP 数据面，改用 SDK 内置工具）。
    *
    * runtime 内部负责拼接 baseUrl + headers，调用方只传相对 path 和 body。
    */

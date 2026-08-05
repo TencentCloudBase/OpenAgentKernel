@@ -14,6 +14,11 @@
 export interface ClaudeHomeContext {
   envId: string
   userId: string
+  /**
+   * 可选 session 标识。userMemory 不用(per-user);cwd 持久化用它做 per-session
+   * COS key 命名空间(oak/workspaces/sessions/<sessionId>/cwd/)。
+   */
+  sessionId?: string
 }
 
 /**
@@ -55,4 +60,10 @@ export interface ClaudeHomeSyncStore {
    * 删除一个对象。不存在时静默(返回 ok,不抛错)。
    */
   delete(ctx: ClaudeHomeContext, relPath: RelativePath): Promise<void>
+
+  /**
+   * 下载单个对象为 Buffer。不存在返回 null(不抛错)。
+   * 用于 tar.gz 单包持久化:archive engine 只需取/存一个对象,不走 pull 的全量列举。
+   */
+  getObject?(ctx: ClaudeHomeContext, relPath: RelativePath): Promise<Buffer | null>
 }
