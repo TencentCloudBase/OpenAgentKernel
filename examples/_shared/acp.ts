@@ -1,9 +1,52 @@
-import type { AcpSessionUpdate, ContentBlock, ToolCallContent } from '@cloudbase/open-agent-kernel'
+import type { AcpSessionUpdate, AcpStreamMessage, ContentBlock, ToolCallContent } from '@cloudbase/open-agent-kernel'
 
 export interface PendingRequestPermission {
   toolUseId: string
   toolName: string
   input: unknown
+}
+
+/**
+ * 把 send()/respondApproval() 事件流中的消息统一解包为扁平 AcpSessionUpdate。
+ *
+ * OAK 默认 adapter（AcpStreamAdapter）会在边界把扁平 update 包装成 JSON-RPC 信封：
+ *   - `session/update` NOTIFICATION  → 取 params.update
+ *   - `session/request_permission` REQUEST → 转回扁平 RequestPermissionUpdate（legacy 形状）
+ *   - 其他 REQUEST（client/xxx 客户端工具）→ 降级为 info log
+ * 扁平 AcpSessionUpdate（旧行为 / createErrorUpdates 直产）原样返回。
+ */
+function unwrapStreamMessage(msg: AcpStreamMessage): AcpSessionUpdate {
+  if (!('jsonrpc' in msg)) return msg
+
+  if (msg.method === 'session/update') {
+    const params = msg.params as { sessionId: string; update: AcpSessionUpdate }
+    return params.update
+  }
+
+  if (msg.method === 'session/request_permission') {
+    const params = msg.params as {
+      sessionId: string
+      toolCall: { toolCallId?: string; title?: string; rawInput?: unknown }
+      options: unknown[]
+    }
+    return {
+      sessionUpdate: 'request_permission',
+      sessionId: params.sessionId,
+      toolCall: {
+        toolCallId: params.toolCall?.toolCallId ?? '',
+        title: params.toolCall?.title ?? 'unknown',
+        rawInput: params.toolCall?.rawInput,
+      },
+      options: params.options ?? [],
+    } as unknown as AcpSessionUpdate
+  }
+
+  return {
+    sessionUpdate: 'log',
+    level: 'info',
+    message: `[jsonrpc request] ${msg.method}`,
+    timestamp: Date.now(),
+  } as unknown as AcpSessionUpdate
 }
 
 /**
@@ -26,13 +69,15 @@ function toolContentText(parts: ToolCallContent[]): string {
     .join('')
 }
 
-export function writeAcpText(update: AcpSessionUpdate): void {
+export function writeAcpText(message: AcpStreamMessage): void {
+  const update = unwrapStreamMessage(message)
   if (update.sessionUpdate === 'agent_message_chunk') {
     process.stdout.write(textOf(update.content))
   }
 }
 
-export function printAcpUpdate(update: AcpSessionUpdate): void {
+export function printAcpUpdate(message: AcpStreamMessage): void {
+  const update = unwrapStreamMessage(message)
   switch (update.sessionUpdate) {
     case 'agent_message_chunk':
       process.stdout.write(textOf(update.content))
@@ -75,7 +120,8 @@ export function printAcpUpdate(update: AcpSessionUpdate): void {
 }
 
 /** Console-oriented logging (example 14 style). */
-export function logAcpUpdate(update: AcpSessionUpdate): void {
+export function logAcpUpdate(message: AcpStreamMessage): void {
+  const update = unwrapStreamMessage(message)
   switch (update.sessionUpdate) {
     case 'agent_message_chunk':
       process.stdout.write(textOf(update.content))
@@ -115,20 +161,23 @@ export function logAcpUpdate(update: AcpSessionUpdate): void {
   }
 }
 
-export function captureRequestPermission(update: AcpSessionUpdate): PendingRequestPermission | undefined {
+export function captureRequestPermission(message: AcpStreamMessage): PendingRequestPermission | undefined {
+  const update = unwrapStreamMessage(message)
   if (update.sessionUpdate !== 'request_permission') return undefined
   return {
     toolUseId: update.toolCall.toolCallId,
-    toolName: update.toolCall.title,
+    toolName: update.toolCall.title ?? '',
     input: update.toolCall.rawInput,
   }
 }
 
-export function isSkillToolCall(update: AcpSessionUpdate): update is AcpSessionUpdate & { sessionUpdate: 'tool_call' } {
+export function isSkillToolCall(message: AcpStreamMessage): message is AcpStreamMessage {
+  const update = unwrapStreamMessage(message)
   return update.sessionUpdate === 'tool_call' && update.title === 'Skill'
 }
 
-export function fmtAcpUpdate(update: AcpSessionUpdate): string {
+export function fmtAcpUpdate(message: AcpStreamMessage): string {
+  const update = unwrapStreamMessage(message)
   switch (update.sessionUpdate) {
     case 'agent_message_chunk':
       return `Δ ${JSON.stringify(textOf(update.content))}`
@@ -157,7 +206,8 @@ export function fmtAcpUpdate(update: AcpSessionUpdate): string {
   }
 }
 
-export function appendAcpAssistantText(update: AcpSessionUpdate, buffer: { text: string }): void {
+export function appendAcpAssistantText(message: AcpStreamMessage, buffer: { text: string }): void {
+  const update = unwrapStreamMessage(message)
   if (update.sessionUpdate === 'agent_message_chunk') {
     buffer.text += textOf(update.content)
   }
