@@ -63,6 +63,9 @@ describe('createCloudBaseMcpServerInProcess', () => {
         },
       ],
     })
+
+    delete process.env.CLOUDBASE_APIKEY
+    delete process.env.CLOUDBASE_ENV_ID
   })
 
   it('creates cloudbase-mcp in process and registers all listed tools', async () => {
@@ -96,6 +99,49 @@ describe('createCloudBaseMcpServerInProcess', () => {
     expect(mocks.listTools).toHaveBeenCalled()
     expect(bundle.toolCount).toBe(2)
     expect(bundle.degradedReason).toBeUndefined()
+  })
+
+  it('passes accessKey via cloudBaseOptions and sets env when unset', async () => {
+    delete process.env.CLOUDBASE_APIKEY
+    delete process.env.CLOUDBASE_ENV_ID
+
+    const bundle = await createCloudBaseMcpServerInProcess({
+      createServer: mocks.createCloudBaseMcpServer,
+      workspaceFolderPaths: '/tmp/oak-local',
+      getCredentials: async () => ({
+        envId: 'env-ak',
+        accessKey: 'ak-test',
+      }),
+    })
+
+    expect(mocks.createCloudBaseMcpServer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cloudBaseOptions: {
+          envId: 'env-ak',
+          accessKey: 'ak-test',
+        },
+      }),
+    )
+    expect(process.env.CLOUDBASE_APIKEY).toBe('ak-test')
+    expect(process.env.CLOUDBASE_ENV_ID).toBe('env-ak')
+    expect(bundle.toolCount).toBe(2)
+    expect(bundle.degradedReason).toBeUndefined()
+  })
+
+  it('does not overwrite existing CLOUDBASE_APIKEY / CLOUDBASE_ENV_ID', async () => {
+    process.env.CLOUDBASE_APIKEY = 'existing-key'
+    process.env.CLOUDBASE_ENV_ID = 'existing-env'
+
+    await createCloudBaseMcpServerInProcess({
+      createServer: mocks.createCloudBaseMcpServer,
+      getCredentials: async () => ({
+        envId: 'env-ak',
+        accessKey: 'ak-test',
+      }),
+    })
+
+    expect(process.env.CLOUDBASE_APIKEY).toBe('existing-key')
+    expect(process.env.CLOUDBASE_ENV_ID).toBe('existing-env')
   })
 
   it('degrades when credentials are unavailable', async () => {

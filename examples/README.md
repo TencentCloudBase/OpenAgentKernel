@@ -5,7 +5,7 @@
 ## 准备
 
 ```bash
-cd packages/open-agent-kernel/examples
+cd examples
 cp config.example.json config.local.json
 # 编辑 config.local.json，填入 envId / model / tcbApiKey / credentials
 ```
@@ -13,8 +13,8 @@ cp config.example.json config.local.json
 在仓库根目录先构建 SDK，再运行示例：
 
 ```bash
-pnpm -F @cloudbase/open-agent-kernel build
-pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
+pnpm build
+pnpm dlx tsx examples/01-quickstart.ts
 ```
 
 `config.local.json` 已被 gitignore，不会被提交。
@@ -25,7 +25,7 @@ pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
 |------|------|
 | `envId` | CloudBase 环境 ID，示例会显式传给 `createAgent({ envId })`。 |
 | `model` | 默认模型 ID，示例会显式传给 `createAgent({ model })`。 |
-| `tcbApiKey` | CloudBase 服务端 APIKey；helper 会写入 `process.env.TCB_API_KEY` 供 SDK 默认模型网关和 sandbox 使用。 |
+| `tcbApiKey` | CloudBase 服务端 APIKey；helper 会写入 `process.env.CLOUDBASE_APIKEY` 供 SDK 默认模型网关和 sandbox 使用。 |
 | `credentials.secretId` / `credentials.secretKey` | CloudBase 平台凭证，示例会显式传给 `createAgent({ credentials })`。 |
 | `credentials.sessionToken` | STS 临时凭证，可选。 |
 | `examples.resumeConversationId` | example 04 使用；指定上一次输出的 conversationId 做跨进程 resume。 |
@@ -39,33 +39,39 @@ pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
 在仓库根目录运行：
 
 ```bash
-pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
+pnpm dlx tsx examples/01-quickstart.ts
 ```
 
 | Example | 功能 | 运行命令 |
 |---------|------|----------|
-| `01-quickstart.ts` | 快速开始 | `pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts` |
-| `02-debug.ts` | 打印调试事件 | `pnpm dlx tsx packages/open-agent-kernel/examples/02-debug.ts` |
-| `03-multi-turn.ts` | 进程内多轮对话 | `pnpm dlx tsx packages/open-agent-kernel/examples/03-multi-turn.ts` |
+| `01-quickstart.ts` | 快速开始 | `pnpm dlx tsx examples/01-quickstart.ts` |
+| `02-debug.ts` | 打印调试事件 | `pnpm dlx tsx examples/02-debug.ts` |
+| `03-multi-turn.ts` | 进程内多轮对话 | `pnpm dlx tsx examples/03-multi-turn.ts` |
 | `04-multi-turn-db.ts` | CloudBase session 持久化 / resume | 第一次跑写入个人信息；把输出的 `conversationId` 填入 `examples.resumeConversationId` 后再跑，验证跨进程回忆 |
-| `05-multimodal.ts` | 图片附件 / Storage | `pnpm dlx tsx packages/open-agent-kernel/examples/05-multimodal.ts` |
-| `06-mcp-sdk-server.ts` | 进程内 MCP | `pnpm dlx tsx packages/open-agent-kernel/examples/06-mcp-sdk-server.ts` |
-| `07-mcp-stdio.ts` | stdio MCP | `pnpm dlx tsx packages/open-agent-kernel/examples/07-mcp-stdio.ts` |
-| `08-sandbox.ts` | sandbox 文件系统 / Shell | `pnpm dlx tsx packages/open-agent-kernel/examples/08-sandbox.ts` |
-| `09-sandbox-shared.ts` | shared sandbox | `pnpm dlx tsx packages/open-agent-kernel/examples/09-sandbox-shared.ts` |
-| `10-sandbox-cloudbase-tools.ts` | sandbox 内 CloudBase MCP 工具 | `pnpm dlx tsx packages/open-agent-kernel/examples/10-sandbox-cloudbase-tools.ts` |
-| `11-hitl-approval.ts` | 单进程 HITL 审批 | `pnpm dlx tsx packages/open-agent-kernel/examples/11-hitl-approval.ts` |
-| `12-hitl-acp-adapter.ts` | 内置 ACP 审批流 | `pnpm dlx tsx packages/open-agent-kernel/examples/12-hitl-acp-adapter.ts` |
-| `13-hitl-distributed-cloudbase.ts` | 分布式 HITL 审批 | `pnpm dlx tsx packages/open-agent-kernel/examples/13-hitl-distributed-cloudbase.ts` |
-| `14-session-history.ts` | 历史查询 / 聚合验证 | `pnpm dlx tsx packages/open-agent-kernel/examples/14-session-history.ts` |
-| `15-skills.ts` | Skills | `pnpm dlx tsx packages/open-agent-kernel/examples/15-skills.ts` |
-| `16-user-memory.ts` | userMemory 单进程 | `pnpm dlx tsx packages/open-agent-kernel/examples/16-user-memory.ts` |
-| `17-user-memory-distributed.ts` | userMemory 跨节点 | `pnpm dlx tsx packages/open-agent-kernel/examples/17-user-memory-distributed.ts` |
-| `18-workspace-snapshot.ts` | workspace snapshot 单进程 | `pnpm dlx tsx packages/open-agent-kernel/examples/18-workspace-snapshot.ts` |
-| `19a-snapshot-write.ts` | workspace snapshot 写入阶段 | `pnpm dlx tsx packages/open-agent-kernel/examples/19a-snapshot-write.ts` |
-| `19b-snapshot-read.ts` | workspace snapshot 读取阶段 | `pnpm dlx tsx packages/open-agent-kernel/examples/19b-snapshot-read.ts` |
-| `20-acp-stream-adapter-fixture.ts` | ACP adapter fixture（不调用真实模型） | `pnpm dlx tsx packages/open-agent-kernel/examples/20-acp-stream-adapter-fixture.ts` |
-| `21-default-acp-session-contract.ts` | 默认 session ACP 类型契约 | `pnpm exec tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck packages/open-agent-kernel/examples/21-default-acp-session-contract.ts` |
+| `05-multimodal.ts` | 图片附件 / Storage | `pnpm dlx tsx examples/05-multimodal.ts` |
+| `06-mcp-sdk-server.ts` | 进程内 MCP | `pnpm dlx tsx examples/06-mcp-sdk-server.ts` |
+| `07-mcp-stdio.ts` | stdio MCP | `pnpm dlx tsx examples/07-mcp-stdio.ts` |
+| `08-local-sandbox.ts` | local sandbox 文件系统 / Shell | `pnpm dlx tsx examples/08-local-sandbox.ts` |
+| `09-local-sandbox-cloudbase-tools.ts` | local sandbox + 进程内 CloudBase MCP | `pnpm dlx tsx examples/09-local-sandbox-cloudbase-tools.ts` |
+| `11-hitl-approval.ts` | 单进程 HITL 审批 | `pnpm dlx tsx examples/11-hitl-approval.ts` |
+| `12-hitl-acp-adapter.ts` | 内置 ACP 审批流 | `pnpm dlx tsx examples/12-hitl-acp-adapter.ts` |
+| `13-hitl-distributed-cloudbase.ts` | 分布式 HITL 审批 | `pnpm dlx tsx examples/13-hitl-distributed-cloudbase.ts` |
+| `14-session-history.ts` | 历史查询 / 聚合验证 | `pnpm dlx tsx examples/14-session-history.ts` |
+| `15-skills.ts` | Skills | `pnpm dlx tsx examples/15-skills.ts` |
+| `16-user-memory.ts` | userMemory 单进程 | `pnpm dlx tsx examples/16-user-memory.ts` |
+| `17-user-memory-distributed.ts` | userMemory 跨节点 | `pnpm dlx tsx examples/17-user-memory-distributed.ts` |
+| `20-acp-stream-adapter-fixture.ts` | ACP adapter fixture（不调用真实模型） | `pnpm dlx tsx examples/20-acp-stream-adapter-fixture.ts` |
+| `21-default-acp-session-contract.ts` | 默认 session ACP 类型契约 | `pnpm exec tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --skipLibCheck examples/21-default-acp-session-contract.ts` |
+
+### Experimental 示例（远程沙箱 / snapshot）
+
+| Example | 功能 |
+|---------|------|
+| `_08-sandbox.ts` | 远程 AGS sandbox 文件系统 / Shell |
+| `_09-sandbox-shared.ts` | shared 远程 sandbox |
+| `_10-sandbox-cloudbase-tools.ts` | 远程 sandbox 内 CloudBase MCP |
+| `_18-workspace-snapshot.ts` | workspace snapshot 单进程 |
+| `_19a-snapshot-write.ts` / `_19b-snapshot-read.ts` | workspace snapshot 跨进程 restore |
 
 ## 凭证依赖矩阵
 
@@ -75,29 +81,30 @@ pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
 | 04 | ✅ | ✅ | ✅ | 默认 CloudBase FlexDB session store。 |
 | 05 | ✅ | ✅ | CloudBase Storage 模式需要 | `examples.storage=memory` 时不需要平台凭证。 |
 | 06 / 07 | ✅ | ✅ | | MCP 工具示例。 |
-| 08 / 09 / 10 | ✅ | ✅ | ✅ | sandbox / CloudBase MCP 工具。 |
+| 08-local-sandbox | ✅ | ✅ | 可选 | local sandbox；CAM 缺省/占位符时回退 `tcbApiKey`（accessKey）做 workspacePersist。 |
+| 09-local-sandbox-cloudbase-tools | ✅ | ✅ | 可选 | local sandbox + 进程内 `mcp__cloudbase__*`；凭证回退同 08。 |
 | 11 / 12 | ✅ | ✅ | | 单进程审批。 |
 | 13 | ✅ | ✅ | ✅ | 分布式审批状态写入 CloudBase DB。 |
 | 14 | ✅ | ✅ | | 历史查询聚合示例。 |
 | 15 | ✅ | ✅ | | Skills 示例。 |
 | 16 / 17 | ✅ | ✅ | ✅ | userMemory 需要 CloudBase Storage。 |
-| 18 / 19a / 19b | ✅ | ✅ | ✅ | workspace snapshot 需要 sandbox 和 Storage。 |
+| `_08` / `_09` / `_10` / `_18` / `_19*` | ✅ | ✅ | ✅ | 内部远程沙箱 / snapshot。 |
 
 ## 共享工具
 
 `_shared/env.ts` 读取 `config.local.json`，并提供：
 
 - `loadEnv()` / `getEnvId()` / `getModel()`
-- `getPlatformCredentials()`
+- `getPlatformCredentials()` / `tryGetPlatformCredentials()` / `getPlatformCredentialsOrApiKey()`
 - `getSandboxApiKey()`
 - `getResumeConversationId()` / `getExampleStorage()` / `getExampleImagePath()`
 
-示例层从 `config.local.json` 读取配置，再通过 `createAgent({ envId, model, credentials })` 显式传给 SDK。常规 sandbox 示例只写 `sandbox: { enabled: true }`，SDK 会复用 `TCB_API_KEY` 作为默认 AGS 数据面凭证。
+示例层从 `config.local.json` 读取配置，再通过 `createAgent({ envId, model, credentials })` 显式传给 SDK。公开 local sandbox 示例写 `sandbox: { enabled: true }`（默认 `LocalRuntimeSandbox`）。内部远程沙箱示例通过 `runtime: new AgsStatefulSandbox({ apiKey })` 注入。
 
-## workspace snapshot 验证顺序
+## workspace snapshot 验证顺序（内部）
 
-`19-workspace-snapshot-distributed.ts` 已废弃，因为同一进程无法真实验证跨节点 restore。正确流程是：
+`_19-workspace-snapshot-distributed.ts` 已废弃。正确流程是：
 
-1. 运行 `19a-snapshot-write.ts`，让 Agent 在 sandbox 中写文件并触发 snapshot。
+1. 运行 `_19a-snapshot-write.ts`，让 Agent 在远程 sandbox 中写文件并触发 snapshot。
 2. 手动停止对应 AGS sandbox instance，确保下次启动会走 COS restore。
-3. 运行 `19b-snapshot-read.ts`，观察 `restoreStatus=full` 并验证文件内容。
+3. 运行 `_19b-snapshot-read.ts`，观察 `restoreStatus=full` 并验证文件内容。

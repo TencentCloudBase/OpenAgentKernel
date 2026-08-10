@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import * as os from 'node:os'
+import * as path from 'node:path'
 import { query as claudeQuery } from '@anthropic-ai/claude-agent-sdk'
 import type { McpServerConfig as SdkMcpServerConfig } from '@anthropic-ai/claude-agent-sdk'
 import { AcpStreamAdapter } from '../adapters/index.js'
@@ -18,7 +20,9 @@ import {
 import { buildClaudeQueryOptions } from '../runtime/agent-builder.js'
 import { buildPromptAsync } from '../runtime/prompt-builder.js'
 import { createCloudBaseMcpServer, type CloudBaseUserCredentials } from '../sandbox/cloudbase-mcp.js'
-import { AgsStatefulSandbox, LocalRuntimeSandbox } from '../sandbox/index.js'
+import { createCloudBaseMcpServerInProcess } from '../sandbox/cloudbase-mcp-inprocess.js'
+import { AgsStatefulSandbox } from '../sandbox/ags-stateful-sandbox.js'
+import { LocalRuntimeSandbox } from '../sandbox/local-runtime-sandbox.js'
 import type { SandboxInstance, SandboxRuntime } from '../sandbox/types.js'
 import type { WorkspaceSnapshotEngine } from '../sandbox/workspace-snapshot/index.js'
 import { CloudBaseDbDriver, CloudBaseSessionStore } from '../session-store/index.js'
@@ -33,6 +37,7 @@ import type {
   MessageRecord,
   PendingApproval,
   PermissionStore,
+  _SandboxConfig,
   SandboxUserCredentials,
   Session,
   SessionInput,
@@ -121,11 +126,16 @@ export function createAgent(config: AgentConfig): Agent {
 
 function normalizeAgentConfig(config: AgentConfig): AgentConfig {
   const credentials = resolvePlatformCredentials(config)
-  const normalizedConfig: AgentConfig = {
+  const cwd = resolveDefaultCwd(config)
+  const configWithCwd: AgentConfig = {
     ...config,
     ...(credentials ? { credentials } : {}),
-    sandbox: resolveSandboxConfig(config),
-    storage: resolveStorageConfig(config),
+    ...(cwd !== undefined ? { cwd } : {}),
+  }
+  const normalizedConfig: AgentConfig = {
+    ...configWithCwd,
+    sandbox: resolveSandboxConfig(configWithCwd) as AgentConfig['sandbox'],
+    storage: resolveStorageConfig(configWithCwd),
   }
 
   return {
@@ -133,6 +143,27 @@ function normalizeAgentConfig(config: AgentConfig): AgentConfig {
     permissions: resolvePermissionConfig(normalizedConfig),
     session: resolveSessionConfig(normalizedConfig),
   }
+}
+
+/** local sandbox 未显式传 cwd / workspaceRoot 时的默认工作区。 */
+const DEFAULT_LOCAL_SANDBOX_CWD = path.join(os.tmpdir(), 'oak-local-sandbox')
+
+/**
+ * 解析默认 cwd：
+ * - 显式 `cwd` 优先
+ * - 仅有 `sandbox.workspaceRoot` 时与之对齐（local 要求二者一致）
+ * - 默认启用的 local sandbox：落到 `os.tmpdir()/oak-local-sandbox`
+ * - 关闭 sandbox / 自定义 runtime / 非 local provider：不注入默认 cwd
+ */
+function resolveDefaultCwd(config: AgentConfig): string | undefined {
+  if (config.cwd) return config.cwd
+  if (config.sandbox?.enabled === false) return undefined
+  if (config.sandbox?.runtime) return undefined
+  if (config.sandbox?.workspaceRoot) return config.sandbox.workspaceRoot
+
+  const provider = (config.sandbox?.provider as string | undefined) ?? 'local'
+  if (provider !== 'local') return undefined
+  return DEFAULT_LOCAL_SANDBOX_CWD
 }
 
 function resolvePlatformCredentials(config: AgentConfig): ResolvedPlatformCredentials | undefined {
@@ -145,23 +176,32 @@ function resolvePlatformCredentials(config: AgentConfig): ResolvedPlatformCreden
   }
 }
 
-function resolveSandboxConfig(config: AgentConfig): AgentConfig['sandbox'] {
-  const sandbox = config.sandbox
-  if (!sandbox || sandbox.enabled === false) return undefined
+function resolveSandboxConfig(config: AgentConfig): _SandboxConfig | undefined {
+  // 未传 sandbox / 传空对象：默认启用 local。仅显式 enabled: false 关闭。
+  if (config.sandbox?.enabled === false) return undefined
+  // 公开 SandboxConfig 是 _SandboxConfig 子集；内部按完整 _SandboxConfig 解析。
+  const sandbox = (config.sandbox ?? { enabled: true }) as _SandboxConfig
 
-  if (sandbox.runtime) return sandbox
+  if (sandbox.runtime) {
+    // 推荐注入路径 runtime: new AgsStatefulSandbox(...) 时，补齐与旧
+    // provider='ags-stateful' 路径一致的默认 scope='shared'，避免
+    // workspaceSnapshot='auto' 因 scope 默认 session 直接抛 ConfigError。
+    const backend = (sandbox.runtime as { backend?: string }).backend
+    if (backend === 'ags-stateful' && sandbox.scope === undefined) {
+      return { ...sandbox, scope: 'shared' }
+    }
+    return sandbox
+  }
 
-  // 默认 'local':AGS 产品化未就绪前的过渡默认,serverless runtime(SCF/CloudRun)
-  // 开箱即有本地 FS + SDK 内置工具 + workspacePersist 自动持久化 cwd。
-  // 需要使用 AGS 远程沙箱的用户显式配 provider: 'ags-stateful'。
-  const provider = sandbox.provider ?? 'local'
+  // 默认 'local':serverless runtime(SCF/CloudRun) 开箱即有本地 FS + SDK 内置工具。
+  const provider = (sandbox.provider as string | undefined) ?? 'local'
   if (provider === 'local') {
-    // local provider:无 AGS 控制面,宿主进程本地 FS + SDK 内置工具。
+    // local provider:无远程控制面,宿主进程本地 FS + SDK 内置工具。
     // cwd 跨请求持久化由 kernel 自动驱动(see agent-builder.ts cwdPersistEngine)。
     return {
       ...sandbox,
       enabled: true,
-      provider,
+      provider: 'local',
       runtime: new LocalRuntimeSandbox({
         ...(sandbox.workspaceRoot ? { workspaceRoot: sandbox.workspaceRoot } : {}),
         ...(config.cwd ? { cwd: config.cwd } : {}),
@@ -172,24 +212,24 @@ function resolveSandboxConfig(config: AgentConfig): AgentConfig['sandbox'] {
   if (provider !== 'ags-stateful') {
     throw new InvalidConfigError(
       `AgentConfig.sandbox.provider="${provider}" is not supported yet. ` +
-        'The built-in sandbox currently supports provider="local" (default) | "ags-stateful". ' +
-        'Pass a custom SandboxRuntime via AgentConfig.sandbox.runtime for advanced scenarios.',
+        'The built-in sandbox currently supports provider="local" (default). ' +
+        'Pass a custom SandboxRuntime via AgentConfig.sandbox.runtime (e.g. AgsStatefulSandbox) for advanced scenarios.',
     )
   }
 
   const apiKey = sandbox.apiKey ?? process.env.CLOUDBASE_APIKEY ?? process.env.OAK_SANDBOX_API_KEY
   if (!apiKey) {
     throw new InvalidConfigError(
-      'AgentConfig.sandbox.provider="ags-stateful" requires sandbox.apiKey, CLOUDBASE_APIKEY, or OAK_SANDBOX_API_KEY ' +
+      'AgentConfig.sandbox with provider="ags-stateful" requires sandbox.apiKey, CLOUDBASE_APIKEY, or OAK_SANDBOX_API_KEY ' +
         'for the AgsStatefulSandbox runtime. ' +
-        'If you do not need AGS, drop provider (default is "local").',
+        'Prefer sandbox.runtime = new AgsStatefulSandbox({ apiKey }). ' +
+        'If you do not need remote sandbox, omit sandbox (default is "local") or set sandbox.enabled=false.',
     )
   }
 
   return {
     ...sandbox,
     enabled: true,
-    provider,
     runtime: new AgsStatefulSandbox({ apiKey }),
     scope: sandbox.scope ?? 'shared',
   }
@@ -407,7 +447,7 @@ function createSession(deps: SessionDeps): Session {
         credentials: config.credentials,
         conversationId,
         userId,
-        scope: config.sandbox?.scope ?? 'session',
+        scope: (config.sandbox as _SandboxConfig | undefined)?.scope ?? 'session',
         onProgress: (msg) => {
           if (process.env.OAK_DEBUG === '1') {
             // eslint-disable-next-line no-console
@@ -426,10 +466,17 @@ function createSession(deps: SessionDeps): Session {
     if (!cloudbaseMcpPromise) {
       cloudbaseMcpPromise = (async (): Promise<SdkMcpServerConfig | undefined> => {
         try {
-          const bundle = await createCloudBaseMcpServer({
-            sandbox,
-            getCredentials: () => resolveUserCredentials(config),
-          })
+          const isLocal = sandbox.backend === 'local'
+          const bundle = isLocal
+            ? await createCloudBaseMcpServerInProcess({
+                getCredentials: () => resolveUserCredentials(config),
+                workspaceFolderPaths:
+                  sandbox.workspaceRoot ?? config.cwd ?? process.cwd(),
+              })
+            : await createCloudBaseMcpServer({
+                sandbox,
+                getCredentials: () => resolveUserCredentials(config),
+              })
           if (process.env.OAK_DEBUG === '1') {
             // eslint-disable-next-line no-console
             console.error(

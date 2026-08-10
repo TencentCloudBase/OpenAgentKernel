@@ -12,7 +12,7 @@ Open Agent Kernel（OAK）适合在 Node.js 服务端中构建 CloudBase Agent�
 - 给 Web / 小程序 / 管理后台提供流式 AI 对话接口。
 - 让 Agent 使用 CloudBase 数据库、云存储、云函数、静态托管等资源。
 - 把会话、审批状态、附件、用户长期记忆持久化到 CloudBase。
-- 运行远程 sandbox，让 Agent 具备文件系统、Shell、代码执行和 CloudBase MCP 工具能力。
+- 运行本地 sandbox，让 Agent 具备文件系统、Shell、代码执行和 CloudBase MCP 工具能力。
 - OAK 默认输出 ACP `session/update` 语义（`AsyncIterable<AcpSessionUpdate>`），可直接接入 Web/SSE/JSON-RPC 消费方。
 
 ## 安装
@@ -32,13 +32,13 @@ pnpm add @cloudbase/open-agent-kernel@beta
 OAK 默认模型调用会读取一个运行时环境变量：
 
 ```bash
-TCB_API_KEY=your-cloudbase-server-api-key
+CLOUDBASE_APIKEY=your-cloudbase-server-api-key
 ```
 
-`TCB_API_KEY` 是 CloudBase 环境的服务端 APIKey，用于：
+`CLOUDBASE_APIKEY` 是 CloudBase 环境的服务端 API Key，用于：
 
 - 默认的 CloudBase AI 模型调用。
-- 默认的 AGS Sandbox 数据面鉴权。
+- CloudBase 资源（数据库 / 存储等）相关能力的鉴权兜底。
 
 ### 标准 `createAgent` 配置
 
@@ -47,8 +47,8 @@ TCB_API_KEY=your-cloudbase-server-api-key
 ```typescript
 import { createAgent } from '@cloudbase/open-agent-kernel'
 
-// 部署时在进程环境注入 TCB_API_KEY；本地跑 examples 时由 config.local.json 写入
-process.env.TCB_API_KEY = 'your-cloudbase-server-api-key'
+// 部署时在进程环境注入 CLOUDBASE_APIKEY；本地跑 examples 时由 config.local.json 写入
+process.env.CLOUDBASE_APIKEY = 'your-cloudbase-server-api-key'
 
 const agent = createAgent({
   // ── 资源锚点 ─────────────────────────────────────────────
@@ -64,7 +64,7 @@ const agent = createAgent({
   },
 
   // ── 模型（必填）──────────────────────────────────────────
-  model: 'glm-5.1', // 字符串写法：默认走 CloudBase AI gateway + TCB_API_KEY
+  model: 'glm-5.1', // 字符串写法：默认走 CloudBase AI gateway + CLOUDBASE_APIKEY
   // model: { id: 'custom-model', apiKey: '...', apiBaseUrl: 'https://...' }, // 自带 endpoint
   systemPrompt: 'You are a helpful CloudBase assistant. Reply concisely in Chinese.',
 
@@ -91,15 +91,13 @@ const agent = createAgent({
     // approvalTimeoutMs: 1_800_000, // 审批超时，默认 30 分钟
   },
 
-  // ── 远程 Sandbox ─────────────────────────────────────────
+  // ── Sandbox
+  // ─────────────────────────────────────────
   sandbox: {
-    // enabled: true, // 启用 AGS Stateful Sandbox
-    // provider: 'ags-stateful',
-    // apiKey: process.env.TCB_API_KEY, // AGS 数据面 JWT；默认读 TCB_API_KEY
-    // scope: 'shared', // shared（默认，多 session 共享实例）| session（每会话独立实例）
-    // ttl: 3600, // 沙箱生命周期（秒）
+    // enabled: true, // 默认启用 sandbox
+    // provider: 'local', // 可省略；默认 local
+    // workspaceRoot: '/tmp/oak-workspaces/demo', // 须与 cwd 一致（若两者都设）
     // cloudbaseTools: true, // 自动暴露 mcp__cloudbase__* 工具（DB / COS / 云函数等）
-    // workspaceSnapshot: 'auto', // cwd 自动快照到 COS；仅 ags-stateful + shared 生效
     // userCredentials: { secretId, secretKey }, // 沙箱内 cloudbase 工具的用户租户凭证
   },
 
@@ -123,10 +121,10 @@ const agent = createAgent({
 ### 跑仓库 examples
 
 ```bash
-cp packages/open-agent-kernel/examples/config.example.json packages/open-agent-kernel/examples/config.local.json
+cp examples/config.example.json examples/config.local.json
 # 编辑 config.local.json，填入 envId / model / tcbApiKey / credentials
-pnpm -F @cloudbase/open-agent-kernel build   # 本地跑 examples 前需先构建 dist
-pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
+pnpm build   # 本地跑 examples 前需先构建 dist
+pnpm dlx tsx examples/01-quickstart.ts
 ```
 
 `config.local.json` 仅供 examples 本地演示，不是 SDK 的强制约定。完整 examples 说明见 [`examples/README.md`](./examples/README.md)。
@@ -135,7 +133,7 @@ pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
 
 ### 模型配置
 
-最简单写法只传模型 ID。SDK 会自动使用 CloudBase AI gateway 和 `TCB_API_KEY`：
+最简单写法只传模型 ID。SDK 会自动使用 CloudBase AI gateway 和 `CLOUDBASE_APIKEY`：
 
 ```typescript
 createAgent({
@@ -333,53 +331,50 @@ createAgent({
 
 ### Sandbox 文件系统和 Shell
 
-开启默认 sandbox：
+默认开启 local sandbox：
 
 ```typescript
 const agent = createAgent({
   envId,
   credentials: { secretId, secretKey },
   model: 'glm-5.1',
+  cwd: '/tmp/oak-workspaces/demo',
   sandbox: { enabled: true },
 })
 ```
 
 默认行为：
 
-- provider 为 `ags-stateful`。
-- `scope` 默认为 `shared`。
-- `apiKey` 不传时读取 `TCB_API_KEY`，也可用 `OAK_SANDBOX_API_KEY` 单独覆盖。
-- `cloudbaseTools` 默认 `true`，镜像支持时自动暴露 `mcp__cloudbase__*`。
-- 默认 sandbox 镜像可通过环境变量 `OAK_SANDBOX_IMAGE` 覆盖；未设置时使用 SDK 内置 fallback（beta 阶段为开发镜像，生产环境请务必显式配置）。
+- provider 为 `local`（可省略），使用宿主进程本地 FS + Claude SDK 内置工具。
+- 建议显式设置 `cwd`（与 `sandbox.workspaceRoot` 一致，若两者都设）。
+- cwd 跨请求持久化由 kernel 在 send 边界自动做 tar.gz COS 同步（需 CloudBase 凭证或 `CLOUDBASE_APIKEY`）。
+- `cloudbaseTools` 默认 `true`；local 路径需安装 `@cloudbase/cloudbase-mcp`（optional peer），不可用时自动 degrade。
 
-Agent 会获得这些 sandbox 工具：
+Agent 会获得这些内置工具（`claude_code` preset）：
 
 | 工具名 | 功能 |
 |--------|------|
-| `mcp__sandbox__bash` | 执行 Shell 命令 |
-| `mcp__sandbox__read` | 读取文件内容 |
-| `mcp__sandbox__write` | 写入文件 |
-| `mcp__sandbox__edit` | 编辑文件 |
-| `mcp__sandbox__glob` | 按 pattern 列出文件 |
-| `mcp__sandbox__grep` | 正则搜索文件内容 |
+| `Bash` | 执行 Shell 命令 |
+| `Read` | 读取文件内容 |
+| `Write` | 写入文件 |
+| `Edit` | 编辑文件 |
+| `Glob` | 按 pattern 列出文件 |
+| `Grep` | 正则搜索文件内容 |
 
-用完建议调用：
-
-```typescript
-await session.abort()
-```
-
-对应示例：`examples/08-sandbox.ts`、`examples/09-sandbox-shared.ts`。
+对应示例：`examples/08-local-sandbox.ts`。
 
 ### Sandbox 内 CloudBase 工具
 
-默认 `sandbox.cloudbaseTools: true`。当镜像内置 mcporter + cloudbase-mcp 时，Agent 会额外获得 CloudBase 工具，例如数据库、云存储、云函数、静态托管等管理能力。
+默认 `sandbox.cloudbaseTools: true`。运行时支持时，Agent 会额外获得 CloudBase 工具，例如数据库、云存储、云函数、静态托管等管理能力；不可用时 degrade，不阻塞 session。local sandbox 走进程内 MCP（需自行安装 optional peer `@cloudbase/cloudbase-mcp`，可用 `CLOUDBASE_APIKEY` 或 `credentials.accessKey`）；远程 AGS 仍走沙箱内 HTTP 路径。
+
+对应示例：`examples/09-local-sandbox-cloudbase-tools.ts`。
 
 ```typescript
 createAgent({
   envId,
   credentials: { secretId, secretKey },
   model: 'glm-5.1',
+  cwd: '/tmp/oak-workspaces/demo',
   sandbox: {
     enabled: true,
     cloudbaseTools: true,
@@ -387,7 +382,7 @@ createAgent({
 })
 ```
 
-多租户场景下，sandbox 控制面可以使用平台凭证，沙箱内 CloudBase 工具可以使用用户租户凭证：
+多租户场景下，CloudBase 工具可以使用用户租户凭证：
 
 ```typescript
 sandbox: {
@@ -400,8 +395,6 @@ sandbox: {
 }
 ```
 
-对应示例：`examples/10-sandbox-cloudbase-tools.ts`。
-
 ### HITL 工具审批
 
 配置 `permissions.requireApproval` 后，命中的工具调用会暂停并发出 ACP `tool_confirm` 更新。
@@ -411,9 +404,10 @@ const agent = createAgent({
   envId,
   credentials: { secretId, secretKey },
   model: 'glm-5.1',
+  cwd: '/tmp/oak-workspaces/demo',
   sandbox: { enabled: true },
   permissions: {
-    requireApproval: ['mcp__sandbox__bash', 'mcp__cloudbase__deleteData'],
+    requireApproval: ['Bash', 'mcp__cloudbase__deleteData'],
     tablePrefix: 'my_agent_', // 可选，默认 oak_
   },
 })
@@ -508,43 +502,6 @@ await deleteUserMemoryFiles({
 
 对应示例：`examples/16-user-memory.ts`、`examples/17-user-memory-distributed.ts`。
 
-### Workspace Snapshot
-
-Workspace Snapshot 会在每次 `session.send()` 结束后把 sandbox cwd 打包上传到 COS，并在下次 `startSession` 时自动 restore。
-
-```typescript
-const agent = createAgent({
-  envId,
-  credentials: { secretId, secretKey },
-  model: 'glm-5.1',
-  sandbox: {
-    enabled: true,
-    workspaceSnapshot: 'auto',
-  },
-})
-```
-
-常用 API：
-
-```typescript
-await session.snapshotWorkspace?.()
-const status = await session.getRestoreStatus?.()
-```
-
-`status` 可能为：
-
-```typescript
-'full' | 'fresh' | 'partial' | 'failed' | null
-```
-
-关键注意事项：
-
-- 默认 sandbox 使用 `scope: 'shared'`，`workspaceSnapshot: 'auto'` 仅对 `ags-stateful` runtime 自动启用。
-- 真正验证跨进程 restore，应使用 `19a-snapshot-write.ts` 写入并停止实例，再运行 `19b-snapshot-read.ts` 读取。
-- 如果自定义 sandbox 镜像，需确认镜像支持 workspace snapshot bootstrap。
-
-对应示例：`examples/18-workspace-snapshot.ts`、`examples/19a-snapshot-write.ts`、`examples/19b-snapshot-read.ts`。
-
 ## 完整参数说明
 
 ### `createAgent(config)`
@@ -557,7 +514,7 @@ const status = await session.getRestoreStatus?.()
 | `systemPrompt` | `string` | 否 | 系统提示词。 |
 | `tools` | `ToolDefinition[]` | 否 | Kernel-side 本地工具。 |
 | `mcpServers` | `Record<string, McpServerConfig>` | 否 | MCP server 配置，透传给底层 Agent SDK。 |
-| `sandbox` | `SandboxConfig` | 否 | 远程 sandbox 配置。 |
+| `sandbox` | `SandboxConfig` | 否 | Sandbox 配置（默认 `provider: 'local'`）。 |
 | `permissions` | `PermissionConfig` | 否 | HITL 工具审批配置。 |
 | `session` | `SessionConfig` | 否 | 会话持久化配置。 |
 | `storage` | `StorageConfig` | 否 | 多模态附件存储配置或自定义 `StorageProvider`。 |
@@ -593,7 +550,7 @@ const status = await session.getRestoreStatus?.()
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|:----:|------|
 | `id` | `string` | 是 | 模型 ID，如 `glm-5.1`。 |
-| `apiKey` | `string` | 否 | 自带 key。不传时读取 `TCB_API_KEY`。 |
+| `apiKey` | `string` | 否 | 自带 key。不传时读取 `CLOUDBASE_APIKEY`。 |
 | `apiBaseUrl` | `string` | 否 | 自带 endpoint。不传时使用 CloudBase AI gateway。 |
 | `options` | `Record<string, unknown>` | 否 | 预留给底层 provider 的额外配置。 |
 
@@ -635,7 +592,7 @@ permissions: {
 }
 
 permissions: {
-  requireApproval: ['mcp__sandbox__bash', 'mcp__cloudbase__delete*'],
+  requireApproval: ['Bash', 'mcp__cloudbase__delete*'],
 }
 ```
 
@@ -654,18 +611,12 @@ permissions: {
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `enabled` | `boolean` | `false` | `true` 时使用默认 `AgsStatefulSandbox`。 |
-| `provider` | `'ags-stateful'` | `'ags-stateful'` | 当前内置 sandbox provider。 |
-| `apiKey` | `string` | `TCB_API_KEY` / `OAK_SANDBOX_API_KEY` | AGS 数据面 JWT。 |
+| `enabled` | `boolean` | `false` | `true` 时使用默认 `LocalRuntimeSandbox`。 |
+| `provider` | `'local'` | `'local'` | 当前内置 sandbox provider。 |
+| `workspaceRoot` | `string` | 按 session 推导 | local 工作区根；若与 `cwd` 都设置则必须一致。 |
 | `runtime` | `unknown` | 自动创建 | 高级自定义 `SandboxRuntime`。 |
-| `scope` | `'session' \| 'shared'` | `'shared'` | AGS 实例粒度。 |
-| `ttl` | `number` | runtime 默认 | 沙箱生命周期秒数。 |
-| `capabilities` | `SandboxCapabilities` | runtime 默认 | 文件系统 / Shell 能力开关。 |
-| `cloudbaseTools` | `boolean` | `true` | 是否自动暴露 `mcp__cloudbase__*` 工具。 |
+| `cloudbaseTools` | `boolean` | `true` | 是否自动暴露 `mcp__cloudbase__*`。local 需 optional peer `@cloudbase/cloudbase-mcp`。 |
 | `userCredentials` | `SandboxUserCredentials \| () => Promise<SandboxUserCredentials>` | `credentials` | sandbox 内 CloudBase MCP 工具使用的用户租户凭证。 |
-| `workspaceSnapshot` | `'auto' \| 'enabled' \| 'disabled'` | `'auto'` | sandbox cwd 自动持久化策略。 |
-| `workspaceSnapshotTimeoutMs` | `number` | `30000` | snapshot RPC 超时。 |
-| `workspaceInitTimeoutMs` | `number` | `60000` | restore bootstrap 超时。 |
 
 Agent / Session 运行时 API 详见文末 [API 参考](#api-参考)。
 
@@ -680,9 +631,8 @@ Agent / Session 运行时 API 详见文末 [API 参考](#api-参考)。
 | `05-multimodal.ts` | 图片附件 / Storage | `config.local.json`（CloudBase Storage 模式需要 `credentials`） |
 | `06-mcp-sdk-server.ts` | 进程内 MCP | `config.local.json` |
 | `07-mcp-stdio.ts` | stdio MCP | `config.local.json` |
-| `08-sandbox.ts` | sandbox 文件 / Shell | `config.local.json`（含 `credentials`） |
-| `09-sandbox-shared.ts` | shared sandbox | `config.local.json`（含 `credentials`） |
-| `10-sandbox-cloudbase-tools.ts` | sandbox 内 CloudBase MCP | `config.local.json`（含 `credentials`） |
+| `08-local-sandbox.ts` | local sandbox 文件 / Shell | `config.local.json`（含 `credentials`，可回退 `tcbApiKey`） |
+| `09-local-sandbox-cloudbase-tools.ts` | local sandbox + 进程内 CloudBase MCP | `config.local.json`（含 `credentials`，可回退 `tcbApiKey`） |
 | `11-hitl-approval.ts` | 单进程 HITL | `config.local.json` |
 | `12-hitl-acp-adapter.ts` | 内置 ACP 审批流 | `config.local.json` |
 | `13-hitl-distributed-cloudbase.ts` | 分布式 HITL | `config.local.json`（含 `credentials`） |
@@ -690,13 +640,11 @@ Agent / Session 运行时 API 详见文末 [API 参考](#api-参考)。
 | `15-skills.ts` | Skills | `config.local.json` |
 | `16-user-memory.ts` | userMemory 单进程 | `config.local.json`（含 `credentials`） |
 | `17-user-memory-distributed.ts` | userMemory 跨节点 | `config.local.json`（含 `credentials`） |
-| `18-workspace-snapshot.ts` | workspace snapshot 单进程 | `config.local.json`（含 `credentials`） |
-| `19a-snapshot-write.ts` / `19b-snapshot-read.ts` | workspace snapshot 跨进程 restore | `config.local.json`（含 `credentials`） |
 
 运行方式：
 
 ```bash
-pnpm dlx tsx packages/open-agent-kernel/examples/01-quickstart.ts
+pnpm dlx tsx examples/01-quickstart.ts
 ```
 
 完整 examples 说明见 [`examples/README.md`](./examples/README.md)。
@@ -863,17 +811,17 @@ ACP 是 OAK 的默认输出协议；常规 `createAgent()` 无需传 `streamAdap
 
 ## 常见问题
 
-### 为什么需要 `TCB_API_KEY`？
+### 为什么需要 `CLOUDBASE_APIKEY`？
 
-模型调用默认走 CloudBase AI gateway，`TCB_API_KEY` 是服务端 APIKey。部署时在进程环境中设置；跑 examples 时写入 `config.local.json` 的 `tcbApiKey` 字段即可。
+模型调用默认走 CloudBase AI gateway，`CLOUDBASE_APIKEY` 是服务端 API Key。部署时在进程环境中设置；跑 examples 时写入 `config.local.json` 的 `tcbApiKey` 字段即可（helper 会写入 `process.env.CLOUDBASE_APIKEY`）。
 
 ### 什么时候需要 `credentials`？
 
 只要要让 SDK 直接操作 CloudBase 资源，就需要传 `credentials`。例如 session 持久化、CloudBase Storage、分布式审批、userMemory、sandbox 控制面。
 
-### `TCB_API_KEY` 和 `TENCENTCLOUD_SECRETID/SECRETKEY` 是一回事吗？
+### `CLOUDBASE_APIKEY` 和 `TENCENTCLOUD_SECRETID/SECRETKEY` 是一回事吗？
 
-不是。`TCB_API_KEY` 是 CloudBase 服务端 APIKey，主要用于模型网关和 sandbox 数据面。`TENCENTCLOUD_SECRETID/SECRETKEY` 是腾讯云平台凭证，用于 CloudBase Node SDK / Manager SDK 管理资源。
+不是。`CLOUDBASE_APIKEY` 是 CloudBase 服务端 API Key，主要用于模型网关和 sandbox / 本地 CloudBase MCP。`TENCENTCLOUD_SECRETID/SECRETKEY` 是腾讯云平台凭证，用于 CloudBase Node SDK / Manager SDK 管理资源。
 
 ### 为什么传了 `credentials` 后自动多了 DB / Storage 行为？
 
