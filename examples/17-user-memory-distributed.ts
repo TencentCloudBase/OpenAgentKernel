@@ -24,8 +24,8 @@
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
 
-import { printAcpUpdate } from './_shared/acp.js'
-import { getEnvId, getPlatformCredentials, loadEnv } from './_shared/env.js'
+import { printAcpUpdate, unwrapStreamMessage } from './_shared/acp.js'
+import { getEnvId, getExampleModel, getPlatformCredentials, loadEnv } from './_shared/env.js'
 import { clearSeededClaudeHome, seedClaudeHome } from './_shared/seed-claude-home.js'
 
 const SEEDED_CLAUDE_MD = `# 项目偏好(预置)
@@ -35,27 +35,17 @@ const SEEDED_CLAUDE_MD = `# 项目偏好(预置)
 - 构建命令:\`pnpm build:dev\`
 `
 
-function buildModel() {
-  const customModelId = process.env.OAK_EXAMPLE_MODEL_ID
-  const customApiKey = process.env.OAK_EXAMPLE_MODEL_API_KEY
-  const customApiBaseUrl = process.env.OAK_EXAMPLE_MODEL_API_BASE_URL
-  return customApiKey
-    ? {
-        id: customModelId ?? 'claude-opus-4-8',
-        apiKey: customApiKey,
-        ...(customApiBaseUrl ? { apiBaseUrl: customApiBaseUrl } : {}),
-      }
-    : (customModelId ?? 'glm-5.1')
-}
-
 async function runOnNode(nodeName: string, userId: string, prompt: string) {
   console.log(`\n--- ${nodeName} ---`)
   const envId = getEnvId()
   const credentials = getPlatformCredentials()
+  const model = getExampleModel()
+  const modelId = typeof model === 'string' ? model : model.id
+  console.log(`[${nodeName}] model: ${modelId}`)
   const agent = createAgent({
     envId,
     credentials,
-    model: buildModel(),
+    model,
     systemPrompt: 'You are a coding assistant. Answer based on the project conventions you can see.',
     userMemory: true,
   })
@@ -64,6 +54,10 @@ async function runOnNode(nodeName: string, userId: string, prompt: string) {
   process.stdout.write(`[${nodeName}] assistant: `)
   for await (const event of session.send(prompt)) {
     printAcpUpdate(event)
+    const update = unwrapStreamMessage(event)
+    if (update.sessionUpdate === 'log' && update.level === 'error') {
+      throw new Error(`session ended with error: ${update.message}`)
+    }
   }
   console.log(`\n[${nodeName}] aborting (final push)...`)
   await session.abort()

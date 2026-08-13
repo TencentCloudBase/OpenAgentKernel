@@ -133,7 +133,7 @@ COS bucket/oak-workspaces/
 - 以 `envId` 为锚点，原生集成 CloudBase 资源（DB / Storage / 云函数 / 沙箱 / MCP）
 - 提供 `createAgent()` 工厂函数，一行代码创建带 CloudBase 能力的 Agent
 
-运行环境：Node.js 22+，ESM，与用户业务代码同进程。
+运行环境：Node.js 20.19+，ESM，与用户业务代码同进程。
 
 ---
 

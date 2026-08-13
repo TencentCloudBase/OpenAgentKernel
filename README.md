@@ -17,7 +17,7 @@ Open Agent Kernel（OAK）适合在 Node.js 服务端中构建 CloudBase Agent�
 
 ## 安装
 
-要求 **Node.js >= 22**。
+要求 **Node.js >= 20.19**。
 
 ```bash
 pnpm add @cloudbase/open-agent-kernel@beta

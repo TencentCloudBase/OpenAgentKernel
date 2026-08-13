@@ -15,7 +15,7 @@ export interface PendingRequestPermission {
  *   - 其他 REQUEST（client/xxx 客户端工具）→ 降级为 info log
  * 扁平 AcpSessionUpdate（旧行为 / createErrorUpdates 直产）原样返回。
  */
-function unwrapStreamMessage(msg: AcpStreamMessage): AcpSessionUpdate {
+export function unwrapStreamMessage(msg: AcpStreamMessage): AcpSessionUpdate {
   if (!('jsonrpc' in msg)) return msg
 
   if (msg.method === 'session/update') {
