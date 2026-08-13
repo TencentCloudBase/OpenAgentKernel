@@ -26,8 +26,8 @@
 
 import { createAgent } from '@cloudbase/open-agent-kernel'
 
-import { printAcpUpdate } from './_shared/acp.js'
-import { getEnvId, getPlatformCredentials, loadEnv } from './_shared/env.js'
+import { printAcpUpdate, unwrapStreamMessage } from './_shared/acp.js'
+import { getEnvId, getExampleModel, getPlatformCredentials, loadEnv } from './_shared/env.js'
 import { clearSeededClaudeHome, seedClaudeHome } from './_shared/seed-claude-home.js'
 
 // 预置到 COS 的 CLAUDE.md 内容 — 含可被验证的具体事实
@@ -48,18 +48,9 @@ const SEEDED_CLAUDE_MD = `# 项目偏好(预置)
 async function runConversation(prompt: string, userId: string) {
   const envId = getEnvId()
   const credentials = getPlatformCredentials()
-  // 模型配置:支持环境变量自带 key + endpoint(测试方便),不传则走 CloudBase 网关默认。
-  // ⚠️ 不要在源码里硬编码 apiKey；凭证应写在 config.local.json，不要提交到 git。
-  const customModelId = process.env.OAK_EXAMPLE_MODEL_ID
-  const customApiKey = process.env.OAK_EXAMPLE_MODEL_API_KEY
-  const customApiBaseUrl = process.env.OAK_EXAMPLE_MODEL_API_BASE_URL
-  const model = customApiKey
-    ? {
-        id: customModelId ?? 'claude-opus-4-8',
-        apiKey: customApiKey,
-        ...(customApiBaseUrl ? { apiBaseUrl: customApiBaseUrl } : {}),
-      }
-    : (customModelId ?? 'glm-5.1')
+  const model = getExampleModel()
+  const modelId = typeof model === 'string' ? model : model.id
+  console.log(`[example] model: ${modelId}`)
 
   const agent = createAgent({
     envId,
@@ -75,6 +66,10 @@ async function runConversation(prompt: string, userId: string) {
   process.stdout.write('[example] assistant: ')
   for await (const event of session.send(prompt)) {
     printAcpUpdate(event)
+    const update = unwrapStreamMessage(event)
+    if (update.sessionUpdate === 'log' && update.level === 'error') {
+      throw new Error(`session ended with error: ${update.message}`)
+    }
   }
   console.log('\n[example] aborting session...')
   await session.abort()

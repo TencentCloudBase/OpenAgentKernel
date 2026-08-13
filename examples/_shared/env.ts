@@ -76,6 +76,27 @@ export function getModel(defaultModel = 'glm-5.1'): string {
   return loadConfig().model ?? defaultModel
 }
 
+/**
+ * example 用的模型：优先环境变量覆盖，否则读 `config.local.json` 的 `model`。
+ *
+ * - `OAK_EXAMPLE_MODEL_API_KEY` 存在时走自带 endpoint（`id` 仍回退到 config.model）
+ * - `OAK_EXAMPLE_MODEL_ID` 覆盖模型 ID
+ */
+export function getExampleModel(defaultModel = 'glm-5.1'): string | { id: string; apiKey: string; apiBaseUrl?: string } {
+  const customModelId = process.env.OAK_EXAMPLE_MODEL_ID
+  const customApiKey = process.env.OAK_EXAMPLE_MODEL_API_KEY
+  const customApiBaseUrl = process.env.OAK_EXAMPLE_MODEL_API_BASE_URL
+  const fallbackId = customModelId ?? getModel(defaultModel)
+  if (customApiKey) {
+    return {
+      id: fallbackId,
+      apiKey: customApiKey,
+      ...(customApiBaseUrl ? { apiBaseUrl: customApiBaseUrl } : {}),
+    }
+  }
+  return fallbackId
+}
+
 /** 视觉 / 多模态 example 专用模型（忽略 config.model，避免误用文本模型） */
 export function getVisionModel(defaultModel = 'glm-5v-turbo'): string {
   const visionModel = loadConfig().examples?.visionModel

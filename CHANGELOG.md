@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### 变更
+
+- 运行时要求从 Node.js >= 22 调整为 >= 20.19
+
 ## 0.1.0-beta.0 — 2026-06-15
 
 首个 beta 版本。
