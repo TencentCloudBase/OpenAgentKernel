@@ -82,20 +82,62 @@ export function getVisionModel(defaultModel = 'glm-5v-turbo'): string {
   return visionModel && visionModel.length > 0 ? visionModel : defaultModel
 }
 
-export function getPlatformCredentials(): PlatformCredentials {
+/** config.example.json 占位值 / 空串，视为「未配置有效 CAM」。 */
+function isUsableCamSecret(value: string | undefined): value is string {
+  if (!value || !value.trim()) return false
+  const v = value.trim()
+  if (/^AKIDx+$/i.test(v)) return false
+  if (/^x+$/i.test(v)) return false
+  if (v.includes('xxxxxxxx')) return false
+  return true
+}
+
+/**
+ * 读取 CAM 平台凭证；缺省或占位符时返回 undefined（不抛错）。
+ * 调用方可再回退到 `accessKey` / `CLOUDBASE_APIKEY`。
+ */
+export function tryGetPlatformCredentials(): PlatformCredentials | undefined {
   const config = loadConfig()
   const credentials = config.credentials
-
-  if (!credentials?.secretId || !credentials.secretKey) {
-    throw new Error('config.local.json: credentials.secretId and credentials.secretKey are required')
+  if (!isUsableCamSecret(credentials?.secretId) || !isUsableCamSecret(credentials?.secretKey)) {
+    return undefined
   }
 
   return {
     envId: config.envId,
-    secretId: credentials.secretId,
-    secretKey: credentials.secretKey,
+    secretId: credentials.secretId.trim(),
+    secretKey: credentials.secretKey.trim(),
     ...(credentials.sessionToken ? { sessionToken: credentials.sessionToken } : {}),
   }
+}
+
+export function getPlatformCredentials(): PlatformCredentials {
+  const credentials = tryGetPlatformCredentials()
+  if (!credentials) {
+    throw new Error('config.local.json: credentials.secretId and credentials.secretKey are required')
+  }
+  return credentials
+}
+
+/**
+ * CAM 可用则用 CAM；否则用 `tcbApiKey` → `credentials.accessKey`（kernel 会换临时 CAM）。
+ * 两者都缺时抛错。
+ */
+export function getPlatformCredentialsOrApiKey(): PlatformCredentials {
+  const cam = tryGetPlatformCredentials()
+  if (cam) return cam
+
+  const config = loadConfig()
+  const accessKey = process.env.CLOUDBASE_APIKEY ?? config.tcbApiKey
+  if (!accessKey) {
+    throw new Error(
+      'config.local.json: need usable credentials.secretId/secretKey, or tcbApiKey (CLOUDBASE_APIKEY fallback)',
+    )
+  }
+
+  // eslint-disable-next-line no-console
+  console.log('[env] CAM credentials missing/placeholder; falling back to credentials.accessKey (tcbApiKey)')
+  return { envId: config.envId, accessKey }
 }
 
 export function getResumeConversationId(): string | undefined {

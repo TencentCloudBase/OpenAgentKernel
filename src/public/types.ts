@@ -62,20 +62,24 @@ export interface ModelSpec {
 // Sandbox 配置（Claude Agent SDK 文件系统/Shell/Skills/Memory/Compaction 能力封装）
 // ============================================================
 
-export interface SandboxConfig {
+export type SandboxConfig = Pick<_SandboxConfig, 'enabled' | 'workspaceRoot'> & {
+  [key: string]: unknown
+}
+
+export interface _SandboxConfig {
   /**
    * 是否启用默认 sandbox。
    *
-   * - `true`：使用内置默认 provider（见 `provider` 字段，默认 `ags-stateful`），并补齐默认 runtime/scope
-   * - `false` / 未配置 sandbox：不启用 sandbox
+   * - `true`：使用内置默认 provider（见 `provider` 字段，默认 `local`），并补齐默认 runtime/scope
+   * - `false`：显式关闭 sandbox
    *
+   * 省略整个 `AgentConfig.sandbox` 时由 `createAgent` 按默认 local 启用（见 `AgentConfig.sandbox`）。
    * 如果显式传了 `runtime`，即使不传 `enabled` 也会启用 sandbox。
    */
   enabled?: boolean
   /**
-   * 沙箱产品类型。当前内置：
-   * - `local`（默认）：OAK 宿主进程本地 FS + Claude SDK 内置工具（过渡方案，AGS 产品化未就绪时的默认）
-   * - `ags-stateful`：腾讯云 AGS Agent Sandbox 产品 + TRW 远程数据面（需要 CLOUDBASE_APIKEY）
+   * 沙箱产品类型。当前公开内置：
+   * - `local`（默认）：OAK 宿主进程本地 FS + Claude SDK 内置工具
    *
    * 选 `local` 时：
    *   - SDK 内置工具(Bash/Read/Write/Edit/Glob/Grep)默认开启(local provider 即用本地 FS,
@@ -83,9 +87,9 @@ export interface SandboxConfig {
    *   - 不暴露 HTTP 数据面 —— `SandboxInstance.request()` 会抛 SandboxError
    *   - cwd 跨请求持久化由 kernel 自动驱动(在 send 边界做 tar.gz 单包 COS 同步)
    *
-   * 未来可扩展到其他 CloudBase/第三方 sandbox 产品；高级用户也可直接传 `runtime`。
+   * 高级用户也可直接传自定义 `runtime`（例如 `AgsStatefulSandbox`）。
    */
-  provider?: 'local' | 'ags-stateful'
+  provider?: 'local'
   /**
    * local provider 的工作区根目录。未设置时按 session 上下文推导：
    * `OAK_WORKSPACE_ROOT` 或 `os.tmpdir()/oak-workspaces/{envId}/{userId}/{conversationId}`。
@@ -104,7 +108,7 @@ export interface SandboxConfig {
   /**
    * Sandbox 后端实例（由用户从 `@cloudbase/open-agent-kernel/sandbox` 子模块构造，
    * 例如 `new AgsStatefulSandbox()`）。
-   * 不传 `runtime` 但 `enabled: true` 时，默认使用 AgsStatefulSandbox。
+   * 不传 `runtime` 但 `enabled: true` 时，默认使用 LocalRuntimeSandbox（`provider` 默认 `'local'`）。
    *
    * 类型故意宽泛（unknown），避免公共类型层依赖底层实现。
    */
@@ -517,6 +521,13 @@ export interface AgentConfig {
   mcpServers?: Record<string, McpServerConfig>
   /** 子 agent（handoffs） */
   handoffs?: Agent[]
+  /**
+   * 沙箱配置。
+   *
+   * - 省略 / `{}`：默认启用 local sandbox（`enabled: true` + `provider: 'local'`）
+   * - `{ enabled: false }`：显式关闭
+   * - 传 `runtime`：使用自定义 `SandboxRuntime`（例如 `AgsStatefulSandbox`）
+   */
   sandbox?: SandboxConfig
   permissions?: PermissionConfig
 
@@ -538,7 +549,13 @@ export interface AgentConfig {
   /**
    * SDK 加载本机文件型资产的根目录。
    * 影响:Skills 扫描根、项目级 CLAUDE.md 查找根、SDK 子进程 spawn cwd。
-   * 默认:OAK 自管的纯净 ephemeral 目录(无 skills、无 CLAUDE.md,等价 v0 行为)。
+   *
+   * 默认:
+   * - 启用 local sandbox（含省略 `sandbox`）且未设 `sandbox.workspaceRoot` 时：
+   *   `os.tmpdir()/oak-local-sandbox`
+   * - 仅设了 `sandbox.workspaceRoot` 时：与之对齐
+   * - 关闭 sandbox / 自定义 runtime：不注入，运行时回退 `process.cwd()`
+   *
    * 业务方通常传镜像内的固定路径(如 '/app/skills-bundle')。
    *
    * ⚠️ 安全:OAK 内部强制 settingSources 仅含 'project',永远不读 'user'(宿主机 ~/.claude)。

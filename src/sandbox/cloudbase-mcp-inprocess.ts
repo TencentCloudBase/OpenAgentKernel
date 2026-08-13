@@ -109,16 +109,29 @@ export async function createCloudBaseMcpServerInProcess(
     version: '1.0.0',
   })
 
-  try {
-    const server = await createCloudBaseMcpServer({
-      name: 'cloudbase-mcp',
-      version: '1.0.0',
-      cloudBaseOptions: {
+  // Align with @cloudbase/node-sdk / cloudbase-mcp: accessKey mode uses
+  // CLOUDBASE_APIKEY (+ optional CLOUDBASE_ENV_ID), not CAM secretId/secretKey.
+  if (credentials.accessKey && !process.env.CLOUDBASE_APIKEY) {
+    process.env.CLOUDBASE_APIKEY = credentials.accessKey
+  }
+  if (credentials.envId && !process.env.CLOUDBASE_ENV_ID) {
+    process.env.CLOUDBASE_ENV_ID = credentials.envId
+  }
+
+  const cloudBaseOptions = credentials.accessKey
+    ? { envId: credentials.envId, accessKey: credentials.accessKey }
+    : {
         envId: credentials.envId,
         secretId: credentials.secretId,
         secretKey: credentials.secretKey,
         token: credentials.sessionToken,
-      },
+      }
+
+  try {
+    const server = await createCloudBaseMcpServer({
+      name: 'cloudbase-mcp',
+      version: '1.0.0',
+      cloudBaseOptions,
       ide: integrationIde,
       cloudMode: true,
       workspaceFolderPaths,

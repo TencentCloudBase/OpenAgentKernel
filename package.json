@@ -38,7 +38,16 @@
     "tar": "^7.5.16",
     "zod": "^4.3.6"
   },
+  "peerDependencies": {
+    "@cloudbase/cloudbase-mcp": "^2.26.0"
+  },
+  "peerDependenciesMeta": {
+    "@cloudbase/cloudbase-mcp": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@cloudbase/cloudbase-mcp": "^2.26.0",
     "tsup": "^8.0.0",
     "typescript": "~5.7.0",
     "vitest": "^3.2.0"
