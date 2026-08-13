@@ -1,0 +1,120 @@
+# Publish @cloudbase/open-agent-kernel to npm.
+#
+# Required repository secret (Settings → Secrets and variables → Actions):
+#   NPM_TOKEN  npm Automation or Granular Access Token with publish permission
+#              for @cloudbase/open-agent-kernel
+#
+# Trigger: Actions → Publish to npm → Run workflow
+# Default bump is prerelease (current line is 0.1.0-beta.x, dist-tag: beta).
+
+name: Publish to npm
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump type
+        required: true
+        type: choice
+        default: prerelease
+        options:
+          - prerelease
+          - prepatch
+          - preminor
+          - premajor
+          - patch
+          - minor
+          - major
+      preid:
+        description: Prerelease identifier (prerelease / prepatch / preminor / premajor)
+        required: false
+        default: beta
+        type: string
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Guard branch
+        run: |
+          if [[ "${GITHUB_REF}" != "refs/heads/main" ]]; then
+            echo "Publishing is only allowed from main. Current ref: ${GITHUB_REF}"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm type-check
+
+      - name: Test
+        run: pnpm test
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version
+        id: bump
+        env:
+          BUMP: ${{ inputs.bump }}
+          PREID: ${{ inputs.preid }}
+        run: |
+          set -euo pipefail
+          if [[ "$BUMP" == pre* ]]; then
+            pnpm version "$BUMP" --preid "${PREID:-beta}" -m "chore(release): v%s"
+          else
+            pnpm version "$BUMP" -m "chore(release): v%s"
+          fi
+
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          if [[ "${VERSION}" == *-* ]]; then
+            echo "tag=beta" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Bumped to v${VERSION}"
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm publish --access public --no-git-checks --tag "${{ steps.bump.outputs.tag }}"
+
+      - name: Push version commit and tag
+        run: git push origin HEAD --follow-tags
+
+      - name: Summary
+        run: |
+          {
+            echo "## Published @cloudbase/open-agent-kernel@${{ steps.bump.outputs.version }}"
+            echo ""
+            echo "- bump: \`${{ inputs.bump }}\`"
+            echo "- npm dist-tag: \`${{ steps.bump.outputs.tag }}\`"
+            echo "- package: https://www.npmjs.com/package/@cloudbase/open-agent-kernel"
+          } >> "$GITHUB_STEP_SUMMARY"
