@@ -45,7 +45,7 @@ import {
   WorkspaceCwdArchiveEngine,
 } from '../claude-home/index.js'
 import { ConfigError, InvalidConfigError } from '../internal/errors.js'
-import type { AgentConfig, SandboxConfig, ToolDefinition, UserMemoryConfig } from '../public/types.js'
+import type { AgentConfig, SandboxConfig, ToolDefinition, UserMemoryConfig, _SandboxConfig } from '../public/types.js'
 import { createSandboxMcpServer } from '../sandbox/sandbox-tools.js'
 import type { SandboxInstance, SandboxRuntime } from '../sandbox/types.js'
 import { WorkspaceSnapshotEngine } from '../sandbox/workspace-snapshot/index.js'
@@ -380,18 +380,14 @@ export function buildClaudeQueryOptions(
   // 启用时构造 WorkspaceSnapshotEngine,实际触发(bootstrap / snapshot)由 create-agent
   // 在 startSession / send-end 时挂载(Task 8)。
   //
-  // 注意:必须用条件展开避免把 undefined 透到 engine —— `{ ...DEFAULT, ...opts }`
-  // 模式下,显式赋 undefined 会覆盖默认值,导致 setTimeout(undefined) 立即触发,
-  // bootstrap 会以 SandboxRestoreTimeout: init timeout after undefinedms 失败。
+  // 公开 SandboxConfig 是 Pick + index signature，超时字段类型为 unknown。
+  // 内部按完整 _SandboxConfig 读取；engine 用 `??` 处理未传的 timeout。
   const snapshotEnabled = resolveSnapshotMode(config.sandbox)
+  const sandbox = config.sandbox as _SandboxConfig | undefined
   const snapshotEngine = snapshotEnabled
     ? new WorkspaceSnapshotEngine({
-        ...(config.sandbox?.workspaceSnapshotTimeoutMs !== undefined && {
-          snapshotTimeoutMs: config.sandbox.workspaceSnapshotTimeoutMs,
-        }),
-        ...(config.sandbox?.workspaceInitTimeoutMs !== undefined && {
-          initTimeoutMs: config.sandbox.workspaceInitTimeoutMs,
-        }),
+        snapshotTimeoutMs: sandbox?.workspaceSnapshotTimeoutMs,
+        initTimeoutMs: sandbox?.workspaceInitTimeoutMs,
       })
     : undefined
 
