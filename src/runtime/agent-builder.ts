@@ -29,10 +29,8 @@ import type {
   SettingSource,
 } from '@anthropic-ai/claude-agent-sdk'
 import { createSdkMcpServer, tool as sdkTool } from '@anthropic-ai/claude-agent-sdk'
-import { z } from 'zod'
 import {
   createPreToolUsePermissionHook,
-  OAK_CLIENT_TOOL_RESULT_KEY,
   type PreToolUseHookLocalState,
   type ClientToolResultStore,
 } from '../permissions/hooks.js'
@@ -306,8 +304,8 @@ export function buildClaudeQueryOptions(
   //   - 上述任一并提供了 conversationId + hookLocalState（runtime 必须配齐）
   const hasClientTools = Boolean(config.tools && config.tools.length > 0)
   const hasApproval = config.permissions !== undefined && config.permissions.requireApproval !== undefined
-  // askUser 现在复用 clientToolStore(askUser 是 clientTool 的特化,toolName='askUser')。
-  // clientToolStore 在 create-agent 里始终注入(askUser 是内置工具),所以 hasAskUser 始终 true。
+  // AskUserQuestion 是 SDK 原生工具,HITL 仍走 clientToolStore(deny + sentinel + respondToolUse)。
+  // clientToolStore 在 create-agent 里始终注入,所以 hasAskUser 始终 true。
   const hasAskUser = Boolean(extra.clientToolStore)
   const userHasApprovalConfig =
     (hasApproval || hasClientTools || hasAskUser) && Boolean(extra.conversationId) && Boolean(extra.hookLocalState)
@@ -331,12 +329,6 @@ export function buildClaudeQueryOptions(
     if (extra.extraMcpServers) {
       // PR #6.5：cloudbase MCP（mcp__cloudbase__*）等额外内置 server
       Object.assign(merged, extra.extraMcpServers)
-    }
-    // ── 内置 askUser 工具 → SDK MCP server 'kernel' (mcp__kernel__askUser)
-    // 模型可通过此工具主动向用户提问,kernel 用 sentinel 中断 turn,
-    // Host 收集回答后调 respondToolUse() resume(askUser 复用 clientToolStore)。
-    if (extra.clientToolStore) {
-      merged.kernel = createBuiltinAskUserMcpServer(extra.clientToolStore, extra.conversationId)
     }
     // ── 用户自定义 ToolDefinition[] → SDK MCP server 'custom' (mcp__custom__*)
     // SDK 的 query() 不接受 tools 数组——所有工具必须打包成 MCP server 注入。
@@ -441,9 +433,9 @@ export function buildClaudeQueryOptions(
     allowDangerouslySkipPermissions: true,
     // ── 流式:始终开启 includePartialMessages(AcpStreamAdapter 处理增量)──
     // SDK 只有此项为 true 才 emit stream_event(增量 chunk);adapter 据此发 agent_message_chunk。
-    // ── 内置工具(默认禁用,local provider 自动开)──
-    // 默认 tools=[](或仅 'Skill'):避免模型操作 kernel 宿主机 FS。
-    //   - sandbox.provider='local' → 自动开 'claude_code' preset(SDK 全部内置工具)
+    // ── 内置工具(AskUserQuestion 始终挂;其余默认禁用,local provider 自动开)──
+    // remote/none 只白名单 AskUserQuestion(+ 可选 Skill),避免模型操作 kernel 宿主机 FS。
+    //   - sandbox.provider='local' → 自动开 'claude_code' preset(SDK 全部内置工具,已含 AskUserQuestion)
     //   - 沙箱(ags-stateful)能力另经 mcpServers 提供
     tools: resolveBuiltinTools(config, sandboxMode),
     // ── pathToClaudeCodeExecutable 透传 ──
@@ -484,22 +476,21 @@ export type SandboxMode = 'local' | 'remote' | 'none'
  * 解析 SDK 内置工具集(options.tools)。
  *
  *   - sandboxMode === 'local' → 'claude_code' preset(local provider 即用本地 FS,
- *     SDK 内置 Bash/Read/Write/Edit/Glob/Grep 直接操作 cwd,preset 已含 Skill)
- *   - 其他 → [](或仅 'Skill' 若启用 skills)
+ *     SDK 内置 Bash/Read/Write/Edit/Glob/Grep 直接操作 cwd,preset 已含 Skill + AskUserQuestion)
+ *   - 其他 → ['AskUserQuestion'](或再加 'Skill' 若启用 skills)
  *
  * 安全默认:无 local provider 时模型拿不到本地 Bash/Read/Write,
- * 避免操作 kernel 宿主机 FS。
+ * 避免操作 kernel 宿主机 FS。AskUserQuestion 不碰 FS,remote/none 也挂上。
  */
 function resolveBuiltinTools(config: AgentConfig, sandboxMode: SandboxMode): ClaudeOptions['tools'] {
   const skillsOn = config.skills?.enabled !== undefined
 
   if (sandboxMode === 'local') {
-    // local provider 默认开 SDK 全部内置工具(preset 已含 Skill)
+    // local provider 默认开 SDK 全部内置工具(preset 已含 Skill + AskUserQuestion)
     return { type: 'preset', preset: 'claude_code' }
   }
 
-  // 默认禁用:仅在启用 skills 时保留 'Skill'
-  return skillsOn ? ['Skill'] : []
+  return skillsOn ? ['AskUserQuestion', 'Skill'] : ['AskUserQuestion']
 }
 
 /**
@@ -766,65 +757,6 @@ function extractSessionStore(config: AgentConfig): SessionStore | null {
   }
 
   return raw as SessionStore
-}
-
-/**
- * 创建内置 askUser MCP server。
- *
- * 注册一个 `askUser` 工具，模型可通过它主动向用户提问。
- * 工具的 execute() 是 stub——实际执行由 PreToolUse hook 拦截（sentinel 模式），
- * Host 收集用户回答后调 session.respondToolUse() resume。
- *
- * resume 时 hook 从 clientToolStore 读到回答 → allow → 此 stub 读取回答并返回。
- * askUser 在 store 里的 toolName='askUser',result.output={answer}。
- */
-function createBuiltinAskUserMcpServer(
-  clientToolStore: ClientToolResultStore,
-  conversationId?: string,
-): ReturnType<typeof createSdkMcpServer> {
-  const askUserTool = sdkTool(
-    'AskUserQuestion',
-    'Ask the user a question and wait for their answer. Use this when you need clarification, confirmation, or a choice from the user.',
-    {
-      question: z.string().describe('The question to ask the user'),
-      options: z
-        .array(z.string())
-        .optional()
-        .describe('Optional predefined answer options for the user to choose from'),
-    },
-    async (_input: Record<string, unknown>) => {
-      // Resume path: check if an answer is already stashed in the store.
-      // AskUserQuestion 的 toolName='AskUserQuestion',scanRecent 按 toolName 匹配。
-      if (conversationId && clientToolStore.scanRecent) {
-        const scanned = await clientToolStore.scanRecent({
-          conversationId,
-          toolName: 'AskUserQuestion',
-        })
-        if (scanned?.result) {
-          await clientToolStore.delete({
-            conversationId,
-            toolUseId: scanned.toolUseId,
-          })
-          // result.output 是 { answer: string }(respondAskUser 写入时包装的)
-          const output = scanned.result.output as { answer?: string } | string
-          const text = typeof output === 'string' ? output : (output.answer ?? JSON.stringify(output))
-          return {
-            content: [{ type: 'text', text }],
-          }
-        }
-      }
-      // Should not reach here in normal flow — the hook intercepts before execute().
-      return {
-        content: [{ type: 'text', text: '(AskUserQuestion: no answer available)' }],
-        isError: true,
-      }
-    },
-  )
-  return createSdkMcpServer({
-    name: 'kernel',
-    version: '1.0.0',
-    tools: [askUserTool],
-  })
 }
 
 /**

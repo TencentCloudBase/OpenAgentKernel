@@ -24,6 +24,7 @@ export {
   type ClientToolResultStore,
   type PendingClientToolResult,
   type PreToolUseHookLocalState,
+  type SeededClientToolResult,
 } from './hooks.js'
 
 // PR #7.1：分布式 PermissionStore（CloudBase DB driver）

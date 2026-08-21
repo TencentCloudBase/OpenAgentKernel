@@ -16,6 +16,7 @@ import {
   CloudBaseDbPermissionDriver,
   CloudBasePermissionStore,
   type PreToolUseHookLocalState,
+  type SeededClientToolResult,
 } from '../permissions/index.js'
 import { buildClaudeQueryOptions } from '../runtime/agent-builder.js'
 import { buildPromptAsync } from '../runtime/prompt-builder.js'
@@ -365,7 +366,7 @@ function resolvePermissionConfig(config: AgentConfig): AgentConfig['permissions'
  *   - 有 credentials → 自动 CloudBase 化(支持多实例部署,askUser/clientTool 跨节点可恢复)
  *   - 否则 → InMemoryClientToolStore(单进程兜底)
  *
- * store 始终启用:askUser 是内置工具,即使 config.tools 为空也可能被模型调用。
+ * store 始终启用:AskUserQuestion 是内置原生工具,即使 config.tools 为空也可能被模型调用。
  */
 function resolveClientToolStoreConfig(config: AgentConfig): ClientToolResultStore {
   const userStore = config.toolStore as ClientToolResultStore | undefined
@@ -431,7 +432,7 @@ function createSession(deps: SessionDeps): Session {
   // host-supplied tool results between SDK turns (turn-1 emits
   // tool_use_required; respondToolUse() stashes; turn-2 reads).
   //
-  // **也承载 askUser 流程**:askUser 是内置工具,始终可能被模型调用,所以
+  // **也承载 AskUserQuestion 流程**:原生工具始终可能被模型调用,所以
   // store 必须始终启用(即使 config.tools 为空)。未提供 credentials 时回落到
   // 进程内 InMemoryClientToolStore(单进程可用,多实例部署会失效——生产环境
   // 应配 credentials 让 kernel 自动 CloudBase 化,见 resolveClientToolStoreConfig)。
@@ -608,15 +609,11 @@ function createSession(deps: SessionDeps): Session {
      * PR #7.1: respond to a client-side tool_confirm pause.
      *
      * Wire flow:
-     *   1. Stash the host-supplied result in the in-memory clientToolStore.
-     *   2. Resume the SDK with a short prompt asking the model to retry
-     *      the same tool. The PreToolUse hook will scan the store, find the
-     *      result, allow + inject it via updatedInput so the wrapped MCP
-     *      stub returns it as the actual tool_result. The transcript ends
-     *      up with a clean (non-error) tool_result for the new tool_use_id;
-     *      the original (errored, sentinel-bearing) tool_result remains in
-     *      the transcript but is harmless because the hook's deny outcome
-     *      already aborted that branch of reasoning.
+     *   1. Stash the host-supplied result in the clientToolStore.
+     *   2. Best-effort patch the sentinel tool_result in the transcript.
+     *   3. Resume. AskUserQuestion: hook injects `updatedInput.answers` so the
+     *      native tool executes with questions+answers. mcp__custom__* stubs
+     *      still read the store on re-call.
      */
     respondToolUse(opts: { toolUseId: string; output: unknown; isError?: boolean }): AsyncIterable<AcpStreamMessage> {
       abortController = new AbortController()
@@ -1029,8 +1026,10 @@ interface RunClaudeQueryArgs {
   permissionStore?: PermissionStore
   /** PR #7.1: names of user-defined client-side tools (config.tools[].name set). */
   clientToolNames?: ReadonlySet<string>
-  /** PR #7.1: store for client-supplied tool results AND askUser pending entries. */
+  /** PR #7.1: store for client-supplied tool results AND AskUserQuestion pending entries. */
   clientToolStore?: ClientToolResultStore
+  /** respondToolUse 种入:AskUserQuestion 重调时 hook 注入 answers,不必 scanRecent。 */
+  seededClientToolResult?: SeededClientToolResult
 }
 
 async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<AcpStreamMessage, void, unknown> {
@@ -1049,6 +1048,7 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<AcpStre
     permissionStore,
     clientToolNames,
     clientToolStore,
+    seededClientToolResult,
   } = args
 
   let q: ReturnType<typeof claudeQuery> | undefined
@@ -1067,7 +1067,7 @@ async function* runClaudeQuery(args: RunClaudeQueryArgs): AsyncGenerator<AcpStre
     const cloudbaseMcp = sandbox ? await ensureCloudbaseMcp(sandbox) : undefined
 
     // PR #7.0：构造一轮的 hook 本地状态（同 query 内闭包共享）
-    const hookLocalState: PreToolUseHookLocalState = createHookLocalState()
+    const hookLocalState: PreToolUseHookLocalState = createHookLocalState(seededClientToolResult)
     // PR #7.0：合并真正生效的 permissions（注入实际的 store——可能是 default in-memory，
     // 也可能是用户传入的；hook factory 需要它来读决策）。
     const effectivePermissions = config.permissions ? { ...config.permissions, store: permissionStore } : undefined
@@ -1253,6 +1253,7 @@ interface ResumeContext {
   permissionStore?: PermissionStore
   clientToolNames?: ReadonlySet<string>
   clientToolStore?: ClientToolResultStore
+  seededClientToolResult?: SeededClientToolResult
 }
 
 /**
@@ -1275,6 +1276,7 @@ async function* resumeQuery(ctx: ResumeContext, input: string): AsyncGenerator<A
     permissionStore: ctx.permissionStore,
     ...(ctx.clientToolNames ? { clientToolNames: ctx.clientToolNames } : {}),
     ...(ctx.clientToolStore ? { clientToolStore: ctx.clientToolStore } : {}),
+    ...(ctx.seededClientToolResult ? { seededClientToolResult: ctx.seededClientToolResult } : {}),
   })
 }
 
@@ -1582,8 +1584,21 @@ async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerat
   // (no retry, no toolUseId mismatch). Best-effort — falls back to retry prompt.
   const patched = await patchSentinelToolResult(config, conversationId, toolUseId, output, isError)
 
+  const seed: SeededClientToolResult = {
+    toolName: existing.toolName,
+    originalToolUseId: toolUseId,
+    result: { output, isError },
+    toolInput: existing.toolInput,
+  }
+
+  // patch 成功则模型通常不重调。删掉 store,避免后续 AskUserQuestion 被 scanRecent 脏数据命中。
+  // 同请求仍可能误重调,seed 覆盖那一小段。patch 失败则保留 store 给 custom stub / hook 兜底。
+  if (patched) {
+    await clientToolStore.delete({ conversationId, toolUseId })
+  }
+
   // patch 成功 → 最小 prompt(模型看到干净结果,自然继续)
-  // patch 失败 → 回退到"请重新调用"prompt(hook 从 clientToolStore 注入结果)
+  // patch 失败 → 回退到"请重新调用"prompt(AskUserQuestion hook 注入 answers;custom stub 读 store)
   const resumePrompt = patched
     ? `[系统通知] 请继续。`
     : isError
@@ -1602,6 +1617,7 @@ async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerat
     permissionStore,
     clientToolNames,
     clientToolStore,
+    seededClientToolResult: seed,
   }
   yield* resumeQuery(ctx, resumePrompt)
 }
@@ -1609,9 +1625,9 @@ async function* runClientToolResume(args: RunClientToolResumeArgs): AsyncGenerat
 // ============================================================
 // 内部：askUser resume 已合并到 runClientToolResume
 // ============================================================
-// askUser 现在用统一的 tool_use_required 事件 + respondToolUse API:
-//   host 收到 tool_use_required(toolName='askUser') → 收集 answer →
-//   调 respondToolUse({ toolUseId, output: { answer }, isError: false })。
+// askUser 现在用统一的 respondToolUse API:
+//   host 收到 client/AskUserQuestion → 收集 answers →
+//   调 respondToolUse({ toolUseId, output: { answers }, isError: false })。
 // 不再有独立的 runAskUserResume / respondAskUser API。
 
 /**

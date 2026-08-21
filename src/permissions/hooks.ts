@@ -65,6 +65,17 @@ export const OAK_INTERRUPT_SENTINEL = '__OAK_INTERRUPT__'
  *   - 多并发审批易混淆 toolUseId 映射
  *   - 真出现同轮多工具的场景，让模型在用户决策后再触发剩下的就行
  */
+/**
+ * 本轮 resume query 开始前种入的 client-tool / AskUserQuestion 结果。
+ * 模型重调用时 toolUseId 已换，同请求内不必再 scanRecent。
+ */
+export interface SeededClientToolResult {
+  toolName: string
+  originalToolUseId: string
+  result: { output: unknown; isError: boolean }
+  toolInput: unknown
+}
+
 export interface PreToolUseHookLocalState {
   /** 当轮 SDK 运行已创建过的 interrupt 标记（防同轮多 interrupt） */
   hasInterruptedThisRun: boolean
@@ -75,10 +86,18 @@ export interface PreToolUseHookLocalState {
    * 模型在同一轮内多次调用同一工具，hook 直接复用第一次的决策。
    */
   sessionDecisions?: Map<string, ApprovalDecision>
+  /**
+   * respondToolUse 在 resumeQuery 前种入。AskUserQuestion 重调时优先读这里，
+   * 把 answers 写进 updatedInput 再放行原生工具。
+   */
+  seededClientToolResult?: SeededClientToolResult
 }
 
-export function createHookLocalState(): PreToolUseHookLocalState {
-  return { hasInterruptedThisRun: false }
+export function createHookLocalState(seed?: SeededClientToolResult): PreToolUseHookLocalState {
+  return {
+    hasInterruptedThisRun: false,
+    ...(seed ? { seededClientToolResult: seed } : {}),
+  }
 }
 
 /**
@@ -159,20 +178,19 @@ export function parseClientToolSignal(reason: string): ClientToolSignalPayload |
 }
 
 // ─────────────────────────────────────────────────────────
-// AskUserQuestion (agent 主动向用户提问)
+// AskUserQuestion (SDK 原生工具 + HITL)
 // ─────────────────────────────────────────────────────────
 //
-// AskUserQuestion 已去特化为普通 client-tool：模型调用内置 AskUserQuestion 工具
-// (mcp__kernel__AskUserQuestion) 时，走与 client-tool 完全相同的
-// deny + OAK_CLIENT_TOOL_SENTINEL + resume 范式：
-//   1. PreToolUse hook 拦截（isClientTool 含 isAskUserQuestion 判定）
-//   2. 写 PendingClientToolResult（toolName='AskUserQuestion', toolInput={question,options}）
-//   3. deny + client-tool sentinel → AcpStreamAdapter emit `request_permission`
-//      (toolCall.title='AskUserQuestion', rawInput 携带 question/options)
-//   4. Host 收集回答 → session.respondToolUse() → resume，hook 从 store 读到结果放行
-// 客户端按 toolCall.title==='AskUserQuestion' 渲染问卷 UI（特化在客户端）。
+// 模型调用原生 AskUserQuestion（bare name，无 mcp__ 前缀）时，第一次仍走
+// deny + OAK_CLIENT_TOOL_SENTINEL + respondToolUse，避免 headless 空 answers 空跑：
+//   1. PreToolUse 拦截裸名 AskUserQuestion
+//   2. 写 PendingClientToolResult（toolInput = 原生 questions[]）
+//   3. deny + sentinel → AcpStreamAdapter emit `client/AskUserQuestion`
+//   4. Host 收集回答 → session.respondToolUse({ output: { answers } })
+//   5. resume：patch 成功则模型不重调；patch 失败则模型重调，hook 注入
+//      updatedInput.answers 后放行原生 execute。
 //
-// 不再有独立的 OAK_ASK_USER_SENTINEL / ask_user variant。
+// mcp__custom__* client-tool 仍用 MCP stub + scanRecent，不走 answers 注入。
 
 // ─────────────────────────────────────────────────────────
 // Hook factory
@@ -189,24 +207,17 @@ export interface PreToolUsePermissionHookArgs {
    * so the SDK never calls execute(); the runtime intercepts the sentinel
    * to surface an ACP `tool_confirm` update and pause the turn.
    *
-   * On resume, the hook reads the host-supplied result from the
-   * clientToolStore and ALLOWs the call after rewriting `updatedInput` to
-   * carry the result under OAK_CLIENT_TOOL_RESULT_KEY. The wrapped MCP
-   * stub reads this key and returns its content as the tool result.
+   * On resume, mcp__custom__* stubs still read the result from clientToolStore
+   * (SDK does not forward updatedInput to MCP execute). Native AskUserQuestion
+   * instead gets answers via updatedInput (see Phase A below).
    */
   clientToolNames?: ReadonlySet<string>
   /**
-   * Store for pending client-side tool results AND askUser pending entries.
+   * Store for pending client-side tool results AND AskUserQuestion pending entries.
    *
-   * askUser(内置工具)和 clientTool(用户声明工具)共用同一存储:
-   * 两者流程完全一致(模型在 turn 中请求外部输入,host 在 turn 间填充结果),
-   * 区别只是 toolName —— askUser 的 toolName 是 'askUser',question/options 通过
-   * toolInput 携带,host 调 respondToolUse() 时把 { answer } 放进 result.output。
-   *
-   * On resume, the hook reads the host-supplied result from this store and
-   * ALLOWs the call after rewriting `updatedInput` to carry the result under
-   * OAK_CLIENT_TOOL_RESULT_KEY. The wrapped MCP stub reads this key and
-   * returns its content as the tool result.
+   * 两者共用同一存储:模型在 turn 中请求外部输入,host 在 turn 间填充结果。
+   * AskUserQuestion 的 toolName 是裸名 'AskUserQuestion',toolInput 为原生 questions[]。
+   * Host 调 respondToolUse() 时把 { answers }（或旧形态 { answer }）放进 result.output。
    */
   clientToolStore?: ClientToolResultStore
 }
@@ -216,6 +227,62 @@ export interface ClientToolResultStore {
   get(key: { conversationId: string; toolUseId: string }): Promise<PendingClientToolResult | null>
   delete(key: { conversationId: string; toolUseId: string }): Promise<void>
   scanRecent?(key: { conversationId: string; toolName: string }): Promise<PendingClientToolResult | null>
+}
+
+/**
+ * 把 Host 的 respondToolUse output 归一成原生 AskUserQuestion 的 answers map。
+ * key 是 question 全文（不是 header）；多选 label 用 ", " 拼接。
+ *
+ * 兼容：
+ *   - `{ answers: { [questionText]: label } }` 原生形态
+ *   - `{ answer: string }` 旧 stub 形态（映射到 questions[0].question）
+ *   - 纯字符串
+ */
+export function normalizeAskUserAnswers(output: unknown, toolInput: unknown): Record<string, string> {
+  const questionText = firstQuestionText(toolInput) ?? 'answer'
+
+  if (output && typeof output === 'object' && !Array.isArray(output)) {
+    const rec = output as Record<string, unknown>
+    if (rec.answers && typeof rec.answers === 'object' && !Array.isArray(rec.answers)) {
+      const answers: Record<string, string> = {}
+      for (const [k, v] of Object.entries(rec.answers as Record<string, unknown>)) {
+        answers[k] = stringifyAnswerValue(v)
+      }
+      return answers
+    }
+    if (typeof rec.answer === 'string') {
+      return { [questionText]: rec.answer }
+    }
+  }
+  if (typeof output === 'string') {
+    return { [questionText]: output }
+  }
+  return { [questionText]: output == null ? '' : JSON.stringify(output) }
+}
+
+function stringifyAnswerValue(v: unknown): string {
+  if (typeof v === 'string') return v
+  if (Array.isArray(v)) return v.map((item) => (typeof item === 'string' ? item : String(item))).join(', ')
+  if (v == null) return ''
+  return String(v)
+}
+
+function firstQuestionText(toolInput: unknown): string | undefined {
+  if (!toolInput || typeof toolInput !== 'object') return undefined
+  const rec = toolInput as Record<string, unknown>
+  if (typeof rec.question === 'string') return rec.question
+  if (Array.isArray(rec.questions) && rec.questions[0] && typeof rec.questions[0] === 'object') {
+    const q = rec.questions[0] as { question?: string }
+    if (typeof q.question === 'string') return q.question
+  }
+  return undefined
+}
+
+function asInputRecord(toolInput: unknown): Record<string, unknown> {
+  if (toolInput && typeof toolInput === 'object' && !Array.isArray(toolInput)) {
+    return { ...(toolInput as Record<string, unknown>) }
+  }
+  return {}
 }
 
 /**
@@ -285,9 +352,9 @@ export function createPreToolUsePermissionHook(
     // reports the prefixed form 'mcp__custom__<bare>'. Strip the prefix
     // before matching.
     //
-    // AskUserQuestion (mcp__kernel__AskUserQuestion) is treated as a built-in
-    // client-tool: it follows the exact same deny+sentinel+resume flow. The
-    // host collects the user's answer and feeds it back via respondToolUse().
+    // AskUserQuestion is the SDK builtin (bare name). mcp__kernel__ prefix is
+    // only stripped for old transcripts. Resume injects native `answers` via
+    // updatedInput; mcp__custom__* stubs still read clientToolStore themselves.
     const bareToolName = toolName.startsWith('mcp__custom__')
       ? toolName.slice('mcp__custom__'.length)
       : toolName.startsWith('mcp__kernel__')
@@ -297,31 +364,65 @@ export function createPreToolUsePermissionHook(
     const isClientTool = isAskUserQuestion || (!!clientToolNames && clientToolNames.has(bareToolName))
 
     if (isClientTool && clientToolStore) {
-      // Phase A: a result is already waiting in the store (resume path).
-      // Allow the call — the MCP stub will read the result from the store
-      // directly (Claude Agent SDK does NOT pass `updatedInput` to MCP
-      // servers, so we cannot inject via hook output). The stub deletes
-      // the entry after reading.
-      //
-      // We check by toolUseId first (exact match), then by toolName scan.
+      const allowAskUserWithResult = async (
+        pending: { toolUseId: string; toolInput: unknown; result: { output: unknown; isError: boolean } },
+      ): Promise<PreToolUseHookOutput> => {
+        const baseInput = asInputRecord(toolInput ?? pending.toolInput)
+        const answers = normalizeAskUserAnswers(pending.result.output, toolInput ?? pending.toolInput)
+        await clientToolStore.delete({ conversationId, toolUseId: pending.toolUseId })
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'allow',
+            updatedInput: { ...baseInput, answers },
+          },
+        }
+      }
+
+      // Phase A: a result is already waiting (resume / re-call).
+      // AskUserQuestion: inject answers into updatedInput so the native tool
+      // executes with questions+answers. Custom MCP stubs still get `{}` —
+      // SDK does not forward updatedInput to MCP execute().
+      const seeded = localState.seededClientToolResult
+      if (isAskUserQuestion && seeded?.toolName === 'AskUserQuestion' && seeded.result) {
+        localState.seededClientToolResult = undefined
+        return allowAskUserWithResult({
+          toolUseId: seeded.originalToolUseId,
+          toolInput: seeded.toolInput,
+          result: seeded.result,
+        })
+      }
+
       if (toolUseId) {
         const existing = await clientToolStore.get({ conversationId, toolUseId })
         if (existing?.result) {
-          // Don't delete — MCP stub will read and delete
+          if (isAskUserQuestion) {
+            return allowAskUserWithResult({
+              toolUseId: existing.toolUseId,
+              toolInput: existing.toolInput,
+              result: existing.result,
+            })
+          }
           return {}
         }
       }
       if (clientToolStore.scanRecent) {
         const scanned = await clientToolStore.scanRecent({ conversationId, toolName: bareToolName })
         if (scanned?.result) {
-          // Don't delete — MCP stub will read and delete
+          if (isAskUserQuestion) {
+            return allowAskUserWithResult({
+              toolUseId: scanned.toolUseId,
+              toolInput: scanned.toolInput,
+              result: scanned.result,
+            })
+          }
           return {}
         }
       }
 
       // Phase B: no result → pause. Mirror the approval flow: write a
       // pending entry, return deny + sentinel. AcpStreamAdapter detects the
-      // sentinel and emits an ACP `tool_confirm` update.
+      // sentinel and emits client/<ToolName>.
       if (!toolUseId) {
         return {
           hookSpecificOutput: {
