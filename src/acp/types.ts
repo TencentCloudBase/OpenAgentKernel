@@ -15,8 +15,7 @@
  *   `session/prompt` POST carrying the selected `optionId`. The payload shape
  *   mirrors {@link RequestPermissionRequest} so a standard ACP client can
  *   consume it directly.
- * - `ask_user` — OAK's AskUserQuestion flow (stop-and-resume, same reason as
- *   `request_permission`).
+ * - `ask_user` — deprecated; AskUserQuestion now uses `client/AskUserQuestion`.
  *
  * OAK-specific data on standard variants (e.g. `parentToolCallId`) is carried
  * in `_meta.oak.*`, per the ACP extensibility convention.
@@ -228,11 +227,10 @@ export interface RequestPermissionUpdate {
 
 // ── OAK extension: ask_user (DEPRECATED) ────────────────────────────────
 //
-// @deprecated AskUserQuestion 已去特化为普通 client-tool，现在走 request_permission
-// (toolCall.title='AskUserQuestion', rawInput 含 question/options)。kernel 不再
-// emit ask_user variant。此类型保留仅为向后兼容，下个版本移除。
+// @deprecated AskUserQuestion 走 client/AskUserQuestion JSON-RPC（params 为原生
+// questions[]）。kernel 不再 emit ask_user variant。此类型保留仅为向后兼容。
 
-/** @deprecated AskUserQuestion now flows through request_permission. */
+/** @deprecated AskUserQuestion now flows through client/AskUserQuestion. */
 export interface AskUserUpdate {
   sessionUpdate: 'ask_user'
   toolCallId: string

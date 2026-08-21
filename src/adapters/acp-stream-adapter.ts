@@ -101,10 +101,8 @@ export class AcpStreamAdapter implements StreamAdapter<AcpStreamMessage> {
  */
 /**
  * Strip the SDK MCP prefix from a tool name so the ACP `title` is always the
- * bare tool name (e.g. `mcp__kernel__AskUserQuestion` → `AskUserQuestion`).
- * Mirrors the stripping in {@link permissions/hooks.ts} so the streaming
- * tool_call path and the sentinel (request_permission) path surface identical
- * titles — clients match AskUserQuestion / custom tools by bare name.
+ * bare tool name (e.g. `mcp__custom__get_weather` → `get_weather`).
+ * `mcp__kernel__AskUserQuestion` is still stripped for old transcripts.
  */
 function stripMcpToolPrefix(toolName: string): string {
   if (toolName.startsWith('mcp__custom__')) return toolName.slice('mcp__custom__'.length)

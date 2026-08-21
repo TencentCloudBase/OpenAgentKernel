@@ -83,19 +83,19 @@ describe('buildClaudeQueryOptions — skills', () => {
   // 否则 SDK 加载了 skill 元数据但模型无工具可 invoke(用户实测发现的 bug)
   // SDK 文档:"If you also pass an explicit tools list, include 'Skill' in that list
   //          so Claude can invoke skills."
-  it('skills.enabled set → tools includes "Skill"', () => {
+  it('skills.enabled set → tools includes AskUserQuestion and Skill', () => {
     const { options } = buildClaudeQueryOptions({ ...baseConfig, skills: { enabled: 'all' } })
-    expect(options.tools).toEqual(['Skill'])
+    expect(options.tools).toEqual(['AskUserQuestion', 'Skill'])
   })
 
-  it('skills.enabled = string[] → tools includes "Skill"', () => {
+  it('skills.enabled = string[] → tools includes AskUserQuestion and Skill', () => {
     const { options } = buildClaudeQueryOptions({ ...baseConfig, skills: { enabled: ['greet'] } })
-    expect(options.tools).toEqual(['Skill'])
+    expect(options.tools).toEqual(['AskUserQuestion', 'Skill'])
   })
 
-  it('no skills config → tools is empty (existing behavior)', () => {
+  it('no skills config → tools is AskUserQuestion only', () => {
     const { options } = buildClaudeQueryOptions(baseConfig)
-    expect(options.tools).toEqual([])
+    expect(options.tools).toEqual(['AskUserQuestion'])
   })
 
   it('skills configured but cwd missing → emits warning', () => {
@@ -429,14 +429,19 @@ describe('buildClaudeQueryOptions — streaming', () => {
 // ─────────────────────────────────────────────────────────────────
 
 describe('buildClaudeQueryOptions — builtin tools', () => {
-  it('default (no sandbox) → tools = [] (all builtin disabled)', () => {
+  it('default (no sandbox) → tools = ["AskUserQuestion"]', () => {
     const { options } = buildClaudeQueryOptions(baseConfig)
-    expect(options.tools).toEqual([])
+    expect(options.tools).toEqual(['AskUserQuestion'])
   })
 
-  it('skills enabled, no sandbox → tools = ["Skill"]', () => {
+  it('skills enabled, no sandbox → tools = ["AskUserQuestion", "Skill"]', () => {
     const { options } = buildClaudeQueryOptions({ ...baseConfig, cwd: os.tmpdir(), skills: { enabled: 'all' } })
-    expect(options.tools).toEqual(['Skill'])
+    expect(options.tools).toEqual(['AskUserQuestion', 'Skill'])
+  })
+
+  it("sandboxMode='remote' → tools = ['AskUserQuestion'] (no FS builtins)", () => {
+    const { options } = buildClaudeQueryOptions(baseConfig, { sandboxMode: 'remote' })
+    expect(options.tools).toEqual(['AskUserQuestion'])
   })
 
   it("sandboxMode='local' → claude_code preset (provider auto-enables builtins)", () => {
@@ -450,5 +455,20 @@ describe('buildClaudeQueryOptions — builtin tools', () => {
       { sandboxMode: 'local' },
     )
     expect(options.tools).toEqual({ type: 'preset', preset: 'claude_code' })
+  })
+
+  it('clientToolStore present → does not inject mcpServers.kernel', () => {
+    const clientToolStore = {
+      put: async () => {},
+      get: async () => null,
+      delete: async () => {},
+    }
+    const { options } = buildClaudeQueryOptions(baseConfig, {
+      clientToolStore,
+      conversationId: 'c1',
+      hookLocalState: { hasInterruptedThisRun: false },
+    })
+    expect(options.mcpServers?.kernel).toBeUndefined()
+    expect(options.tools).toEqual(['AskUserQuestion'])
   })
 })

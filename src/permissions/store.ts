@@ -84,9 +84,9 @@ function buildKey(conversationId: string, toolUseId: string): string {
  *   1. SDK turn 1: PreToolUse hook denies a custom tool with a sentinel.
  *      ACP stream emits `tool_confirm`; turn ends.
  *   2. Host calls session.respondToolUse(...) → store.put(... result).
- *   3. SDK turn 2 (resume): PreToolUse hook scans the store, finds the
- *      result, allows + injects it via updatedInput. The wrapped MCP stub
- *      returns the injected value as the real tool_result.
+ *   3. SDK turn 2 (resume): custom-tool stubs scan the store and return the
+ *      host result. Native AskUserQuestion instead gets `answers` via the
+ *      PreToolUse hook's updatedInput.
  */
 export class InMemoryClientToolStore implements ClientToolResultStore {
   private readonly entries = new Map<string, PendingClientToolResult>()
