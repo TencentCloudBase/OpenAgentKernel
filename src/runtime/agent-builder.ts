@@ -10,9 +10,9 @@
  *   - mcpServers 注入（PR #5，对齐 Claude SDK 4 种形态）
  *   - sandbox MCP / cloudbase MCP 注入（PR #6/#6.5）
  *   - permissions HITL（PR #7.0）：requireApproval + PreToolUse hook 注入 + permissionMode 处理
+ *   - canUseTool no-op：仅打开 CLI AskUserQuestion（HITL 仍走 PreToolUse + store + resume）
  *
  * 未支持（后续 PR 接入）：
- *   - canUseTool / 更复杂权限策略（PR #7.1+）
  *   - hooks 业务旁路（PR #8）
  *   - handoffs / agents 注入                    → PR #2+ 后续
  */
@@ -22,6 +22,7 @@ import { mkdirSync, realpathSync } from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import type {
+  CanUseTool,
   HookCallback as SdkHookCallback,
   Options as ClaudeOptions,
   McpServerConfig as SdkMcpServerConfig,
@@ -431,6 +432,10 @@ export function buildClaudeQueryOptions(
     // 因此始终 bypass SDK 的内置权限系统，让 Hook 全权负责。
     permissionMode: 'bypassPermissions' as const,
     allowDangerouslySkipPermissions: true,
+    // 非交互 SDK 会话里 CLI 会关掉 AskUserQuestion,除非设了 --permission-prompt-tool。
+    // 传 canUseTool 会让 SDK 带上 stdio prompt tool,从而 isEnabled()=true。
+    // bypassPermissions 下这个回调通常不会被调用;HITL 仍走 PreToolUse。
+    canUseTool: enableAskUserQuestionSurface,
     // ── 流式:始终开启 includePartialMessages(AcpStreamAdapter 处理增量)──
     // SDK 只有此项为 true 才 emit stream_event(增量 chunk);adapter 据此发 agent_message_chunk。
     // ── 内置工具(AskUserQuestion 始终挂;其余默认禁用,local provider 自动开)──
@@ -471,6 +476,11 @@ export function buildClaudeQueryOptions(
  * - 'none'   : 无沙箱(纯对话,或 workspacePersist 独立持久化)
  */
 export type SandboxMode = 'local' | 'remote' | 'none'
+
+const enableAskUserQuestionSurface: CanUseTool = async (_toolName, input) => ({
+  behavior: 'allow',
+  updatedInput: input,
+})
 
 /**
  * 解析 SDK 内置工具集(options.tools)。

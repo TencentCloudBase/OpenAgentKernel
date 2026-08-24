@@ -471,4 +471,15 @@ describe('buildClaudeQueryOptions — builtin tools', () => {
     expect(options.mcpServers?.kernel).toBeUndefined()
     expect(options.tools).toEqual(['AskUserQuestion'])
   })
+
+  it('always sets no-op canUseTool so CLI enables AskUserQuestion', async () => {
+    const { options } = buildClaudeQueryOptions(baseConfig)
+    expect(typeof options.canUseTool).toBe('function')
+    const result = await options.canUseTool!('AskUserQuestion', { questions: [] }, {
+      signal: AbortSignal.abort(),
+      toolUseID: 't1',
+      requestId: 'r1',
+    })
+    expect(result).toEqual({ behavior: 'allow', updatedInput: { questions: [] } })
+  })
 })
