@@ -483,3 +483,121 @@ describe('buildClaudeQueryOptions — builtin tools', () => {
     expect(result).toEqual({ behavior: 'allow', updatedInput: { questions: [] } })
   })
 })
+
+// ─────────────────────────────────────────────────────────────────
+// ModelSpec.options 透传到 Claude SDK query() options
+// ─────────────────────────────────────────────────────────────────
+
+describe('buildClaudeQueryOptions — ModelSpec.options', () => {
+  it('string model → no provider overrides', () => {
+    const { options } = buildClaudeQueryOptions(baseConfig)
+    expect(options.thinking).toBeUndefined()
+    expect(options.effort).toBeUndefined()
+    expect(options.extraArgs).toBeUndefined()
+    expect(options.maxTurns).toBeUndefined()
+  })
+
+  it('forwards thinking / effort / maxTurns / extraArgs / fallbackModel', () => {
+    const { options } = buildClaudeQueryOptions({
+      ...baseConfig,
+      model: {
+        id: 'glm-5.1',
+        options: {
+          thinking: { type: 'disabled' },
+          effort: 'low',
+          maxTurns: 8,
+          fallbackModel: 'glm-4.7',
+          extraArgs: { temperature: '0.2' },
+        },
+      },
+    })
+    expect(options.model).toBe('glm-5.1')
+    expect(options.thinking).toEqual({ type: 'disabled' })
+    expect(options.effort).toBe('low')
+    expect(options.maxTurns).toBe(8)
+    expect(options.fallbackModel).toBe('glm-4.7')
+    expect(options.extraArgs).toEqual({ temperature: '0.2' })
+  })
+
+  it('merges options.env but kernel auth / config dir still win', () => {
+    const { options } = buildClaudeQueryOptions({
+      ...baseConfig,
+      model: {
+        id: 'glm-5.1',
+        apiKey: 'explicit-model-key',
+        apiBaseUrl: 'https://example.com/v1/anthropic',
+        options: {
+          env: {
+            API_TIMEOUT_MS: '120000',
+            MY_PROVIDER_FLAG: '1',
+            ANTHROPIC_AUTH_TOKEN: 'attacker-token',
+            ANTHROPIC_BASE_URL: 'https://evil.example',
+            CLAUDE_CONFIG_DIR: '/tmp/evil-claude',
+          },
+        },
+      },
+    })
+    expect(options.env?.MY_PROVIDER_FLAG).toBe('1')
+    expect(options.env?.API_TIMEOUT_MS).toBe('120000')
+    expect(options.env?.ANTHROPIC_AUTH_TOKEN).toBe('explicit-model-key')
+    expect(options.env?.ANTHROPIC_BASE_URL).toBe('https://example.com/v1/anthropic')
+    expect(options.env?.CLAUDE_CONFIG_DIR).not.toBe('/tmp/evil-claude')
+  })
+
+  it('forwards remaining allowlist keys (betas / outputFormat / budgets)', () => {
+    const { options } = buildClaudeQueryOptions({
+      ...baseConfig,
+      model: {
+        id: 'glm-5.1',
+        options: {
+          betas: ['context-1m-2025-08-07'],
+          outputFormat: { type: 'json_schema', schema: { type: 'object' } },
+          maxThinkingTokens: 2048,
+          maxBudgetUsd: 1.5,
+          taskBudget: { total: 10_000 },
+        },
+      },
+    })
+    expect(options.betas).toEqual(['context-1m-2025-08-07'])
+    expect(options.outputFormat).toEqual({ type: 'json_schema', schema: { type: 'object' } })
+    expect(options.maxThinkingTokens).toBe(2048)
+    expect(options.maxBudgetUsd).toBe(1.5)
+    expect(options.taskBudget).toEqual({ total: 10_000 })
+  })
+
+  it('drops keys outside the allowlist', () => {
+    const { options } = buildClaudeQueryOptions({
+      ...baseConfig,
+      model: {
+        id: 'glm-5.1',
+        options: {
+          model: 'should-not-win',
+          permissionMode: 'default',
+          tools: ['Bash'],
+          cwd: '/tmp/evil-cwd',
+          sandbox: { enabled: true },
+          plugins: [{ type: 'local', path: '/tmp/plugin' }],
+          systemPrompt: 'ignore me',
+          agents: { sneaky: { description: 'x', prompt: 'y' } },
+        },
+      },
+    })
+    expect(options.model).toBe('glm-5.1')
+    expect(options.permissionMode).toBe('bypassPermissions')
+    expect(options.tools).toEqual(['AskUserQuestion'])
+    expect(options.cwd).toBe(process.cwd())
+    expect(options.sandbox).toBeUndefined()
+    expect(options.plugins).toBeUndefined()
+    expect(options.systemPrompt).toBeUndefined()
+    expect(options.agents).toBeUndefined()
+  })
+
+  it('throws when model.options is not an object', () => {
+    expect(() =>
+      buildClaudeQueryOptions({
+        ...baseConfig,
+        model: { id: 'glm-5.1', options: 'nope' as unknown as Record<string, unknown> },
+      }),
+    ).toThrow(/model.options must be an object/)
+  })
+})

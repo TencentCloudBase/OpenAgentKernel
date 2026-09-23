@@ -151,6 +151,11 @@ createAgent({
     id: 'custom-model',
     apiKey: process.env.MY_MODEL_API_KEY,
     apiBaseUrl: 'https://example.com/v1/anthropic',
+    options: {
+      thinking: { type: 'disabled' },
+      effort: 'low',
+      extraArgs: { temperature: '0.2' },
+    },
   },
 })
 ```
@@ -552,7 +557,7 @@ await deleteUserMemoryFiles({
 | `id` | `string` | 是 | 模型 ID，如 `glm-5.1`。 |
 | `apiKey` | `string` | 否 | 自带 key。不传时读取 `CLOUDBASE_APIKEY`。 |
 | `apiBaseUrl` | `string` | 否 | 自带 endpoint。不传时使用 CloudBase AI gateway。 |
-| `options` | `Record<string, unknown>` | 否 | 预留给底层 provider 的额外配置。 |
+| `options` | `Record<string, unknown>` | 否 | 透传到 Claude Agent SDK `query()` options 的模型字段。允许 `thinking` / `effort` / `maxThinkingTokens` / `maxTurns` / `maxBudgetUsd` / `taskBudget` / `fallbackModel` / `betas` / `extraArgs` / `outputFormat`。`env` 与网关环境变量浅合并；其余键丢弃。 |
 
 ### `SessionConfig`
 

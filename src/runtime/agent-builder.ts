@@ -11,6 +11,7 @@
  *   - sandbox MCP / cloudbase MCP 注入（PR #6/#6.5）
  *   - permissions HITL（PR #7.0）：requireApproval + PreToolUse hook 注入 + permissionMode 处理
  *   - canUseTool no-op：仅打开 CLI AskUserQuestion（HITL 仍走 PreToolUse + store + resume）
+ *   - ModelSpec.options 按 allowlist 透传到 Claude SDK query() options（thinking / effort / extraArgs 等）
  *
  * 未支持（后续 PR 接入）：
  *   - hooks 业务旁路（PR #8）
@@ -137,6 +138,9 @@ export function buildClaudeQueryOptions(
     envId: config.envId,
     model: config.model,
   })
+  const modelSpecOptions = readModelSpecOptions(config.model)
+  const extraModelEnv = extraEnvFromModelOptions(modelSpecOptions)
+  const providerQueryOverrides = providerQueryOptionOverrides(modelSpecOptions)
 
   // ── cwd / settingSources / userMemory 派生(spec §4.1 + §4.2 + §4.6)─────
   //
@@ -250,12 +254,15 @@ export function buildClaudeQueryOptions(
   // 透传给 SDK 子进程的环境变量
   const env: Record<string, string | undefined> = {
     ...process.env,
-    ANTHROPIC_BASE_URL: credential.baseUrl,
-    ANTHROPIC_AUTH_TOKEN: credential.apiKey,
-    ANTHROPIC_API_KEY: undefined,
     API_TIMEOUT_MS: String(DEFAULT_API_TIMEOUT_MS),
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     CLAUDE_AGENT_SDK_CLIENT_APP: `@cloudbase/open-agent-kernel/${PACKAGE_VERSION}`,
+    // ModelSpec.options.env 在网关凭证 / CLAUDE_CONFIG_DIR 之前合并：
+    // 可覆盖超时等 provider 参数，不能覆盖 ANTHROPIC_* / CLAUDE_CONFIG_DIR。
+    ...extraModelEnv,
+    ANTHROPIC_BASE_URL: credential.baseUrl,
+    ANTHROPIC_AUTH_TOKEN: credential.apiKey,
+    ANTHROPIC_API_KEY: undefined,
     // claude CLI 的"home":配置/sessions/锁文件/XDG state 等都落在这里。
     // 始终设置,避免回落到云函数里只读的宿主 $HOME/.claude(见 configDirOverride 注释)。
     CLAUDE_CONFIG_DIR: configDirOverride,
@@ -295,6 +302,7 @@ export function buildClaudeQueryOptions(
       sessionStore: enablePersist ? 'enabled' : 'disabled',
       cwd: effectiveCwd,
       claudeConfigDir: configDirOverride,
+      modelSpecOptionKeys: modelSpecOptions ? Object.keys(modelSpecOptions) : [],
     })
   }
 
@@ -401,6 +409,8 @@ export function buildClaudeQueryOptions(
       : undefined
 
   const options: ClaudeOptions = {
+    // ModelSpec.options 按 allowlist 铺一层；后面的 kernel 字段仍后写兜底。
+    ...providerQueryOverrides,
     model: credential.modelId,
     env,
     cwd: effectiveCwd,
@@ -468,6 +478,80 @@ export function buildClaudeQueryOptions(
 }
 
 // ─── 辅助 ────────────────────────────────────────────────────────
+
+/**
+ * ModelSpec.options 允许透传到 Claude SDK query() 的字段。
+ *
+ * 只收模型 / provider 相关项。会话、权限、工具、cwd、sandbox 走 AgentConfig 其他入口。
+ * `env` 单独浅合并，不在此集合里。
+ */
+const MODEL_PROVIDER_OPTION_KEYS = new Set<string>([
+  'thinking',
+  'effort',
+  'maxThinkingTokens',
+  'maxTurns',
+  'maxBudgetUsd',
+  'taskBudget',
+  'fallbackModel',
+  'betas',
+  'extraArgs',
+  'outputFormat',
+])
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/**
+ * 读取 ModelSpec.options。字符串 model 没有这份 bag；非法类型在 create/send 前 fail-fast。
+ */
+function readModelSpecOptions(model: AgentConfig['model']): Record<string, unknown> | undefined {
+  if (typeof model === 'string' || model == null) return undefined
+  const opts = model.options
+  if (opts == null) return undefined
+  if (!isPlainObject(opts)) {
+    throw new InvalidConfigError('AgentConfig.model.options must be an object')
+  }
+  return opts
+}
+
+/**
+ * ModelSpec.options.env → 子进程额外环境变量。
+ * 只接受 string / number / boolean / undefined；对象和数组忽略。
+ */
+function extraEnvFromModelOptions(
+  specOptions: Record<string, unknown> | undefined,
+): Record<string, string | undefined> {
+  if (!specOptions || !isPlainObject(specOptions.env)) return {}
+  const out: Record<string, string | undefined> = {}
+  for (const [key, value] of Object.entries(specOptions.env)) {
+    if (value === undefined) {
+      out[key] = undefined
+      continue
+    }
+    if (typeof value === 'string') {
+      out[key] = value
+      continue
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      out[key] = String(value)
+    }
+  }
+  return out
+}
+
+/**
+ * 从 ModelSpec.options 抽出 allowlist 内的键，铺到 Claude SDK query options。
+ */
+function providerQueryOptionOverrides(specOptions: Record<string, unknown> | undefined): Partial<ClaudeOptions> {
+  if (!specOptions) return {}
+  const rest: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(specOptions)) {
+    if (!MODEL_PROVIDER_OPTION_KEYS.has(key)) continue
+    rest[key] = value
+  }
+  return rest as Partial<ClaudeOptions>
+}
 
 /**
  * 沙箱模式 hint,影响内置工具默认开关 + cwdPersistEngine 互斥逻辑。

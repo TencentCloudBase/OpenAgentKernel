@@ -54,7 +54,16 @@ export interface ModelSpec {
   apiKey?: string
   /** 自带 key 时的 endpoint */
   apiBaseUrl?: string
-  /** 透传到底层 provider 的额外选项 */
+  /**
+   * 透传到 Claude Agent SDK `query()` options 的模型 / provider 字段。
+   *
+   * 允许：`thinking` / `effort` / `maxThinkingTokens` / `maxTurns` /
+   * `maxBudgetUsd` / `taskBudget` / `fallbackModel` / `betas` / `extraArgs` /
+   * `outputFormat`。
+   * `env` 会与 kernel 注入的网关环境变量浅合并；`ANTHROPIC_BASE_URL`、
+   * `ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CONFIG_DIR` 仍由 kernel 覆盖。
+   * 其余键（`sandbox` / `plugins` / `tools` / `permissionMode` 等）会被丢弃。
+   */
   options?: Record<string, unknown>
 }
 
