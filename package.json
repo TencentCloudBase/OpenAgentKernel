@@ -67,13 +67,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/TencentCloudBase/OpenVibeCoding.git",
-    "directory": "packages/open-agent-kernel"
+    "url": "git+https://github.com/TencentCloudBase/OpenAgentKernel.git"
   },
   "bugs": {
-    "url": "https://github.com/TencentCloudBase/OpenVibeCoding/issues"
+    "url": "https://github.com/TencentCloudBase/OpenAgentKernel/issues"
   },
-  "homepage": "https://github.com/TencentCloudBase/OpenVibeCoding/tree/main/packages/open-agent-kernel#readme",
+  "homepage": "https://github.com/TencentCloudBase/OpenAgentKernel#readme",
   "publishConfig": {
     "access": "public"
   }

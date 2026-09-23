@@ -1,13 +1,21 @@
-# Publish @cloudbase/open-agent-kernel to npm.
+# Stage @cloudbase/open-agent-kernel for npm publish.
 #
-# Required repository secret (Settings → Secrets and variables → Actions):
-#   NPM_TOKEN  npm Automation or Granular Access Token with publish permission
-#              for @cloudbase/open-agent-kernel
+# `npm stage publish` uploads the tarball but does not make it installable.
+# A maintainer approves it with 2FA (`npm stage approve <id>`, or the
+# Staged Packages tab on npmjs.com) before the version goes live.
 #
-# Trigger: Actions → Publish to npm → Run workflow
-# Default bump is prerelease (current line is 0.1.0-beta.x, dist-tag: beta).
+# Requires npm CLI >= 11.15.0 and Node.js >= 22.14.
+#
+# Authentication is npm Trusted Publishing (GitHub Actions OIDC). No NPM_TOKEN.
+# On the package, the trusted publisher must be:
+#   owner/repo:  TencentCloudBase/OpenAgentKernel
+#   workflow:    publish.yml
+#   permission:  npm stage publish only
+# package.json repository.url must point at that same GitHub repository.
+#
+# Trigger: Actions → Stage publish to npm → Run workflow
 
-name: Publish to npm
+name: Stage publish to npm
 
 on:
   workflow_dispatch:
@@ -37,6 +45,7 @@ concurrency:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   publish:
@@ -61,9 +70,12 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
           cache: pnpm
+
+      - name: Install npm with staged publishing
+        run: npm install -g npm@^11.15.0
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -101,10 +113,8 @@ jobs:
           fi
           echo "Bumped to v${VERSION}"
 
-      - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: pnpm publish --access public --no-git-checks --tag "${{ steps.bump.outputs.tag }}"
+      - name: Stage publish to npm
+        run: npm stage publish --access public --git-checks=false --tag "${{ steps.bump.outputs.tag }}"
 
       - name: Push version commit and tag
         run: git push origin HEAD --follow-tags
@@ -112,9 +122,12 @@ jobs:
       - name: Summary
         run: |
           {
-            echo "## Published @cloudbase/open-agent-kernel@${{ steps.bump.outputs.version }}"
+            echo "## Staged @cloudbase/open-agent-kernel@${{ steps.bump.outputs.version }}"
+            echo ""
+            echo "The version is not installable until a maintainer approves it with 2FA."
             echo ""
             echo "- bump: \`${{ inputs.bump }}\`"
             echo "- npm dist-tag: \`${{ steps.bump.outputs.tag }}\`"
-            echo "- package: https://www.npmjs.com/package/@cloudbase/open-agent-kernel"
+            echo "- approve: \`npm stage list @cloudbase/open-agent-kernel\` then \`npm stage approve <id>\`"
+            echo "- or: https://www.npmjs.com/package/@cloudbase/open-agent-kernel (Staged Packages)"
           } >> "$GITHUB_STEP_SUMMARY"
